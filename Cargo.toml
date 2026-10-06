@@ -5,6 +5,7 @@ edition = "2024"
 default-run = "fps_prototype"
 
 [dependencies]
+arboard = "3.6.1"
 bevy = { version = "0.19.1", features = ["jpeg", "wav"] }
 
 # Recommended by Bevy for fast iterative builds without dynamic linking setup.

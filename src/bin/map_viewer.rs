@@ -1,8 +1,10 @@
+use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
-use bevy::render::view::window::screenshot::{save_to_disk, Screenshot};
+use bevy::render::render_resource::TextureFormat;
+use bevy::render::view::window::screenshot::{save_to_disk, Screenshot, ScreenshotCaptured};
 use bevy::pbr::{DistanceFog, FogFalloff};
 use fps_prototype::map::TerrainMap;
 use fps_prototype::settlement::SettlementRoot;
@@ -29,6 +31,8 @@ struct Hud;
 
 #[derive(Resource)]
 struct ScreenshotRequest(String);
+
+struct ClipboardHandle(Option<arboard::Clipboard>);
 
 fn main() {
     let seed = std::env::args()
@@ -62,6 +66,7 @@ fn main() {
             distance: distance.unwrap_or(4500.0),
         })
         .insert_resource(TerrainMap::generate(seed))
+        .insert_non_send(ClipboardHandle(arboard::Clipboard::new().ok()))
         .insert_resource(GlobalAmbientLight {
             color: Color::WHITE,
             brightness: 300.0,
@@ -70,7 +75,7 @@ fn main() {
         .add_systems(Startup, (setup_scene, setup_hud))
         .add_systems(
             Update,
-            (handle_keys, orbit_input, regenerate, update_camera, update_hud).chain(),
+            (handle_keys, copy_screenshot_key, orbit_input, regenerate, update_camera, update_hud).chain(),
         )
         .run();
 }
@@ -150,6 +155,48 @@ fn handle_keys(keys: Res<ButtonInput<KeyCode>>, mut viewer: ResMut<Viewer>) {
     }
 }
 
+fn copy_screenshot_key(keys: Res<ButtonInput<KeyCode>>, mut commands: Commands) {
+    if keys.just_pressed(KeyCode::KeyC) {
+        commands
+            .spawn(Screenshot::primary_window())
+            .observe(copy_screenshot_to_clipboard);
+    }
+}
+
+fn copy_screenshot_to_clipboard(
+    captured: On<ScreenshotCaptured>,
+    mut clipboard: NonSendMut<ClipboardHandle>,
+) {
+    let image = &captured.image;
+    let Some(data) = image.data.as_ref() else {
+        warn!("screenshot has no pixel data");
+        return;
+    };
+    let mut rgba = data.clone();
+    if matches!(
+        image.texture_descriptor.format,
+        TextureFormat::Bgra8Unorm | TextureFormat::Bgra8UnormSrgb
+    ) {
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+    }
+    let Some(board) = clipboard.0.as_mut() else {
+        warn!("no clipboard available");
+        return;
+    };
+    let size = image.texture_descriptor.size;
+    let result = board.set_image(arboard::ImageData {
+        width: size.width as usize,
+        height: size.height as usize,
+        bytes: Cow::Owned(rgba),
+    });
+    match result {
+        Ok(()) => info!("screenshot copied to clipboard"),
+        Err(err) => warn!("could not copy screenshot: {err}"),
+    }
+}
+
 fn new_random_seed() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -218,7 +265,7 @@ fn update_hud(viewer: Res<Viewer>, map: Res<TerrainMap>, mut hud: Query<&mut Tex
     text.0 = format!(
         "Seed {}\nRelief: {:.0} to {:.0} m   River: {:.1} km   POIs: {}\n\n\
          N new seed   [ / ] previous / next seed\n\
-         Drag: orbit   Wheel: zoom",
+         Drag: orbit   Wheel: zoom   C: copy screenshot",
         viewer.seed,
         low,
         high,
