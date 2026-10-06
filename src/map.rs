@@ -11,8 +11,8 @@ const VERTS: usize = CELLS + 1;
 const COUNT: usize = VERTS * VERTS;
 const NONE: u32 = u32::MAX;
 
-const FILL_EPSILON: f32 = 0.001;
-const RIVER_SOURCE_MARGIN: f32 = 80.0;
+const RIVER_UPHILL_PENALTY: f32 = 6.0;
+const RIVER_ELEVATION_SCALE: f32 = 12.0;
 const WATER_SURFACE_BELOW_FILL: f32 = 0.5;
 const RIVER_BED_BELOW_WATER: f32 = 1.2;
 const CARVE_CORE: f32 = CELL * 0.5;
@@ -70,11 +70,16 @@ impl TerrainMap {
             *h *= EROSION_HEIGHT_UNIT;
         }
 
-        let (filled, _order, receiver) = priority_flood(&base);
-        let is_river = main_river(&filled, &receiver);
-        let river_cells = is_river.iter().filter(|&&r| r).count();
-
-        let level: Vec<f32> = filled.iter().map(|f| f - WATER_SURFACE_BELOW_FILL).collect();
+        let path = river_path(&base, &mut Rng(seed ^ 0x51DE_0001));
+        let mut is_river = vec![false; COUNT];
+        let mut level: Vec<f32> = base.iter().map(|h| h - WATER_SURFACE_BELOW_FILL).collect();
+        let mut surface = f32::MAX;
+        for &i in &path {
+            is_river[i] = true;
+            surface = surface.min(base[i] - WATER_SURFACE_BELOW_FILL);
+            level[i] = surface;
+        }
+        let river_cells = path.len();
         let (river_distance, river_level) = distance_to_rivers(&is_river, &level);
 
         let heights: Vec<f32> = (0..COUNT)
@@ -209,63 +214,66 @@ fn neighbours(idx: usize) -> impl Iterator<Item = usize> {
         })
 }
 
-fn is_boundary(idx: usize) -> bool {
+fn on_edge(idx: usize, side: usize) -> bool {
     let (ix, iz) = (idx % VERTS, idx / VERTS);
-    ix == 0 || iz == 0 || ix == VERTS - 1 || iz == VERTS - 1
+    match side {
+        0 => iz == 0,
+        1 => iz == VERTS - 1,
+        2 => ix == 0,
+        _ => ix == VERTS - 1,
+    }
 }
 
-// Priority-Flood (Barnes et al. 2014): floods inward from the map edge, which drains
-// every basin. Returns the filled surface, the pop order and each cell's receiver.
-fn priority_flood(base: &[f32]) -> (Vec<f32>, Vec<u32>, Vec<u32>) {
-    let mut filled = base.to_vec();
-    let mut receiver = vec![NONE; COUNT];
-    let mut visited = vec![false; COUNT];
-    let mut order = Vec::with_capacity(COUNT);
+// The main river enters at a random point on one edge and crosses to the opposite edge
+// along the cheapest path, where climbing costs more than flowing, so it follows low
+// ground and the valleys that erosion carved.
+fn river_path(heights: &[f32], rng: &mut Rng) -> Vec<usize> {
+    let side = (rng.range(0.0, 4.0) as usize).min(3);
+    let along = (rng.range(0.2, 0.8) * (VERTS - 1) as f32) as usize;
+    let source = match side {
+        0 => along,
+        1 => (VERTS - 1) * VERTS + along,
+        2 => along * VERTS,
+        _ => along * VERTS + VERTS - 1,
+    };
+    let target_side = side ^ 1;
+
+    let mut cost = vec![f32::MAX; COUNT];
+    let mut previous = vec![NONE; COUNT];
     let mut heap = BinaryHeap::new();
-
-    for idx in (0..COUNT).filter(|&i| is_boundary(i)) {
-        visited[idx] = true;
-        heap.push(Reverse((base[idx].to_bits(), idx as u32)));
-    }
-
+    cost[source] = 0.0;
+    heap.push(Reverse((0u32, source as u32)));
+    let mut end = None;
     while let Some(Reverse((_, current))) = heap.pop() {
         let c = current as usize;
-        order.push(current);
+        if on_edge(c, target_side) {
+            end = Some(c);
+            break;
+        }
         for n in neighbours(c) {
-            if visited[n] {
-                continue;
+            let diagonal = (n % VERTS != c % VERTS) && (n / VERTS != c / VERTS);
+            let step = if diagonal { CELL * std::f32::consts::SQRT_2 } else { CELL };
+            let climb = (heights[n] - heights[c]).max(0.0) / CELL;
+            let next_cost = cost[c] + step * (1.0 + RIVER_UPHILL_PENALTY * climb) * (1.0 + heights[n].max(0.0) / RIVER_ELEVATION_SCALE);
+            if next_cost < cost[n] {
+                cost[n] = next_cost;
+                previous[n] = current;
+                heap.push(Reverse((next_cost.to_bits(), n as u32)));
             }
-            visited[n] = true;
-            receiver[n] = current;
-            filled[n] = base[n].max(filled[c] + FILL_EPSILON);
-            heap.push(Reverse((filled[n].to_bits(), n as u32)));
         }
     }
-    (filled, order, receiver)
-}
 
-// The main river rises at the highest interior point and follows the flow route down
-// to the map edge, so it is one continuous channel draining the eroded terrain.
-fn main_river(filled: &[f32], receiver: &[u32]) -> Vec<bool> {
-    let margin = (RIVER_SOURCE_MARGIN / CELL) as usize;
-    let source = (0..COUNT)
-        .filter(|&i| {
-            let (ix, iz) = (i % VERTS, i / VERTS);
-            ix >= margin && iz >= margin && ix < VERTS - margin && iz < VERTS - margin
-        })
-        .max_by(|&a, &b| filled[a].total_cmp(&filled[b]))
-        .expect("map has interior cells");
-
-    let mut is_river = vec![false; COUNT];
-    let mut current = source;
+    let mut path = Vec::new();
+    let mut current = end.expect("river reaches the opposite edge");
     loop {
-        is_river[current] = true;
-        match receiver[current] {
-            NONE => break,
-            next => current = next as usize,
+        path.push(current);
+        if current == source {
+            break;
         }
+        current = previous[current] as usize;
     }
-    is_river
+    path.reverse();
+    path
 }
 
 const DROPLETS: usize = 120_000;
