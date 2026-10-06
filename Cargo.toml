@@ -1,0 +1,23 @@
+[package]
+name = "fps_prototype"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = { version = "0.18.1", features = ["wav"] }
+
+# Recommended by Bevy for fast iterative builds without dynamic linking setup.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[dev-dependencies]
+cucumber = "0.22"
+tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread"] }
+
+[[test]]
+name = "e2e"
+path = "tests/e2e/main.rs"
+harness = false
