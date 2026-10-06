@@ -36,7 +36,7 @@ fn river_drains_off_the_map_edge() {
             .any(|&(ix, iz)| map.water_level(ix, iz).is_some())
     });
     assert!(on_edge, "no river reaches the map edge");
-    assert!(map.river_length() >= 3500.0, "river is only {}m long", map.river_length());
+    assert!(map.river_length() >= std::f32::consts::PI * 3500.0, "river is only {}m long", map.river_length());
 }
 
 #[test]
@@ -118,7 +118,7 @@ fn every_settlement_has_water_nearby() {
 fn river_has_a_minimum_length() {
     for seed in [MAP_SEED, 1, 2, 3] {
         let map = TerrainMap::generate(seed);
-        assert!(map.river_length() >= 3500.0, "seed {seed}: river is {}m", map.river_length());
+        assert!(map.river_length() >= std::f32::consts::PI * 3500.0, "seed {seed}: river is {}m", map.river_length());
     }
 }
 

@@ -1,5 +1,3 @@
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
 
 use bevy::prelude::*;
 
@@ -9,11 +7,7 @@ pub const CELL: f32 = 10.0;
 pub const CELLS: usize = (MAP_SIZE / CELL) as usize;
 const VERTS: usize = CELLS + 1;
 const COUNT: usize = VERTS * VERTS;
-const NONE: u32 = u32::MAX;
 
-const RIVER_UPHILL_PENALTY: f32 = 6.0;
-const RIVER_ELEVATION_SCALE: f32 = 12.0;
-const RIVER_WIGGLE: f32 = 1.6;
 const RIVER_MIN_SPAN: f32 = 3500.0;
 const VALLEY_DEPTH: f32 = 22.0;
 const VALLEY_FLAT: f32 = 30.0;
@@ -68,7 +62,7 @@ impl TerrainMap {
                 raw_height(grid_pos(ix, iz), seed, &hills)
             })
             .collect();
-        let path = river_path(&base, seed, &mut Rng(seed ^ 0x51DE_0001));
+        let path = river_path(&mut Rng(seed ^ 0x51DE_0001));
         carve_valley(&mut base, &path);
         for h in &mut base {
             *h /= EROSION_HEIGHT_UNIT;
@@ -219,31 +213,66 @@ fn raw_height(p: Vec2, seed: u64, hills: &[Hill]) -> f32 {
     h
 }
 
-fn neighbours(idx: usize) -> impl Iterator<Item = usize> {
-    let (ix, iz) = ((idx % VERTS) as isize, (idx / VERTS) as isize);
-    (-1..=1isize)
-        .flat_map(move |dz| (-1..=1isize).map(move |dx| (dx, dz)))
-        .filter(|&(dx, dz)| (dx, dz) != (0, 0))
-        .filter_map(move |(dx, dz)| {
-            let (x, z) = (ix + dx, iz + dz);
-            let inside = (0..VERTS as isize).contains(&x) && (0..VERTS as isize).contains(&z);
-            inside.then(|| z as usize * VERTS + x as usize)
-        })
-}
+// The main river is a sinuous curve between two points on different edges. Its
+// amplitude is chosen so the channel's length is close to pi times the straight-line
+// distance, giving a strongly meandering river. The valley is then cut along it.
+fn river_path(rng: &mut Rng) -> Vec<usize> {
+    let max = (VERTS - 1) as f32;
+    let edge_point = |side: usize, along: f32| match side {
+        0 => Vec2::new(along * max, 0.0),
+        1 => Vec2::new(along * max, max),
+        2 => Vec2::new(0.0, along * max),
+        _ => Vec2::new(max, along * max),
+    };
+    let (a, b) = loop {
+        let side = (rng.range(0.0, 4.0) as usize).min(3);
+        let target_side = (side + 1 + (rng.range(0.0, 3.0) as usize).min(2)) % 4;
+        let a = edge_point(side, rng.range(0.2, 0.8));
+        let b = edge_point(target_side, rng.range(0.2, 0.8));
+        if a.distance(b) * CELL >= RIVER_MIN_SPAN {
+            break (a, b);
+        }
+    };
 
-fn on_edge(idx: usize, side: usize) -> bool {
-    let (ix, iz) = (idx % VERTS, idx / VERTS);
-    match side {
-        0 => iz == 0,
-        1 => iz == VERTS - 1,
-        2 => ix == 0,
-        _ => ix == VERTS - 1,
+    let chord = a.distance(b);
+    let dir = (b - a) / chord;
+    let normal = Vec2::new(-dir.y, dir.x);
+    let cycles = 2.0 + (rng.range(0.0, 3.0)).floor();
+    let point = |t: f32, amp: f32| {
+        let taper = (std::f32::consts::PI * t).sin();
+        let wiggle = amp * taper * (std::f32::consts::TAU * cycles * t).sin();
+        a + dir * (t * chord) + normal * wiggle
+    };
+    let length_of = |amp: f32| {
+        let steps = 2000;
+        (1..=steps)
+            .map(|i| point((i - 1) as f32 / steps as f32, amp).distance(point(i as f32 / steps as f32, amp)))
+            .sum::<f32>()
+    };
+    let target = std::f32::consts::PI * chord;
+    let (mut lo, mut hi) = (0.0, chord * 0.5);
+    for _ in 0..40 {
+        let mid = (lo + hi) / 2.0;
+        if length_of(mid) < target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
     }
+    let amp = (lo + hi) / 2.0;
+
+    let samples = (chord * 8.0) as usize;
+    let mut path: Vec<usize> = Vec::new();
+    for i in 0..=samples {
+        let p = point(i as f32 / samples as f32, amp).clamp(Vec2::ZERO, Vec2::splat(max));
+        let idx = (p.y.round() as usize) * VERTS + p.x.round() as usize;
+        if path.last() != Some(&idx) {
+            path.push(idx);
+        }
+    }
+    path
 }
 
-// The main river enters at a random point on one edge and crosses to the opposite edge
-// along the cheapest path, where climbing costs more than flowing, so it follows low
-// ground and the valleys that erosion carved.
 // Cuts a broad valley floor along the river so erosion refines an existing valley
 // rather than having to create one.
 fn carve_valley(heights: &mut [f32], path: &[usize]) {
@@ -267,61 +296,6 @@ fn grid_pos_of(idx: usize) -> Vec2 {
     grid_pos(idx % VERTS, idx / VERTS)
 }
 
-fn river_path(heights: &[f32], seed: u64, rng: &mut Rng) -> Vec<usize> {
-    let side = (rng.range(0.0, 4.0) as usize).min(3);
-    let along = (rng.range(0.2, 0.8) * (VERTS - 1) as f32) as usize;
-    let source = match side {
-        0 => along,
-        1 => (VERTS - 1) * VERTS + along,
-        2 => along * VERTS,
-        _ => along * VERTS + VERTS - 1,
-    };
-    let source_cell = (source % VERTS, source / VERTS);
-    let far_enough = |c: usize| {
-        let (x, z) = (c % VERTS, c / VERTS);
-        let (dx, dz) = (x as f32 - source_cell.0 as f32, z as f32 - source_cell.1 as f32);
-        (dx * dx + dz * dz).sqrt() * CELL >= RIVER_MIN_SPAN
-    };
-    let is_target = |c: usize| (0..4).any(|s| s != side && on_edge(c, s)) && far_enough(c);
-
-    let mut cost = vec![f32::MAX; COUNT];
-    let mut previous = vec![NONE; COUNT];
-    let mut heap = BinaryHeap::new();
-    cost[source] = 0.0;
-    heap.push(Reverse((0u32, source as u32)));
-    let mut end = None;
-    while let Some(Reverse((_, current))) = heap.pop() {
-        let c = current as usize;
-        if is_target(c) {
-            end = Some(c);
-            break;
-        }
-        for n in neighbours(c) {
-            let diagonal = (n % VERTS != c % VERTS) && (n / VERTS != c / VERTS);
-            let step = if diagonal { CELL * std::f32::consts::SQRT_2 } else { CELL };
-            let climb = (heights[n] - heights[c]).max(0.0) / CELL;
-            let wiggle = 1.0 + RIVER_WIGGLE * (value_noise((n % VERTS) as f32 / 6.0, (n / VERTS) as f32 / 6.0, seed) - 0.5);
-            let next_cost = cost[c] + step * wiggle * (1.0 + RIVER_UPHILL_PENALTY * climb) * (1.0 + heights[n].max(0.0) / RIVER_ELEVATION_SCALE);
-            if next_cost < cost[n] {
-                cost[n] = next_cost;
-                previous[n] = current;
-                heap.push(Reverse((next_cost.to_bits(), n as u32)));
-            }
-        }
-    }
-
-    let mut path = Vec::new();
-    let mut current = end.expect("river reaches the opposite edge");
-    loop {
-        path.push(current);
-        if current == source {
-            break;
-        }
-        current = previous[current] as usize;
-    }
-    path.reverse();
-    path
-}
 
 const DROPLETS: usize = 300_000;
 const DROPLET_LIFETIME: usize = 80;
