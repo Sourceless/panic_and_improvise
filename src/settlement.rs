@@ -65,8 +65,14 @@ pub fn spawn_settlements(
             .id();
         let mut rng = Rng::from_position(poi.position);
         let parts = match poi.kind {
-            PoiKind::Village => village(meshes, &palette, &mut rng),
-            PoiKind::Church => church(meshes, &palette),
+            PoiKind::Village => {
+                let church_offset = Vec3::new(
+                    poi.landmark.x - poi.position.x,
+                    map.height_at(poi.landmark) - ground,
+                    poi.landmark.y - poi.position.y,
+                );
+                village(meshes, &palette, &mut rng, church_offset)
+            }
             PoiKind::Farm => farm(meshes, &palette),
             PoiKind::Mill => mill(meshes, &palette),
         };
@@ -83,7 +89,7 @@ pub fn spawn_settlements(
     }
 }
 
-fn village(meshes: &mut Assets<Mesh>, palette: &Palette, rng: &mut Rng) -> Vec<Part> {
+fn village(meshes: &mut Assets<Mesh>, palette: &Palette, rng: &mut Rng, church_offset: Vec3) -> Vec<Part> {
     let mut parts = Vec::new();
     for i in 0..9 {
         for &row_z in &[-22.0_f32, -9.0, 9.0, 22.0] {
@@ -107,6 +113,10 @@ fn village(meshes: &mut Assets<Mesh>, palette: &Palette, rng: &mut Rng) -> Vec<P
                 rng.range(3.8, 4.4),
             );
         }
+    }
+    for mut part in church(meshes, palette) {
+        part.transform.translation += church_offset;
+        parts.push(part);
     }
     parts
 }

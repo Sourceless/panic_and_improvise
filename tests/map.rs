@@ -58,15 +58,13 @@ fn river_bed_sits_below_its_water() {
 fn map_has_points_of_interest_on_dry_land() {
     let map = map();
     assert!(map.pois.len() >= 8, "only {} POIs generated", map.pois.len());
-    for kind in [PoiKind::Village, PoiKind::Church, PoiKind::Farm, PoiKind::Mill] {
+    for kind in [PoiKind::Village, PoiKind::Farm, PoiKind::Mill] {
         assert!(map.pois.iter().any(|p| p.kind == kind), "no {kind:?} generated");
     }
     for poi in &map.pois {
         let inside = poi.position.x.abs() < HALF_SIZE && poi.position.y.abs() < HALF_SIZE;
         assert!(inside, "{:?} is outside the map at {:?}", poi.kind, poi.position);
-        if poi.kind != PoiKind::Church {
-            assert!(map.river_distance(poi.position) > 2.0, "{:?} sits in the river", poi.kind);
-        }
+        assert!(map.river_distance(poi.position) > 2.0, "{:?} sits in the river", poi.kind);
     }
 }
 

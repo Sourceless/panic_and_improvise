@@ -64,7 +64,7 @@ fn urban_zone_sits_around_villages() {
                 let near = map
                     .pois
                     .iter()
-                    .any(|poi| matches!(poi.kind, PoiKind::Village | PoiKind::Church) && poi.position.distance(p) < 150.0);
+                    .any(|poi| poi.kind == PoiKind::Village && poi.position.distance(p) < 150.0);
                 assert!(near, "urban cell at {:?} is not near a village", p);
             }
         }

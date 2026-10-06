@@ -26,6 +26,7 @@ const RIVER_FILL_OVERFLOW: f32 = 2.0;
 const RIVER_BED_BELOW_WATER: f32 = 1.5;
 const CARVE_CORE: f32 = CELL * 0.5;
 const CARVE_BANK: f32 = CELL * 4.0;
+const VILLAGE_CHURCH_SEARCH: f32 = 40.0;
 const POI_MIN_SPACING: f32 = 250.0;
 const SETTLEMENT_WATER_REACH: f32 = 500.0;
 
@@ -33,7 +34,6 @@ const SETTLEMENT_WATER_REACH: f32 = 500.0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PoiKind {
     Village,
-    Church,
     Farm,
     Mill,
 }
@@ -42,6 +42,7 @@ pub enum PoiKind {
 pub struct Poi {
     pub kind: PoiKind,
     pub position: Vec2,
+    pub landmark: Vec2,
 }
 
 #[derive(Resource)]
@@ -483,7 +484,6 @@ fn distance_to_rivers(is_river: &[bool], level: &[f32]) -> (Vec<f32>, Vec<f32>) 
 pub fn settlement_radius(kind: PoiKind) -> f32 {
     match kind {
         PoiKind::Village => 55.0,
-        PoiKind::Church => 14.0,
         PoiKind::Farm => 34.0,
         PoiKind::Mill => 10.0,
     }
@@ -492,9 +492,7 @@ pub fn settlement_radius(kind: PoiKind) -> f32 {
 fn place_pois(rng: &mut Rng, map: &TerrainMap) -> Vec<Poi> {
     let plan = [
         PoiKind::Village,
-        PoiKind::Church,
         PoiKind::Village,
-        PoiKind::Church,
         PoiKind::Village,
         PoiKind::Farm,
         PoiKind::Farm,
@@ -508,21 +506,35 @@ fn place_pois(rng: &mut Rng, map: &TerrainMap) -> Vec<Poi> {
     ];
     let mut pois: Vec<Poi> = Vec::new();
     for kind in plan {
-        let position = if kind == PoiKind::Church {
-            let village = pois.iter().rev().find(|p| p.kind == PoiKind::Village).copied();
-            match village {
-                Some(v) => v.position + Vec2::new(0.0, 26.0),
-                None => continue,
-            }
-        } else {
-            match find_site(rng, map, &pois, kind) {
-                Some(p) => p,
-                None => continue,
-            }
+        let Some(position) = find_site(rng, map, &pois, kind) else {
+            continue;
         };
-        pois.push(Poi { kind, position });
+        let landmark = if kind == PoiKind::Village {
+            highest_point(map, position, VILLAGE_CHURCH_SEARCH)
+        } else {
+            position
+        };
+        pois.push(Poi { kind, position, landmark });
     }
     pois
+}
+
+// The village church stands on the highest ground near the village centre.
+fn highest_point(map: &TerrainMap, centre: Vec2, radius: f32) -> Vec2 {
+    let n = map.grid_size();
+    let mut best = (f32::MIN, centre);
+    for iz in 0..n {
+        for ix in 0..n {
+            let p = grid_pos(ix, iz);
+            if p.distance(centre) <= radius {
+                let h = map.vertex_height(ix, iz);
+                if h > best.0 {
+                    best = (h, p);
+                }
+            }
+        }
+    }
+    best.1
 }
 
 fn find_site(rng: &mut Rng, map: &TerrainMap, existing: &[Poi], kind: PoiKind) -> Option<Vec2> {

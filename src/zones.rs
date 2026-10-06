@@ -131,7 +131,7 @@ impl ZoneMap {
         let villages: Vec<Vec2> = map
             .pois
             .iter()
-            .filter(|p| p.kind == PoiKind::Village || p.kind == PoiKind::Church)
+            .filter(|p| p.kind == PoiKind::Village)
             .map(|p| p.position)
             .collect();
         let farms: Vec<Vec2> = map
