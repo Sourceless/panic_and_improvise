@@ -1,23 +1,25 @@
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
 use bevy::prelude::*;
 
-pub const MAP_SIZE: f32 = 5000.0;
+pub const MAP_SIZE: f32 = 1000.0;
 pub const HALF_SIZE: f32 = MAP_SIZE / 2.0;
-pub const CELL: f32 = 10.0;
+pub const CELL: f32 = 4.0;
 pub const CELLS: usize = (MAP_SIZE / CELL) as usize;
 const VERTS: usize = CELLS + 1;
+const COUNT: usize = VERTS * VERTS;
+const NONE: u32 = u32::MAX;
 
-const RIVER_STEP: f32 = 50.0;
-const RIVER_CORE: f32 = 6.0;
-const RIVER_BANK: f32 = 30.0;
-const RIVER_BED_DROP: f32 = 1.5;
-const SPAWN_CLEARING: f32 = 200.0;
-const POI_MIN_SPACING: f32 = 500.0;
-
-#[derive(Clone, Copy, Debug)]
-pub struct RiverPoint {
-    pub pos: Vec2,
-    pub level: f32,
-}
+const FILL_EPSILON: f32 = 0.001;
+const RIVER_FRACTION: f32 = 0.03;
+const RIVER_MIN_ACCUMULATION: u32 = 25;
+const WATER_SURFACE_BELOW_FILL: f32 = 0.5;
+const RIVER_BED_BELOW_WATER: f32 = 1.2;
+const CARVE_CORE: f32 = CELL * 0.5;
+const CARVE_BANK: f32 = CELL * 4.0;
+const SPAWN_CLEARING: f32 = 60.0;
+const POI_MIN_SPACING: f32 = 150.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Hill {
@@ -44,7 +46,9 @@ pub struct Poi {
 pub struct TerrainMap {
     pub seed: u64,
     heights: Vec<f32>,
-    pub river: Vec<RiverPoint>,
+    water: Vec<Option<f32>>,
+    river_distance: Vec<f32>,
+    river_cells: usize,
     pub hills: Vec<Hill>,
     pub pois: Vec<Poi>,
 }
@@ -53,21 +57,40 @@ impl TerrainMap {
     pub fn generate(seed: u64) -> Self {
         let mut rng = Rng(seed);
         let hills = make_hills(&mut rng);
-        let river = make_river(&mut rng, &hills, seed);
 
-        let mut heights = Vec::with_capacity(VERTS * VERTS);
-        for iz in 0..VERTS {
-            for ix in 0..VERTS {
-                let p = grid_pos(ix, iz);
-                let base = base_height(p, seed, &hills);
-                heights.push(carve_river(p, base, &river));
-            }
-        }
+        let base: Vec<f32> = (0..COUNT)
+            .map(|idx| {
+                let (ix, iz) = (idx % VERTS, idx / VERTS);
+                base_height(grid_pos(ix, iz), seed, &hills)
+            })
+            .collect();
+
+        let (filled, order, receiver) = priority_flood(&base);
+        let accumulation = flow_accumulation(&order, &receiver);
+        let is_river = river_mask(&accumulation);
+        let river_cells = is_river.iter().filter(|&&r| r).count();
+
+        let level: Vec<f32> = filled.iter().map(|f| f - WATER_SURFACE_BELOW_FILL).collect();
+        let (river_distance, river_level) = distance_to_rivers(&is_river, &level);
+
+        let heights: Vec<f32> = (0..COUNT)
+            .map(|idx| {
+                let blend = 1.0 - smoothstep(CARVE_CORE, CARVE_BANK, river_distance[idx]);
+                let bed = base[idx].min(river_level[idx] - RIVER_BED_BELOW_WATER);
+                base[idx] + (bed - base[idx]) * blend
+            })
+            .collect();
+
+        let water = (0..COUNT)
+            .map(|idx| is_river[idx].then_some(level[idx]))
+            .collect();
 
         let mut map = TerrainMap {
             seed,
             heights,
-            river,
+            water,
+            river_distance,
+            river_cells,
             hills,
             pois: Vec::new(),
         };
@@ -90,23 +113,32 @@ impl TerrainMap {
         self.heights[iz * VERTS + ix]
     }
 
+    pub fn water_level(&self, ix: usize, iz: usize) -> Option<f32> {
+        self.water[iz * VERTS + ix]
+    }
+
+    pub fn river_distance(&self, p: Vec2) -> f32 {
+        let (ix, iz) = nearest_vertex(p);
+        self.river_distance[iz * VERTS + ix]
+    }
+
     pub fn grid_size(&self) -> usize {
         VERTS
     }
 
     pub fn river_length(&self) -> f32 {
-        self.river
-            .windows(2)
-            .map(|w| w[0].pos.distance(w[1].pos))
-            .sum()
+        self.river_cells as f32 * CELL
     }
 }
 
 pub fn grid_pos(ix: usize, iz: usize) -> Vec2 {
-    Vec2::new(
-        -HALF_SIZE + ix as f32 * CELL,
-        -HALF_SIZE + iz as f32 * CELL,
-    )
+    Vec2::new(-HALF_SIZE + ix as f32 * CELL, -HALF_SIZE + iz as f32 * CELL)
+}
+
+fn nearest_vertex(p: Vec2) -> (usize, usize) {
+    let ix = ((p.x + HALF_SIZE) / CELL).round().clamp(0.0, CELLS as f32) as usize;
+    let iz = ((p.y + HALF_SIZE) / CELL).round().clamp(0.0, CELLS as f32) as usize;
+    (ix, iz)
 }
 
 pub fn fbm(x: f32, z: f32, seed: u64, octaves: u32) -> f32 {
@@ -121,7 +153,7 @@ pub fn fbm(x: f32, z: f32, seed: u64, octaves: u32) -> f32 {
 }
 
 fn base_height(p: Vec2, seed: u64, hills: &[Hill]) -> f32 {
-    let lowland = fbm(p.x / 700.0, p.y / 700.0, seed, 4) * 40.0 + 15.0;
+    let lowland = fbm(p.x / 160.0, p.y / 160.0, seed, 4) * 14.0 + 6.0;
     let mut h = lowland;
     for hill in hills {
         let d = p.distance(hill.center) / hill.radius;
@@ -129,75 +161,141 @@ fn base_height(p: Vec2, seed: u64, hills: &[Hill]) -> f32 {
             h += hill.height * (1.0 - d * d).powi(2);
         }
     }
-    let clearing = smoothstep(SPAWN_CLEARING * 0.3, SPAWN_CLEARING, p.length());
-    h * clearing
+    h * smoothstep(SPAWN_CLEARING * 0.3, SPAWN_CLEARING, p.length())
 }
 
-fn carve_river(p: Vec2, base: f32, river: &[RiverPoint]) -> f32 {
-    let (dist, level) = nearest_river(p, river);
-    let blend = 1.0 - smoothstep(RIVER_CORE, RIVER_BANK, dist);
-    base + (level - RIVER_BED_DROP - base) * blend
+fn neighbours(idx: usize) -> impl Iterator<Item = usize> {
+    let (ix, iz) = ((idx % VERTS) as isize, (idx / VERTS) as isize);
+    (-1..=1isize)
+        .flat_map(move |dz| (-1..=1isize).map(move |dx| (dx, dz)))
+        .filter(|&(dx, dz)| (dx, dz) != (0, 0))
+        .filter_map(move |(dx, dz)| {
+            let (x, z) = (ix + dx, iz + dz);
+            let inside = (0..VERTS as isize).contains(&x) && (0..VERTS as isize).contains(&z);
+            inside.then(|| z as usize * VERTS + x as usize)
+        })
 }
 
-fn nearest_river(p: Vec2, river: &[RiverPoint]) -> (f32, f32) {
-    let mut best = (f32::MAX, 0.0);
-    for w in river.windows(2) {
-        let (a, b) = (w[0], w[1]);
-        let ab = b.pos - a.pos;
-        let t = ((p - a.pos).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
-        let d = p.distance(a.pos + ab * t);
-        if d < best.0 {
-            best = (d, a.level + (b.level - a.level) * t);
+fn is_boundary(idx: usize) -> bool {
+    let (ix, iz) = (idx % VERTS, idx / VERTS);
+    ix == 0 || iz == 0 || ix == VERTS - 1 || iz == VERTS - 1
+}
+
+// Priority-Flood (Barnes et al. 2014): floods inward from the map edge, which drains
+// every basin. Returns the filled surface, the pop order and each cell's receiver.
+fn priority_flood(base: &[f32]) -> (Vec<f32>, Vec<u32>, Vec<u32>) {
+    let mut filled = base.to_vec();
+    let mut receiver = vec![NONE; COUNT];
+    let mut visited = vec![false; COUNT];
+    let mut order = Vec::with_capacity(COUNT);
+    let mut heap = BinaryHeap::new();
+
+    for idx in (0..COUNT).filter(|&i| is_boundary(i)) {
+        visited[idx] = true;
+        heap.push(Reverse((base[idx].to_bits(), idx as u32)));
+    }
+
+    while let Some(Reverse((_, current))) = heap.pop() {
+        let c = current as usize;
+        order.push(current);
+        for n in neighbours(c) {
+            if visited[n] {
+                continue;
+            }
+            visited[n] = true;
+            receiver[n] = current;
+            filled[n] = base[n].max(filled[c] + FILL_EPSILON);
+            heap.push(Reverse((filled[n].to_bits(), n as u32)));
         }
     }
-    best
+    (filled, order, receiver)
+}
+
+// D8 flow accumulation: each cell passes its catchment to its receiver, visiting
+// cells from highest to lowest so every cell is complete before it drains.
+fn flow_accumulation(order: &[u32], receiver: &[u32]) -> Vec<u32> {
+    let mut acc = vec![1u32; COUNT];
+    for &n in order.iter().rev() {
+        let r = receiver[n as usize];
+        if r != NONE {
+            acc[r as usize] += acc[n as usize];
+        }
+    }
+    acc
+}
+
+fn river_mask(accumulation: &[u32]) -> Vec<bool> {
+    let outlet_max = (0..COUNT)
+        .filter(|&i| is_boundary(i))
+        .map(|i| accumulation[i])
+        .max()
+        .unwrap_or(0);
+    let threshold = ((outlet_max as f32 * RIVER_FRACTION) as u32).max(RIVER_MIN_ACCUMULATION);
+    accumulation.iter().map(|&a| a >= threshold).collect()
+}
+
+// Two-pass chamfer distance transform that also carries each cell's nearest river level.
+fn distance_to_rivers(is_river: &[bool], level: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    let mut dist = vec![f32::MAX; COUNT];
+    let mut carried = vec![0.0; COUNT];
+    for idx in 0..COUNT {
+        if is_river[idx] {
+            dist[idx] = 0.0;
+            carried[idx] = level[idx];
+        }
+    }
+    let step = |dx: isize, dz: isize| if dx != 0 && dz != 0 { CELL * 1.414 } else { CELL };
+    let relax = |dist: &mut Vec<f32>, carried: &mut Vec<f32>, idx: usize, nb: usize, dx: isize, dz: isize| {
+        let candidate = dist[nb] + step(dx, dz);
+        if candidate < dist[idx] {
+            dist[idx] = candidate;
+            carried[idx] = carried[nb];
+        }
+    };
+    for iz in 0..VERTS {
+        for ix in 0..VERTS {
+            let idx = iz * VERTS + ix;
+            for (dx, dz) in [(-1isize, -1isize), (0, -1), (1, -1), (-1, 0)] {
+                let (x, z) = (ix as isize + dx, iz as isize + dz);
+                if (0..VERTS as isize).contains(&x) && (0..VERTS as isize).contains(&z) {
+                    relax(&mut dist, &mut carried, idx, z as usize * VERTS + x as usize, dx, dz);
+                }
+            }
+        }
+    }
+    for iz in (0..VERTS).rev() {
+        for ix in (0..VERTS).rev() {
+            let idx = iz * VERTS + ix;
+            for (dx, dz) in [(1isize, 1isize), (0, 1), (-1, 1), (1, 0)] {
+                let (x, z) = (ix as isize + dx, iz as isize + dz);
+                if (0..VERTS as isize).contains(&x) && (0..VERTS as isize).contains(&z) {
+                    relax(&mut dist, &mut carried, idx, z as usize * VERTS + x as usize, dx, dz);
+                }
+            }
+        }
+    }
+    (dist, carried)
 }
 
 fn make_hills(rng: &mut Rng) -> Vec<Hill> {
     let mut hills = Vec::new();
     let main_angle = rng.range(0.0, std::f32::consts::TAU);
-    let main_dist = rng.range(900.0, 1500.0);
+    let main_dist = rng.range(220.0, 340.0);
     hills.push(Hill {
         center: Vec2::from_angle(main_angle) * main_dist,
-        radius: rng.range(420.0, 520.0),
-        height: rng.range(90.0, 120.0),
+        radius: rng.range(180.0, 230.0),
+        height: rng.range(60.0, 80.0),
     });
     for _ in 0..2 {
         let angle = rng.range(0.0, std::f32::consts::TAU);
-        let dist = rng.range(600.0, 2000.0);
+        let dist = rng.range(150.0, 420.0);
         hills.push(Hill {
             center: Vec2::from_angle(angle) * dist,
-            radius: rng.range(200.0, 320.0),
-            height: rng.range(25.0, 50.0),
+            radius: rng.range(90.0, 130.0),
+            height: rng.range(20.0, 35.0),
         });
     }
     hills
-}
-
-fn make_river(rng: &mut Rng, hills: &[Hill], seed: u64) -> Vec<RiverPoint> {
-    let z_start = rng.range(-1800.0, -1200.0);
-    let z_end = rng.range(-1800.0, -1200.0);
-    let phase_a = rng.range(0.0, std::f32::consts::TAU);
-    let phase_b = rng.range(0.0, std::f32::consts::TAU);
-    let steps = (MAP_SIZE / RIVER_STEP) as usize;
-    let points: Vec<Vec2> = (0..=steps)
-        .map(|i| {
-            let t = i as f32 / steps as f32;
-            let x = -HALF_SIZE + t * MAP_SIZE;
-            let z = z_start
-                + (z_end - z_start) * t
-                + 260.0 * (t * std::f32::consts::TAU * 1.5 + phase_a).sin()
-                + 90.0 * (t * std::f32::consts::TAU * 5.0 + phase_b).sin();
-            Vec2::new(x, z)
-        })
-        .collect();
-    points
-        .into_iter()
-        .map(|pos| RiverPoint {
-            pos,
-            level: base_height(pos, seed, hills) - 1.0,
-        })
-        .collect()
 }
 
 fn place_pois(rng: &mut Rng, map: &TerrainMap) -> Vec<Poi> {
@@ -215,7 +313,7 @@ fn place_pois(rng: &mut Rng, map: &TerrainMap) -> Vec<Poi> {
         let position = if kind == PoiKind::Church {
             let village = pois.iter().rev().find(|p| p.kind == PoiKind::Village).copied();
             match village {
-                Some(v) => v.position + Vec2::new(30.0, 0.0),
+                Some(v) => v.position + Vec2::new(12.0, 0.0),
                 None => continue,
             }
         } else {
@@ -232,23 +330,23 @@ fn place_pois(rng: &mut Rng, map: &TerrainMap) -> Vec<Poi> {
 fn find_site(rng: &mut Rng, map: &TerrainMap, existing: &[Poi], kind: PoiKind) -> Option<Vec2> {
     for _ in 0..2000 {
         let p = Vec2::new(
-            rng.range(-HALF_SIZE + 100.0, HALF_SIZE - 100.0),
-            rng.range(-HALF_SIZE + 100.0, HALF_SIZE - 100.0),
+            rng.range(-HALF_SIZE + 30.0, HALF_SIZE - 30.0),
+            rng.range(-HALF_SIZE + 30.0, HALF_SIZE - 30.0),
         );
-        let (river_dist, level) = nearest_river(p, &map.river);
+        let river_dist = map.river_distance(p);
         let h = map.height_at(p);
         let river_ok = match kind {
-            PoiKind::Mill => (river_dist > RIVER_CORE + 4.0) && river_dist < 25.0,
-            _ => river_dist > 120.0,
+            PoiKind::Mill => river_dist > CELL && river_dist < 12.0,
+            _ => river_dist > 40.0,
         };
         let height_ok = match kind {
-            PoiKind::Mill => h > level,
-            _ => h > 5.0 && h < 45.0,
+            PoiKind::Mill => h < 15.0,
+            _ => h > 3.0 && h < 40.0,
         };
         let spacing_ok = existing
             .iter()
             .all(|other| other.position.distance(p) >= POI_MIN_SPACING);
-        if river_ok && height_ok && spacing_ok && p.length() > 300.0 {
+        if river_ok && height_ok && spacing_ok && p.length() > 120.0 {
             return Some(p);
         }
     }

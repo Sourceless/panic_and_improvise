@@ -4,7 +4,6 @@ use bevy::prelude::*;
 
 use crate::map::{fbm, grid_pos, Poi, PoiKind, TerrainMap, CELL};
 
-const RIVER_HALF_WIDTH: f32 = 4.0;
 const WATER_LIFT: f32 = 0.05;
 
 pub struct TerrainPlugin;
@@ -195,21 +194,22 @@ fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 }
 
 fn river_mesh(map: &TerrainMap) -> Mesh {
-    let river = &map.river;
-    let mut positions = Vec::with_capacity(river.len() * 2);
-    let mut indices = Vec::with_capacity(river.len() * 6);
-    for (i, point) in river.iter().enumerate() {
-        let prev = river[i.saturating_sub(1)].pos;
-        let next = river[(i + 1).min(river.len() - 1)].pos;
-        let dir = (next - prev).normalize_or_zero();
-        let side = Vec2::new(-dir.y, dir.x) * RIVER_HALF_WIDTH;
-        let y = point.level + WATER_LIFT;
-        for s in [side, -side] {
-            positions.push([point.pos.x + s.x, y, point.pos.y + s.y]);
-        }
-        if i > 0 {
-            let a = 2 * (i as u32 - 1);
-            indices.extend_from_slice(&[a, a + 2, a + 1, a + 1, a + 2, a + 3]);
+    let n = map.grid_size();
+    let half = CELL * 0.5;
+    let mut positions = Vec::new();
+    let mut indices = Vec::new();
+    for iz in 0..n {
+        for ix in 0..n {
+            let Some(level) = map.water_level(ix, iz) else {
+                continue;
+            };
+            let p = grid_pos(ix, iz);
+            let y = level + WATER_LIFT;
+            let base = positions.len() as u32;
+            for (dx, dz) in [(-half, -half), (half, -half), (half, half), (-half, half)] {
+                positions.push([p.x + dx, y, p.y + dz]);
+            }
+            indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
         }
     }
     let normals = vec![[0.0, 1.0, 0.0]; positions.len()];
