@@ -482,9 +482,9 @@ fn distance_to_rivers(is_river: &[bool], level: &[f32]) -> (Vec<f32>, Vec<f32>) 
 
 pub fn settlement_radius(kind: PoiKind) -> f32 {
     match kind {
-        PoiKind::Village => 30.0,
-        PoiKind::Church => 12.0,
-        PoiKind::Farm => 22.0,
+        PoiKind::Village => 55.0,
+        PoiKind::Church => 14.0,
+        PoiKind::Farm => 34.0,
         PoiKind::Mill => 10.0,
     }
 }
@@ -494,12 +494,16 @@ fn place_pois(rng: &mut Rng, map: &TerrainMap) -> Vec<Poi> {
         PoiKind::Village,
         PoiKind::Church,
         PoiKind::Village,
+        PoiKind::Church,
+        PoiKind::Village,
+        PoiKind::Farm,
+        PoiKind::Farm,
+        PoiKind::Farm,
         PoiKind::Farm,
         PoiKind::Farm,
         PoiKind::Farm,
         PoiKind::Village,
-        PoiKind::Farm,
-        PoiKind::Farm,
+        PoiKind::Village,
         PoiKind::Mill,
     ];
     let mut pois: Vec<Poi> = Vec::new();

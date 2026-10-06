@@ -85,12 +85,12 @@ pub fn spawn_settlements(
 
 fn village(meshes: &mut Assets<Mesh>, palette: &Palette, rng: &mut Rng) -> Vec<Part> {
     let mut parts = Vec::new();
-    for i in 0..6 {
-        for &row_z in &[-8.5_f32, 8.5] {
-            if rng.unit() < 0.2 {
+    for i in 0..9 {
+        for &row_z in &[-22.0_f32, -9.0, 9.0, 22.0] {
+            if rng.unit() < 0.15 {
                 continue;
             }
-            let x = -30.0 + i as f32 * 12.0 + rng.range(-1.5, 1.5);
+            let x = -48.0 + i as f32 * 12.0 + rng.range(-1.5, 1.5);
             let z = row_z + rng.range(-1.0, 1.0);
             let yaw = if rng.unit() < 0.15 { FRAC_PI_2 } else { 0.0 };
             let walls = palette.walls[(rng.unit() * palette.walls.len() as f32) as usize % palette.walls.len()].clone();
@@ -147,11 +147,30 @@ fn farm(meshes: &mut Assets<Mesh>, palette: &Palette) -> Vec<Part> {
         9.0,
         6.5,
     );
+    house(
+        &mut parts,
+        meshes,
+        palette.brick.clone(),
+        palette.slate.clone(),
+        Vec3::new(10.0, 0.0, -14.0),
+        0.0,
+        22.0,
+        10.0,
+        7.0,
+    );
+    for x in [-4.0, 0.0] {
+        push(
+            &mut parts,
+            meshes.add(Cylinder::new(2.6, 9.5)),
+            palette.white.clone(),
+            Transform::from_xyz(x - 2.0, 4.75, -9.0),
+        );
+    }
     push(
         &mut parts,
-        meshes.add(Cylinder::new(2.2, 8.5)),
-        palette.white.clone(),
-        Transform::from_xyz(-4.0, 4.25, -9.0),
+        meshes.add(Cylinder::new(3.0, 12.0)),
+        palette.stone.clone(),
+        Transform::from_xyz(-14.0, 6.0, 14.0),
     );
     parts
 }
