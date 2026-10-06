@@ -98,3 +98,18 @@ fn same_seed_gives_same_map() {
     }
     assert_eq!(a.pois.len(), b.pois.len());
 }
+
+#[test]
+fn every_settlement_has_water_nearby() {
+    for seed in [MAP_SEED, 1, 2, 3, 4] {
+        let map = TerrainMap::generate(seed);
+        for poi in &map.pois {
+            assert!(
+                map.river_distance(poi.position) <= 200.0,
+                "seed {seed}: {:?} is {}m from water",
+                poi.kind,
+                map.river_distance(poi.position)
+            );
+        }
+    }
+}

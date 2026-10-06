@@ -13,14 +13,17 @@ const NONE: u32 = u32::MAX;
 
 const RIVER_UPHILL_PENALTY: f32 = 6.0;
 const RIVER_ELEVATION_SCALE: f32 = 12.0;
-const VALLEY_DEPTH: f32 = 14.0;
+const RIVER_WIGGLE: f32 = 1.6;
+const RIVER_MIN_SPAN: f32 = 250.0;
+const VALLEY_DEPTH: f32 = 22.0;
 const VALLEY_FLAT: f32 = 6.0;
-const VALLEY_WIDTH: f32 = 60.0;
+const VALLEY_WIDTH: f32 = 90.0;
 const WATER_SURFACE_BELOW_FILL: f32 = 0.5;
 const RIVER_BED_BELOW_WATER: f32 = 1.2;
 const CARVE_CORE: f32 = CELL * 0.5;
 const CARVE_BANK: f32 = CELL * 4.0;
-const POI_MIN_SPACING: f32 = 150.0;
+const POI_MIN_SPACING: f32 = 100.0;
+const SETTLEMENT_WATER_REACH: f32 = 180.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Hill {
@@ -65,7 +68,7 @@ impl TerrainMap {
                 raw_height(grid_pos(ix, iz), seed, &hills)
             })
             .collect();
-        let path = river_path(&base, &mut Rng(seed ^ 0x51DE_0001));
+        let path = river_path(&base, seed, &mut Rng(seed ^ 0x51DE_0001));
         carve_valley(&mut base, &path);
         for h in &mut base {
             *h /= EROSION_HEIGHT_UNIT;
@@ -198,7 +201,7 @@ pub fn fbm(x: f32, z: f32, seed: u64, octaves: u32) -> f32 {
 }
 
 fn raw_height(p: Vec2, seed: u64, hills: &[Hill]) -> f32 {
-    let mut h = fbm(p.x / 170.0, p.y / 170.0, seed, 5) * 34.0 + 8.0;
+    let mut h = fbm(p.x / 150.0, p.y / 150.0, seed, 5) * 46.0 + 4.0;
     for hill in hills {
         let d = p.distance(hill.center) / hill.radius;
         if d < 1.0 {
@@ -256,7 +259,7 @@ fn carve_valley(heights: &mut [f32], path: &[usize]) {
     }
 }
 
-fn river_path(heights: &[f32], rng: &mut Rng) -> Vec<usize> {
+fn river_path(heights: &[f32], seed: u64, rng: &mut Rng) -> Vec<usize> {
     let side = (rng.range(0.0, 4.0) as usize).min(3);
     let along = (rng.range(0.2, 0.8) * (VERTS - 1) as f32) as usize;
     let source = match side {
@@ -265,7 +268,13 @@ fn river_path(heights: &[f32], rng: &mut Rng) -> Vec<usize> {
         2 => along * VERTS,
         _ => along * VERTS + VERTS - 1,
     };
-    let target_side = side ^ 1;
+    let source_cell = (source % VERTS, source / VERTS);
+    let far_enough = |c: usize| {
+        let (x, z) = (c % VERTS, c / VERTS);
+        let (dx, dz) = (x as f32 - source_cell.0 as f32, z as f32 - source_cell.1 as f32);
+        (dx * dx + dz * dz).sqrt() * CELL >= RIVER_MIN_SPAN
+    };
+    let is_target = |c: usize| (0..4).any(|s| s != side && on_edge(c, s)) && far_enough(c);
 
     let mut cost = vec![f32::MAX; COUNT];
     let mut previous = vec![NONE; COUNT];
@@ -275,7 +284,7 @@ fn river_path(heights: &[f32], rng: &mut Rng) -> Vec<usize> {
     let mut end = None;
     while let Some(Reverse((_, current))) = heap.pop() {
         let c = current as usize;
-        if on_edge(c, target_side) {
+        if is_target(c) {
             end = Some(c);
             break;
         }
@@ -283,7 +292,8 @@ fn river_path(heights: &[f32], rng: &mut Rng) -> Vec<usize> {
             let diagonal = (n % VERTS != c % VERTS) && (n / VERTS != c / VERTS);
             let step = if diagonal { CELL * std::f32::consts::SQRT_2 } else { CELL };
             let climb = (heights[n] - heights[c]).max(0.0) / CELL;
-            let next_cost = cost[c] + step * (1.0 + RIVER_UPHILL_PENALTY * climb) * (1.0 + heights[n].max(0.0) / RIVER_ELEVATION_SCALE);
+            let wiggle = 1.0 + RIVER_WIGGLE * (value_noise((n % VERTS) as f32 / 6.0, (n / VERTS) as f32 / 6.0, seed) - 0.5);
+            let next_cost = cost[c] + step * wiggle * (1.0 + RIVER_UPHILL_PENALTY * climb) * (1.0 + heights[n].max(0.0) / RIVER_ELEVATION_SCALE);
             if next_cost < cost[n] {
                 cost[n] = next_cost;
                 previous[n] = current;
@@ -308,7 +318,7 @@ fn river_path(heights: &[f32], rng: &mut Rng) -> Vec<usize> {
 const DROPLETS: usize = 120_000;
 const DROPLET_LIFETIME: usize = 80;
 const DROPLET_INERTIA: f32 = 0.1;
-const DROPLET_CAPACITY: f32 = 6.0;
+const DROPLET_CAPACITY: f32 = 1.5;
 const DROPLET_MIN_SLOPE: f32 = 0.01;
 const DROPLET_ERODE: f32 = 0.4;
 const DROPLET_DEPOSIT: f32 = 0.2;
@@ -460,16 +470,16 @@ fn make_hills(rng: &mut Rng) -> Vec<Hill> {
     let main_dist = rng.range(220.0, 340.0);
     hills.push(Hill {
         center: Vec2::from_angle(main_angle) * main_dist,
-        radius: rng.range(180.0, 230.0),
-        height: rng.range(60.0, 80.0),
+        radius: rng.range(200.0, 260.0),
+        height: rng.range(70.0, 95.0),
     });
     for _ in 0..2 {
         let angle = rng.range(0.0, std::f32::consts::TAU);
         let dist = rng.range(150.0, 420.0);
         hills.push(Hill {
             center: Vec2::from_angle(angle) * dist,
-            radius: rng.range(90.0, 130.0),
-            height: rng.range(20.0, 35.0),
+            radius: rng.range(110.0, 160.0),
+            height: rng.range(30.0, 45.0),
         });
     }
     hills
@@ -514,7 +524,7 @@ fn place_pois(rng: &mut Rng, map: &TerrainMap) -> Vec<Poi> {
 }
 
 fn find_site(rng: &mut Rng, map: &TerrainMap, existing: &[Poi], kind: PoiKind) -> Option<Vec2> {
-    for _ in 0..2000 {
+    for _ in 0..8000 {
         let p = Vec2::new(
             rng.range(-HALF_SIZE + 30.0, HALF_SIZE - 30.0),
             rng.range(-HALF_SIZE + 30.0, HALF_SIZE - 30.0),
@@ -523,11 +533,11 @@ fn find_site(rng: &mut Rng, map: &TerrainMap, existing: &[Poi], kind: PoiKind) -
         let h = map.height_at(p);
         let river_ok = match kind {
             PoiKind::Mill => river_dist > CELL && river_dist < 16.0,
-            _ => river_dist > 40.0,
+            _ => river_dist > 40.0 && river_dist < SETTLEMENT_WATER_REACH,
         };
         let height_ok = match kind {
             PoiKind::Mill => h < 45.0,
-            _ => h > 3.0 && h < 40.0,
+            _ => h > 3.0 && h < 65.0,
         };
         let spacing_ok = existing
             .iter()

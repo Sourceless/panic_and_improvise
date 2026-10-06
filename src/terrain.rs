@@ -165,7 +165,7 @@ fn surface_weights(map: &TerrainMap, ix: usize, iz: usize, p: Vec2) -> [f32; 4] 
     let dz = map.vertex_height(ix, (iz + 1).min(n - 1)) - map.vertex_height(ix, iz.saturating_sub(1));
     let slope = ((dx * dx + dz * dz).sqrt() / (2.0 * CELL)).min(1.0);
 
-    let stone = smoothstep(0.35, 0.7, slope).max(smoothstep(75.0, 95.0, map.vertex_height(ix, iz)));
+    let stone = smoothstep(0.35, 0.7, slope);
     let bank = 1.0 - smoothstep(CELL, CELL * 3.0, map.river_distance(p));
     let yard = map.pois.iter().any(|poi| poi.position.distance(p) < YARD_RADIUS);
     let dirt = (bank.max(if yard { 1.0 } else { 0.0 }) * (1.0 - stone)).clamp(0.0, 1.0);
