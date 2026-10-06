@@ -2,8 +2,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
+use bevy::render::view::window::screenshot::{save_to_disk, Screenshot};
+use bevy::pbr::{DistanceFog, FogFalloff};
 use fps_prototype::map::TerrainMap;
-use fps_prototype::terrain::{spawn_terrain, TerrainRoot};
+use fps_prototype::terrain::{spawn_terrain, TerrainMaterial, TerrainPlugin, TerrainRoot, TerrainTextures};
 use fps_prototype::MAP_SEED;
 
 const ORBIT_TARGET: Vec3 = Vec3::ZERO;
@@ -24,26 +26,39 @@ struct Viewer {
 #[derive(Component)]
 struct Hud;
 
+#[derive(Resource)]
+struct ScreenshotRequest(String);
+
 fn main() {
     let seed = std::env::args()
         .nth(1)
         .and_then(|arg| arg.parse().ok())
         .unwrap_or(MAP_SEED);
 
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Map Viewer".into(),
+    let mut app = App::new();
+    if let Ok(path) = std::env::var("MAP_VIEWER_SCREENSHOT") {
+        app.insert_resource(ScreenshotRequest(path))
+            .add_systems(Update, auto_screenshot);
+    }
+    let distance = std::env::var("MAP_VIEWER_DISTANCE")
+        .ok()
+        .and_then(|value| value.parse().ok());
+    app.add_plugins((
+            DefaultPlugins.set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "Map Viewer".into(),
+                    ..default()
+                }),
                 ..default()
             }),
-            ..default()
-        }))
+            TerrainPlugin,
+        ))
         .insert_resource(Viewer {
             seed,
             pending_regen: false,
             yaw: 0.8,
             pitch: 0.6,
-            distance: 4500.0,
+            distance: distance.unwrap_or(1600.0),
         })
         .insert_resource(TerrainMap::generate(seed))
         .insert_resource(GlobalAmbientLight {
@@ -51,12 +66,29 @@ fn main() {
             brightness: 300.0,
             ..default()
         })
-        .add_systems(Startup, (setup_scene, setup_hud, build_terrain).chain())
+        .add_systems(Startup, (setup_scene, setup_hud))
         .add_systems(
             Update,
             (handle_keys, orbit_input, regenerate, update_camera, update_hud).chain(),
         )
         .run();
+}
+
+fn auto_screenshot(
+    mut commands: Commands,
+    mut frame: Local<u32>,
+    request: Res<ScreenshotRequest>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    *frame += 1;
+    if *frame == 180 {
+        commands
+            .spawn(Screenshot::primary_window())
+            .observe(save_to_disk(request.0.clone()));
+    }
+    if *frame == 240 {
+        exit.write(AppExit::Success);
+    }
 }
 
 fn setup_scene(mut commands: Commands) {
@@ -73,17 +105,16 @@ fn setup_scene(mut commands: Commands) {
             far: 30_000.0,
             ..default()
         }),
+        DistanceFog {
+            color: Color::srgb(0.74, 0.82, 0.88),
+            falloff: FogFalloff::Linear {
+                start: 900.0,
+                end: 4000.0,
+            },
+            ..default()
+        },
         Transform::default(),
     ));
-}
-
-fn build_terrain(
-    mut commands: Commands,
-    map: Res<TerrainMap>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    spawn_terrain(&mut commands, &mut meshes, &mut materials, &map);
 }
 
 fn setup_hud(mut commands: Commands) {
@@ -129,8 +160,10 @@ fn regenerate(
     mut commands: Commands,
     mut viewer: ResMut<Viewer>,
     old_terrain: Query<Entity, With<TerrainRoot>>,
+    textures: Res<TerrainTextures>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut standard: ResMut<Assets<StandardMaterial>>,
+    mut terrain: ResMut<Assets<TerrainMaterial>>,
 ) {
     if !viewer.pending_regen {
         return;
@@ -140,7 +173,7 @@ fn regenerate(
         commands.entity(entity).despawn();
     }
     let map = TerrainMap::generate(viewer.seed);
-    spawn_terrain(&mut commands, &mut meshes, &mut materials, &map);
+    spawn_terrain(&mut commands, &mut meshes, &mut standard, &mut terrain, &textures, &map);
     commands.insert_resource(map);
 }
 
