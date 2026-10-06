@@ -113,3 +113,26 @@ fn every_settlement_has_water_nearby() {
         }
     }
 }
+
+#[test]
+fn river_has_a_minimum_length() {
+    for seed in [MAP_SEED, 1, 2, 3] {
+        let map = TerrainMap::generate(seed);
+        assert!(map.river_length() >= 500.0, "seed {seed}: river is {}m", map.river_length());
+    }
+}
+
+#[test]
+fn land_below_sea_level_is_lake_water() {
+    let map = map();
+    let n = map.grid_size();
+    for iz in 0..n {
+        for ix in 0..n {
+            if let Some(level) = map.water_level(ix, iz) {
+                if map.vertex_height(ix, iz) < 0.0 {
+                    assert_eq!(level, 0.0, "lake cell at ({ix},{iz}) not at sea level");
+                }
+            }
+        }
+    }
+}

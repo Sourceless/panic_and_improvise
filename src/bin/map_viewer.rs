@@ -5,6 +5,7 @@ use bevy::prelude::*;
 use bevy::render::view::window::screenshot::{save_to_disk, Screenshot};
 use bevy::pbr::{DistanceFog, FogFalloff};
 use fps_prototype::map::TerrainMap;
+use fps_prototype::settlement::SettlementRoot;
 use fps_prototype::terrain::{spawn_terrain, TerrainMaterial, TerrainPlugin, TerrainRoot, TerrainTextures};
 use fps_prototype::MAP_SEED;
 
@@ -159,7 +160,7 @@ fn new_random_seed() -> u64 {
 fn regenerate(
     mut commands: Commands,
     mut viewer: ResMut<Viewer>,
-    old_terrain: Query<Entity, With<TerrainRoot>>,
+    old_terrain: Query<Entity, Or<(With<TerrainRoot>, With<SettlementRoot>)>>,
     textures: Res<TerrainTextures>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut standard: ResMut<Assets<StandardMaterial>>,

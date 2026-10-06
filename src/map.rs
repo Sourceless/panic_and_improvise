@@ -14,7 +14,7 @@ const NONE: u32 = u32::MAX;
 const RIVER_UPHILL_PENALTY: f32 = 6.0;
 const RIVER_ELEVATION_SCALE: f32 = 12.0;
 const RIVER_WIGGLE: f32 = 1.6;
-const RIVER_MIN_SPAN: f32 = 250.0;
+const RIVER_MIN_SPAN: f32 = 600.0;
 const VALLEY_DEPTH: f32 = 22.0;
 const VALLEY_FLAT: f32 = 6.0;
 const VALLEY_WIDTH: f32 = 90.0;
@@ -98,7 +98,15 @@ impl TerrainMap {
             .collect();
 
         let water = (0..COUNT)
-            .map(|idx| is_river[idx].then_some(level[idx]))
+            .map(|idx| {
+                if is_river[idx] {
+                    Some(level[idx])
+                } else if heights[idx] < 0.0 {
+                    Some(0.0)
+                } else {
+                    None
+                }
+            })
             .collect();
 
         let mut map = TerrainMap {
@@ -536,7 +544,7 @@ fn find_site(rng: &mut Rng, map: &TerrainMap, existing: &[Poi], kind: PoiKind) -
             _ => river_dist > 40.0 && river_dist < SETTLEMENT_WATER_REACH,
         };
         let height_ok = match kind {
-            PoiKind::Mill => h < 45.0,
+            PoiKind::Mill => h > 0.0 && h < 45.0,
             _ => h > 3.0 && h < 65.0,
         };
         let spacing_ok = existing
