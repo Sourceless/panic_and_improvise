@@ -8,6 +8,7 @@ use bevy::render::view::window::screenshot::{save_to_disk, Screenshot, Screensho
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::pbr::{MeshMaterial3d};
 use fps_prototype::map::TerrainMap;
+use fps_prototype::fill::spawn_fill;
 use fps_prototype::zones::{overlay_mesh, ZoneMap};
 use fps_prototype::settlement::SettlementRoot;
 use fps_prototype::terrain::{spawn_terrain, TerrainMaterial, TerrainPlugin, TerrainRoot, TerrainTextures};
@@ -79,7 +80,7 @@ fn main() {
             brightness: 300.0,
             ..default()
         })
-        .add_systems(Startup, (setup_scene, setup_hud, build_zones))
+        .add_systems(Startup, (setup_scene, setup_hud, build_zones, build_fill).chain())
         .add_systems(
             Update,
             (handle_keys, copy_screenshot_key, orbit_input, regenerate, zone_overlay, update_camera, update_hud).chain(),
@@ -231,13 +232,25 @@ fn regenerate(
         commands.entity(entity).despawn();
     }
     let map = TerrainMap::generate(viewer.seed);
+    let zones = ZoneMap::generate(&map);
     spawn_terrain(&mut commands, &mut meshes, &mut standard, &mut terrain, &textures, &map);
-    commands.insert_resource(ZoneMap::generate(&map));
+    spawn_fill(&mut commands, &mut meshes, &mut standard, &map, &zones);
+    commands.insert_resource(zones);
     commands.insert_resource(map);
 }
 
 fn build_zones(mut commands: Commands, map: Res<TerrainMap>) {
     commands.insert_resource(ZoneMap::generate(&map));
+}
+
+fn build_fill(
+    mut commands: Commands,
+    map: Res<TerrainMap>,
+    zones: Res<ZoneMap>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut standard: ResMut<Assets<StandardMaterial>>,
+) {
+    spawn_fill(&mut commands, &mut meshes, &mut standard, &map, &zones);
 }
 
 fn zone_overlay(

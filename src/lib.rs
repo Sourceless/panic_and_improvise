@@ -1,3 +1,4 @@
+pub mod fill;
 pub mod map;
 pub mod player;
 pub mod settlement;
