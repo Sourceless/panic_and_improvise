@@ -104,7 +104,7 @@ fn update_dummy(
             .get(&dummy.body_material)
             .is_some_and(|m| m.base_color != color);
         if needs_update {
-            if let Some(material) = materials.get_mut(&dummy.body_material) {
+            if let Some(mut material) = materials.get_mut(&dummy.body_material) {
                 material.base_color = color;
             }
         }

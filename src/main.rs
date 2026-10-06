@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use fps_prototype::target::TargetDummy;
-use fps_prototype::{GamePlugin, MAP_HALF_SIZE};
+use fps_prototype::terrain::TerrainPlugin;
+use fps_prototype::GamePlugin;
 
 #[derive(Component)]
 struct HudText;
@@ -14,7 +15,7 @@ fn main() {
             }),
             ..default()
         }))
-        .add_plugins(GamePlugin)
+        .add_plugins((GamePlugin, TerrainPlugin))
         .add_systems(Startup, (setup_scene, setup_hud))
         .add_systems(Update, update_hud)
         .run();
@@ -25,15 +26,6 @@ fn setup_scene(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(MAP_HALF_SIZE * 2.0, MAP_HALF_SIZE * 2.0))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.3, 0.5, 0.3),
-            ..default()
-        })),
-        Transform::default(),
-    ));
-
     let box_mesh = meshes.add(Cuboid::new(2.0, 2.0, 2.0));
     let box_material = materials.add(StandardMaterial {
         base_color: Color::srgb(0.6, 0.6, 0.65),
@@ -57,7 +49,7 @@ fn setup_scene(
     commands.spawn((
         DirectionalLight {
             illuminance: 10_000.0,
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             ..default()
         },
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -1.0, 0.5, 0.0)),
@@ -74,7 +66,7 @@ fn setup_hud(mut commands: Commands) {
     commands.spawn((
         Text::new(""),
         TextFont {
-            font_size: 20.0,
+            font_size: bevy::text::FontSize::Px(20.0),
             ..default()
         },
         Node {

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bevy = { version = "0.18.1", features = ["wav"] }
+bevy = { version = "0.19.1", features = ["wav"] }
 
 # Recommended by Bevy for fast iterative builds without dynamic linking setup.
 [profile.dev]

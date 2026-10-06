@@ -16,7 +16,7 @@ use bevy::window::{CursorGrabMode, CursorOptions, ExitCondition, PrimaryWindow};
 use bevy::winit::WinitPlugin;
 use cucumber::World as _;
 use cucumber::writer::Stats;
-use fps_prototype::player::{spawn_player, FpsCamera};
+use fps_prototype::player::{spawn_player, CursorIntent, FpsCamera};
 use fps_prototype::target::{spawn_dummy, TargetDummy};
 use fps_prototype::weapon::{spawn_gun, Bullet, BulletAssets, Gun};
 use fps_prototype::GamePlugin;
@@ -194,6 +194,7 @@ fn drive(world: &mut World) {
 }
 
 fn set_cursor(world: &mut World, captured: bool) {
+    world.resource_mut::<CursorIntent>().captured = captured;
     let mut query = world.query_filtered::<&mut CursorOptions, With<PrimaryWindow>>();
     for mut cursor in query.iter_mut(world) {
         cursor.grab_mode = if captured {

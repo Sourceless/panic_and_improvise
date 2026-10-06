@@ -1,20 +1,32 @@
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
 
+use crate::map::TerrainMap;
 use crate::MAP_HALF_SIZE;
 
 const MOVE_SPEED: f32 = 6.0;
 const SPRINT_MULTIPLIER: f32 = 1.8;
 const MOUSE_SENSITIVITY: f32 = 0.002;
+const EYE_HEIGHT: f32 = 1.8;
 
 pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (spawn_player, grab_cursor))
-            .add_systems(Update, (toggle_cursor_grab, mouse_look, player_movement));
+        app.init_resource::<CursorIntent>()
+            .add_systems(Startup, (spawn_player, grab_cursor))
+            .add_systems(
+                Update,
+                (toggle_cursor_grab, regrab_on_focus, mouse_look, player_movement),
+            );
     }
+}
+
+// The OS can refuse a grab and winit reverts CursorOptions, so the player's wish is kept here.
+#[derive(Resource, Default)]
+pub struct CursorIntent {
+    pub captured: bool,
 }
 
 #[derive(Component)]
@@ -31,7 +43,27 @@ pub fn spawn_player(mut commands: Commands) {
     ));
 }
 
-fn grab_cursor(mut cursors: Query<&mut CursorOptions, With<PrimaryWindow>>) {
+fn grab_cursor(
+    mut cursors: Query<&mut CursorOptions, With<PrimaryWindow>>,
+    mut intent: ResMut<CursorIntent>,
+) {
+    intent.captured = true;
+    let Ok(mut cursor) = cursors.single_mut() else {
+        return;
+    };
+    cursor.grab_mode = CursorGrabMode::Locked;
+    cursor.visible = false;
+}
+
+fn regrab_on_focus(
+    mut focus_events: MessageReader<WindowFocused>,
+    intent: Res<CursorIntent>,
+    mut cursors: Query<&mut CursorOptions, With<PrimaryWindow>>,
+) {
+    let regained = focus_events.read().any(|event| event.focused);
+    if !regained || !intent.captured {
+        return;
+    }
     let Ok(mut cursor) = cursors.single_mut() else {
         return;
     };
@@ -42,15 +74,18 @@ fn grab_cursor(mut cursors: Query<&mut CursorOptions, With<PrimaryWindow>>) {
 pub fn toggle_cursor_grab(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    mut intent: ResMut<CursorIntent>,
     mut cursors: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
     let Ok(mut cursor) = cursors.single_mut() else {
         return;
     };
     if keys.just_pressed(KeyCode::Escape) {
+        intent.captured = false;
         cursor.grab_mode = CursorGrabMode::None;
         cursor.visible = true;
     } else if mouse.just_pressed(MouseButton::Left) {
+        intent.captured = true;
         cursor.grab_mode = CursorGrabMode::Locked;
         cursor.visible = false;
     }
@@ -90,6 +125,7 @@ fn mouse_look(
 fn player_movement(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    terrain: Res<TerrainMap>,
     mut query: Query<(&mut Transform, &FpsCamera)>,
 ) {
     let Ok((mut transform, cam)) = query.single_mut() else {
@@ -126,4 +162,7 @@ fn player_movement(
         transform.translation.x = new_pos.x;
         transform.translation.z = new_pos.z;
     }
+
+    let ground = terrain.height_at(Vec2::new(transform.translation.x, transform.translation.z));
+    transform.translation.y = ground + EYE_HEIGHT;
 }
