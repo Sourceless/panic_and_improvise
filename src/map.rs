@@ -13,6 +13,9 @@ const NONE: u32 = u32::MAX;
 
 const RIVER_UPHILL_PENALTY: f32 = 6.0;
 const RIVER_ELEVATION_SCALE: f32 = 12.0;
+const VALLEY_DEPTH: f32 = 14.0;
+const VALLEY_FLAT: f32 = 6.0;
+const VALLEY_WIDTH: f32 = 60.0;
 const WATER_SURFACE_BELOW_FILL: f32 = 0.5;
 const RIVER_BED_BELOW_WATER: f32 = 1.2;
 const CARVE_CORE: f32 = CELL * 0.5;
@@ -62,6 +65,8 @@ impl TerrainMap {
                 raw_height(grid_pos(ix, iz), seed, &hills)
             })
             .collect();
+        let path = river_path(&base, &mut Rng(seed ^ 0x51DE_0001));
+        carve_valley(&mut base, &path);
         for h in &mut base {
             *h /= EROSION_HEIGHT_UNIT;
         }
@@ -70,7 +75,6 @@ impl TerrainMap {
             *h *= EROSION_HEIGHT_UNIT;
         }
 
-        let path = river_path(&base, &mut Rng(seed ^ 0x51DE_0001));
         let mut is_river = vec![false; COUNT];
         let mut level: Vec<f32> = base.iter().map(|h| h - WATER_SURFACE_BELOW_FILL).collect();
         let mut surface = f32::MAX;
@@ -118,7 +122,9 @@ impl TerrainMap {
                     if d < radius {
                         let t = smoothstep(radius * 0.6, radius, d);
                         let idx = iz * VERTS + ix;
-                        self.heights[idx] = ground + (self.heights[idx] - ground) * t;
+                        if self.water[idx].is_none() {
+                            self.heights[idx] = ground + (self.heights[idx] - ground) * t;
+                        }
                     }
                 }
             }
@@ -227,6 +233,29 @@ fn on_edge(idx: usize, side: usize) -> bool {
 // The main river enters at a random point on one edge and crosses to the opposite edge
 // along the cheapest path, where climbing costs more than flowing, so it follows low
 // ground and the valleys that erosion carved.
+// Cuts a broad valley floor along the river so erosion refines an existing valley
+// rather than having to create one.
+fn carve_valley(heights: &mut [f32], path: &[usize]) {
+    let samples: Vec<(Vec2, f32)> = path
+        .iter()
+        .map(|&i| (Vec2::new((i % VERTS) as f32, (i / VERTS) as f32), heights[i]))
+        .collect();
+    for idx in 0..COUNT {
+        let p = Vec2::new((idx % VERTS) as f32, (idx / VERTS) as f32);
+        let (dist_cells, path_height) = samples
+            .iter()
+            .map(|(q, h)| (p.distance(*q), *h))
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .expect("river has points");
+        let dist = dist_cells * CELL;
+        let target = path_height - VALLEY_DEPTH;
+        let t = 1.0 - smoothstep(VALLEY_FLAT, VALLEY_WIDTH, dist);
+        if heights[idx] > target {
+            heights[idx] += (target - heights[idx]) * t;
+        }
+    }
+}
+
 fn river_path(heights: &[f32], rng: &mut Rng) -> Vec<usize> {
     let side = (rng.range(0.0, 4.0) as usize).min(3);
     let along = (rng.range(0.2, 0.8) * (VERTS - 1) as f32) as usize;
