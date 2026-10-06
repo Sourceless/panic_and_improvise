@@ -15,6 +15,9 @@ impl Plugin for TerrainPlugin {
     }
 }
 
+#[derive(Component)]
+pub struct TerrainRoot;
+
 struct PoiMaterials {
     building: Handle<StandardMaterial>,
     stone: Handle<StandardMaterial>,
@@ -33,8 +36,18 @@ fn spawn_world(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    spawn_terrain(&mut commands, &mut meshes, &mut materials, &map);
+}
+
+pub fn spawn_terrain(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    map: &TerrainMap,
+) {
     commands.spawn((
-        Mesh3d(meshes.add(terrain_mesh(&map))),
+        TerrainRoot,
+        Mesh3d(meshes.add(terrain_mesh(map))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::WHITE,
             perceptual_roughness: 1.0,
@@ -43,7 +56,8 @@ fn spawn_world(
     ));
 
     commands.spawn((
-        Mesh3d(meshes.add(river_mesh(&map))),
+        TerrainRoot,
+        Mesh3d(meshes.add(river_mesh(map))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.18, 0.38, 0.62),
             perceptual_roughness: 0.2,
@@ -71,7 +85,7 @@ fn spawn_world(
     };
     for poi in &map.pois {
         let ground = map.height_at(poi.position);
-        spawn_poi(&mut commands, &mut meshes, &poi_materials, poi, ground);
+        spawn_poi(commands, meshes, &poi_materials, poi, ground);
     }
 }
 
@@ -84,6 +98,7 @@ fn spawn_poi(
 ) {
     let root = commands
         .spawn((
+            TerrainRoot,
             Transform::from_xyz(poi.position.x, ground, poi.position.y),
             Visibility::default(),
         ))
