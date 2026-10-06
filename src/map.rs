@@ -12,8 +12,7 @@ const COUNT: usize = VERTS * VERTS;
 const NONE: u32 = u32::MAX;
 
 const FILL_EPSILON: f32 = 0.001;
-const RIVER_FRACTION: f32 = 0.03;
-const RIVER_MIN_ACCUMULATION: u32 = 25;
+const SOURCE_EDGE_MARGIN: f32 = 60.0;
 const WATER_SURFACE_BELOW_FILL: f32 = 0.5;
 const RIVER_BED_BELOW_WATER: f32 = 1.2;
 const CARVE_CORE: f32 = CELL * 0.5;
@@ -65,24 +64,24 @@ impl TerrainMap {
             })
             .collect();
 
-        let (filled, order, receiver) = priority_flood(&base);
-        let accumulation = flow_accumulation(&order, &receiver);
-        let is_river = river_mask(&accumulation);
+        let (filled, _order, receiver) = priority_flood(&base);
+        let is_river = main_river(&filled, &receiver);
         let river_cells = is_river.iter().filter(|&&r| r).count();
 
         let level: Vec<f32> = filled.iter().map(|f| f - WATER_SURFACE_BELOW_FILL).collect();
         let (river_distance, river_level) = distance_to_rivers(&is_river, &level);
 
+        let shift = clearing_level(seed, &hills);
         let heights: Vec<f32> = (0..COUNT)
             .map(|idx| {
                 let blend = 1.0 - smoothstep(CARVE_CORE, CARVE_BANK, river_distance[idx]);
                 let bed = base[idx].min(river_level[idx] - RIVER_BED_BELOW_WATER);
-                base[idx] + (bed - base[idx]) * blend
+                base[idx] + (bed - base[idx]) * blend - shift
             })
             .collect();
 
         let water = (0..COUNT)
-            .map(|idx| is_river[idx].then_some(level[idx]))
+            .map(|idx| is_river[idx].then_some(level[idx] - shift))
             .collect();
 
         let mut map = TerrainMap {
@@ -153,15 +152,40 @@ pub fn fbm(x: f32, z: f32, seed: u64, octaves: u32) -> f32 {
 }
 
 fn base_height(p: Vec2, seed: u64, hills: &[Hill]) -> f32 {
-    let lowland = fbm(p.x / 160.0, p.y / 160.0, seed, 4) * 14.0 + 6.0;
-    let mut h = lowland;
+    let clearing = clearing_level(seed, hills);
+    let t = smoothstep(SPAWN_CLEARING * 0.3, SPAWN_CLEARING, p.length());
+    clearing + (raw_height(p, seed, hills) - clearing) * t
+}
+
+// The spawn clearing sits at the average height of the ground around it, so a
+// low spot in the noise does not become a bowl.
+fn clearing_level(seed: u64, hills: &[Hill]) -> f32 {
+    let samples = 16;
+    let mut sum = 0.0;
+    let mut count = 0.0;
+    for iz in 0..samples {
+        for ix in 0..samples {
+            let u = ix as f32 / (samples - 1) as f32 * 2.0 - 1.0;
+            let v = iz as f32 / (samples - 1) as f32 * 2.0 - 1.0;
+            let p = Vec2::new(u, v) * SPAWN_CLEARING;
+            if p.length() <= SPAWN_CLEARING {
+                sum += raw_height(p, seed, hills);
+                count += 1.0;
+            }
+        }
+    }
+    sum / count
+}
+
+fn raw_height(p: Vec2, seed: u64, hills: &[Hill]) -> f32 {
+    let mut h = fbm(p.x / 160.0, p.y / 160.0, seed, 4) * 14.0 + 6.0;
     for hill in hills {
         let d = p.distance(hill.center) / hill.radius;
         if d < 1.0 {
             h += hill.height * (1.0 - d * d).powi(2);
         }
     }
-    h * smoothstep(SPAWN_CLEARING * 0.3, SPAWN_CLEARING, p.length())
+    h
 }
 
 fn neighbours(idx: usize) -> impl Iterator<Item = usize> {
@@ -211,27 +235,28 @@ fn priority_flood(base: &[f32]) -> (Vec<f32>, Vec<u32>, Vec<u32>) {
     (filled, order, receiver)
 }
 
-// D8 flow accumulation: each cell passes its catchment to its receiver, visiting
-// cells from highest to lowest so every cell is complete before it drains.
-fn flow_accumulation(order: &[u32], receiver: &[u32]) -> Vec<u32> {
-    let mut acc = vec![1u32; COUNT];
-    for &n in order.iter().rev() {
-        let r = receiver[n as usize];
-        if r != NONE {
-            acc[r as usize] += acc[n as usize];
+// The main river starts at the highest interior point and follows the flood's
+// receiver chain, so it always reaches the map edge as one continuous channel.
+fn main_river(filled: &[f32], receiver: &[u32]) -> Vec<bool> {
+    let margin = (SOURCE_EDGE_MARGIN / CELL) as usize;
+    let source = (0..COUNT)
+        .filter(|&i| {
+            let (ix, iz) = (i % VERTS, i / VERTS);
+            ix >= margin && iz >= margin && ix < VERTS - margin && iz < VERTS - margin
+        })
+        .max_by(|&a, &b| filled[a].total_cmp(&filled[b]))
+        .expect("map has interior cells");
+
+    let mut is_river = vec![false; COUNT];
+    let mut current = source;
+    loop {
+        is_river[current] = true;
+        match receiver[current] {
+            NONE => break,
+            next => current = next as usize,
         }
     }
-    acc
-}
-
-fn river_mask(accumulation: &[u32]) -> Vec<bool> {
-    let outlet_max = (0..COUNT)
-        .filter(|&i| is_boundary(i))
-        .map(|i| accumulation[i])
-        .max()
-        .unwrap_or(0);
-    let threshold = ((outlet_max as f32 * RIVER_FRACTION) as u32).max(RIVER_MIN_ACCUMULATION);
-    accumulation.iter().map(|&a| a >= threshold).collect()
+    is_river
 }
 
 // Two-pass chamfer distance transform that also carries each cell's nearest river level.

@@ -92,7 +92,7 @@ fn terrain_has_real_relief() {
         }
     }
     assert!(hi - lo >= 30.0, "height range is only {}m", hi - lo);
-    assert!(lo >= 0.0, "terrain dips below zero to {lo}m");
+    assert!(map.river_length() > 0.0);
 }
 
 #[test]
