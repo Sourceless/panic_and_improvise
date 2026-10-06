@@ -3,9 +3,9 @@ use std::collections::BinaryHeap;
 
 use bevy::prelude::*;
 
-pub const MAP_SIZE: f32 = 1000.0;
+pub const MAP_SIZE: f32 = 5000.0;
 pub const HALF_SIZE: f32 = MAP_SIZE / 2.0;
-pub const CELL: f32 = 4.0;
+pub const CELL: f32 = 10.0;
 pub const CELLS: usize = (MAP_SIZE / CELL) as usize;
 const VERTS: usize = CELLS + 1;
 const COUNT: usize = VERTS * VERTS;
@@ -14,16 +14,16 @@ const NONE: u32 = u32::MAX;
 const RIVER_UPHILL_PENALTY: f32 = 6.0;
 const RIVER_ELEVATION_SCALE: f32 = 12.0;
 const RIVER_WIGGLE: f32 = 1.6;
-const RIVER_MIN_SPAN: f32 = 600.0;
+const RIVER_MIN_SPAN: f32 = 3500.0;
 const VALLEY_DEPTH: f32 = 22.0;
-const VALLEY_FLAT: f32 = 6.0;
-const VALLEY_WIDTH: f32 = 90.0;
+const VALLEY_FLAT: f32 = 30.0;
+const VALLEY_WIDTH: f32 = 150.0;
 const WATER_SURFACE_BELOW_FILL: f32 = 0.5;
 const RIVER_BED_BELOW_WATER: f32 = 1.2;
 const CARVE_CORE: f32 = CELL * 0.5;
 const CARVE_BANK: f32 = CELL * 4.0;
-const POI_MIN_SPACING: f32 = 100.0;
-const SETTLEMENT_WATER_REACH: f32 = 180.0;
+const POI_MIN_SPACING: f32 = 400.0;
+const SETTLEMENT_WATER_REACH: f32 = 350.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Hill {
@@ -52,7 +52,7 @@ pub struct TerrainMap {
     heights: Vec<f32>,
     water: Vec<Option<f32>>,
     river_distance: Vec<f32>,
-    river_cells: usize,
+    river_len: f32,
     pub hills: Vec<Hill>,
     pub pois: Vec<Poi>,
 }
@@ -86,7 +86,7 @@ impl TerrainMap {
             surface = surface.min(base[i] - WATER_SURFACE_BELOW_FILL);
             level[i] = surface;
         }
-        let river_cells = path.len();
+        let river_len = path.windows(2).map(|w| grid_pos_of(w[0]).distance(grid_pos_of(w[1]))).sum();
         let (river_distance, river_level) = distance_to_rivers(&is_river, &level);
 
         let heights: Vec<f32> = (0..COUNT)
@@ -114,7 +114,7 @@ impl TerrainMap {
             heights,
             water,
             river_distance,
-            river_cells,
+            river_len,
             hills,
             pois: Vec::new(),
         };
@@ -148,7 +148,7 @@ impl TerrainMap {
             heights: vec![height; COUNT],
             water: vec![None; COUNT],
             river_distance: vec![f32::MAX; COUNT],
-            river_cells: 0,
+            river_len: 0.0,
             hills: Vec::new(),
             pois: Vec::new(),
         }
@@ -183,7 +183,7 @@ impl TerrainMap {
     }
 
     pub fn river_length(&self) -> f32 {
-        self.river_cells as f32 * CELL
+        self.river_len
     }
 }
 
@@ -209,7 +209,7 @@ pub fn fbm(x: f32, z: f32, seed: u64, octaves: u32) -> f32 {
 }
 
 fn raw_height(p: Vec2, seed: u64, hills: &[Hill]) -> f32 {
-    let mut h = fbm(p.x / 150.0, p.y / 150.0, seed, 5) * 46.0 + 4.0;
+    let mut h = fbm(p.x / 800.0, p.y / 800.0, seed, 5) * 60.0 + 4.0;
     for hill in hills {
         let d = p.distance(hill.center) / hill.radius;
         if d < 1.0 {
@@ -247,24 +247,24 @@ fn on_edge(idx: usize, side: usize) -> bool {
 // Cuts a broad valley floor along the river so erosion refines an existing valley
 // rather than having to create one.
 fn carve_valley(heights: &mut [f32], path: &[usize]) {
-    let samples: Vec<(Vec2, f32)> = path
-        .iter()
-        .map(|&i| (Vec2::new((i % VERTS) as f32, (i / VERTS) as f32), heights[i]))
-        .collect();
+    let mut is_path = vec![false; COUNT];
+    let mut path_heights = vec![0.0; COUNT];
+    for &i in path {
+        is_path[i] = true;
+        path_heights[i] = heights[i];
+    }
+    let (dist, floor_source) = distance_to_rivers(&is_path, &path_heights);
     for idx in 0..COUNT {
-        let p = Vec2::new((idx % VERTS) as f32, (idx / VERTS) as f32);
-        let (dist_cells, path_height) = samples
-            .iter()
-            .map(|(q, h)| (p.distance(*q), *h))
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .expect("river has points");
-        let dist = dist_cells * CELL;
-        let target = path_height - VALLEY_DEPTH;
-        let t = 1.0 - smoothstep(VALLEY_FLAT, VALLEY_WIDTH, dist);
+        let target = floor_source[idx] - VALLEY_DEPTH;
+        let t = 1.0 - smoothstep(VALLEY_FLAT, VALLEY_WIDTH, dist[idx]);
         if heights[idx] > target {
             heights[idx] += (target - heights[idx]) * t;
         }
     }
+}
+
+fn grid_pos_of(idx: usize) -> Vec2 {
+    grid_pos(idx % VERTS, idx / VERTS)
 }
 
 fn river_path(heights: &[f32], seed: u64, rng: &mut Rng) -> Vec<usize> {
@@ -323,7 +323,7 @@ fn river_path(heights: &[f32], seed: u64, rng: &mut Rng) -> Vec<usize> {
     path
 }
 
-const DROPLETS: usize = 120_000;
+const DROPLETS: usize = 300_000;
 const DROPLET_LIFETIME: usize = 80;
 const DROPLET_INERTIA: f32 = 0.1;
 const DROPLET_CAPACITY: f32 = 1.5;
@@ -475,19 +475,19 @@ fn distance_to_rivers(is_river: &[bool], level: &[f32]) -> (Vec<f32>, Vec<f32>) 
 fn make_hills(rng: &mut Rng) -> Vec<Hill> {
     let mut hills = Vec::new();
     let main_angle = rng.range(0.0, std::f32::consts::TAU);
-    let main_dist = rng.range(220.0, 340.0);
+    let main_dist = rng.range(900.0, 1500.0);
     hills.push(Hill {
         center: Vec2::from_angle(main_angle) * main_dist,
-        radius: rng.range(200.0, 260.0),
-        height: rng.range(70.0, 95.0),
+        radius: rng.range(600.0, 800.0),
+        height: rng.range(150.0, 200.0),
     });
     for _ in 0..2 {
         let angle = rng.range(0.0, std::f32::consts::TAU);
-        let dist = rng.range(150.0, 420.0);
+        let dist = rng.range(500.0, 1800.0);
         hills.push(Hill {
             center: Vec2::from_angle(angle) * dist,
-            radius: rng.range(110.0, 160.0),
-            height: rng.range(30.0, 45.0),
+            radius: rng.range(300.0, 450.0),
+            height: rng.range(60.0, 90.0),
         });
     }
     hills
@@ -540,7 +540,7 @@ fn find_site(rng: &mut Rng, map: &TerrainMap, existing: &[Poi], kind: PoiKind) -
         let river_dist = map.river_distance(p);
         let h = map.height_at(p);
         let river_ok = match kind {
-            PoiKind::Mill => river_dist > CELL && river_dist < 16.0,
+            PoiKind::Mill => river_dist > CELL && river_dist < 40.0,
             _ => river_dist > 40.0 && river_dist < SETTLEMENT_WATER_REACH,
         };
         let height_ok = match kind {

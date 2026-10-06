@@ -7,10 +7,10 @@ fn map() -> TerrainMap {
 }
 
 #[test]
-fn map_is_one_kilometre_square() {
-    assert_eq!(MAP_SIZE, 1000.0);
+fn map_is_five_kilometres_square() {
+    assert_eq!(MAP_SIZE, 5000.0);
     let map = map();
-    assert_eq!(map.grid_size(), 251);
+    assert_eq!(map.grid_size(), 501);
     assert_eq!(map.height_at(Vec2::new(-HALF_SIZE, -HALF_SIZE)), map.vertex_height(0, 0));
 }
 
@@ -36,7 +36,7 @@ fn river_drains_off_the_map_edge() {
             .any(|&(ix, iz)| map.water_level(ix, iz).is_some())
     });
     assert!(on_edge, "no river reaches the map edge");
-    assert!(map.river_length() >= 300.0, "river is only {}m long", map.river_length());
+    assert!(map.river_length() >= 3500.0, "river is only {}m long", map.river_length());
 }
 
 #[test]
@@ -105,7 +105,7 @@ fn every_settlement_has_water_nearby() {
         let map = TerrainMap::generate(seed);
         for poi in &map.pois {
             assert!(
-                map.river_distance(poi.position) <= 200.0,
+                map.river_distance(poi.position) <= 390.0,
                 "seed {seed}: {:?} is {}m from water",
                 poi.kind,
                 map.river_distance(poi.position)
@@ -118,7 +118,7 @@ fn every_settlement_has_water_nearby() {
 fn river_has_a_minimum_length() {
     for seed in [MAP_SEED, 1, 2, 3] {
         let map = TerrainMap::generate(seed);
-        assert!(map.river_length() >= 500.0, "seed {seed}: river is {}m", map.river_length());
+        assert!(map.river_length() >= 3500.0, "seed {seed}: river is {}m", map.river_length());
     }
 }
 

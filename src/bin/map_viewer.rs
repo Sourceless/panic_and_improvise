@@ -11,7 +11,7 @@ use fps_prototype::MAP_SEED;
 
 const ORBIT_TARGET: Vec3 = Vec3::ZERO;
 const MIN_DISTANCE: f32 = 300.0;
-const MAX_DISTANCE: f32 = 12000.0;
+const MAX_DISTANCE: f32 = 20000.0;
 const ORBIT_SENSITIVITY: f32 = 0.005;
 const ZOOM_STEP: f32 = 0.12;
 
@@ -59,7 +59,7 @@ fn main() {
             pending_regen: false,
             yaw: 0.8,
             pitch: 0.6,
-            distance: distance.unwrap_or(1600.0),
+            distance: distance.unwrap_or(4500.0),
         })
         .insert_resource(TerrainMap::generate(seed))
         .insert_resource(GlobalAmbientLight {
@@ -109,8 +109,8 @@ fn setup_scene(mut commands: Commands) {
         DistanceFog {
             color: Color::srgb(0.74, 0.82, 0.88),
             falloff: FogFalloff::Linear {
-                start: 900.0,
-                end: 4000.0,
+                start: 6000.0,
+                end: 30000.0,
             },
             ..default()
         },
