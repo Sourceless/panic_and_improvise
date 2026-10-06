@@ -4,6 +4,7 @@ pub mod settlement;
 pub mod target;
 pub mod terrain;
 pub mod weapon;
+pub mod zones;
 
 use bevy::prelude::*;
 

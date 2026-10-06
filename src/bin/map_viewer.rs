@@ -6,7 +6,9 @@ use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 use bevy::render::view::window::screenshot::{save_to_disk, Screenshot, ScreenshotCaptured};
 use bevy::pbr::{DistanceFog, FogFalloff};
+use bevy::pbr::{MeshMaterial3d};
 use fps_prototype::map::TerrainMap;
+use fps_prototype::zones::{overlay_mesh, ZoneMap};
 use fps_prototype::settlement::SettlementRoot;
 use fps_prototype::terrain::{spawn_terrain, TerrainMaterial, TerrainPlugin, TerrainRoot, TerrainTextures};
 use fps_prototype::MAP_SEED;
@@ -24,10 +26,14 @@ struct Viewer {
     yaw: f32,
     pitch: f32,
     distance: f32,
+    zones_on: bool,
 }
 
 #[derive(Component)]
 struct Hud;
+
+#[derive(Component)]
+struct ZoneOverlay;
 
 #[derive(Resource)]
 struct ScreenshotRequest(String);
@@ -64,6 +70,7 @@ fn main() {
             yaw: 0.8,
             pitch: 0.6,
             distance: distance.unwrap_or(4500.0),
+            zones_on: std::env::var("MAP_VIEWER_ZONES").is_ok(),
         })
         .insert_resource(TerrainMap::generate(seed))
         .insert_non_send(ClipboardHandle(arboard::Clipboard::new().ok()))
@@ -72,10 +79,10 @@ fn main() {
             brightness: 300.0,
             ..default()
         })
-        .add_systems(Startup, (setup_scene, setup_hud))
+        .add_systems(Startup, (setup_scene, setup_hud, build_zones))
         .add_systems(
             Update,
-            (handle_keys, copy_screenshot_key, orbit_input, regenerate, update_camera, update_hud).chain(),
+            (handle_keys, copy_screenshot_key, orbit_input, regenerate, zone_overlay, update_camera, update_hud).chain(),
         )
         .run();
 }
@@ -149,6 +156,9 @@ fn handle_keys(keys: Res<ButtonInput<KeyCode>>, mut viewer: ResMut<Viewer>) {
         viewer.seed = viewer.seed.wrapping_add(1);
         viewer.pending_regen = true;
     }
+    if keys.just_pressed(KeyCode::KeyZ) {
+        viewer.zones_on = !viewer.zones_on;
+    }
     if keys.just_pressed(KeyCode::BracketLeft) {
         viewer.seed = viewer.seed.wrapping_sub(1);
         viewer.pending_regen = true;
@@ -207,7 +217,7 @@ fn new_random_seed() -> u64 {
 fn regenerate(
     mut commands: Commands,
     mut viewer: ResMut<Viewer>,
-    old_terrain: Query<Entity, Or<(With<TerrainRoot>, With<SettlementRoot>)>>,
+    old_terrain: Query<Entity, Or<(With<TerrainRoot>, With<SettlementRoot>, With<ZoneOverlay>)>>,
     textures: Res<TerrainTextures>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut standard: ResMut<Assets<StandardMaterial>>,
@@ -222,7 +232,41 @@ fn regenerate(
     }
     let map = TerrainMap::generate(viewer.seed);
     spawn_terrain(&mut commands, &mut meshes, &mut standard, &mut terrain, &textures, &map);
+    commands.insert_resource(ZoneMap::generate(&map));
     commands.insert_resource(map);
+}
+
+fn build_zones(mut commands: Commands, map: Res<TerrainMap>) {
+    commands.insert_resource(ZoneMap::generate(&map));
+}
+
+fn zone_overlay(
+    mut commands: Commands,
+    viewer: Res<Viewer>,
+    map: Res<TerrainMap>,
+    zones: Res<ZoneMap>,
+    existing: Query<Entity, With<ZoneOverlay>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    if !viewer.zones_on {
+        for entity in &existing {
+            commands.entity(entity).despawn();
+        }
+        return;
+    }
+    if existing.is_empty() {
+        commands.spawn((
+            ZoneOverlay,
+            Mesh3d(meshes.add(overlay_mesh(&map, &zones))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::WHITE,
+                unlit: true,
+                alpha_mode: AlphaMode::Blend,
+                ..default()
+            })),
+        ));
+    }
 }
 
 fn orbit_input(
@@ -265,7 +309,7 @@ fn update_hud(viewer: Res<Viewer>, map: Res<TerrainMap>, mut hud: Query<&mut Tex
     text.0 = format!(
         "Seed {}\nRelief: {:.0} to {:.0} m   River: {:.1} km   POIs: {}\n\n\
          N new seed   [ / ] previous / next seed\n\
-         Drag: orbit   Wheel: zoom   C: copy screenshot",
+         Drag: orbit   Wheel: zoom   C: copy screenshot   Z: zones",
         viewer.seed,
         low,
         high,
