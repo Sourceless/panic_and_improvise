@@ -214,14 +214,14 @@ fn update_hud(viewer: Res<Viewer>, map: Res<TerrainMap>, mut hud: Query<&mut Tex
     let Ok(mut text) = hud.single_mut() else {
         return;
     };
-    let tallest = map.hills.iter().map(|h| h.height).fold(0.0, f32::max);
+    let (low, high) = map.height_range();
     text.0 = format!(
-        "Seed {}\nHills: {} (tallest {:.0} m)   River: {:.1} km   POIs: {}\n\n\
+        "Seed {}\nRelief: {:.0} to {:.0} m   River: {:.1} km   POIs: {}\n\n\
          N new seed   [ / ] previous / next seed\n\
          Drag: orbit   Wheel: zoom",
         viewer.seed,
-        map.hills.len(),
-        tallest,
+        low,
+        high,
         map.river_length() / 1000.0,
         map.pois.len(),
     );

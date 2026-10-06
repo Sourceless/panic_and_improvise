@@ -1,5 +1,5 @@
 use bevy::math::Vec2;
-use fps_prototype::map::{PoiKind, TerrainMap, HALF_SIZE, MAP_SIZE};
+use fps_prototype::map::{grid_pos, PoiKind, TerrainMap, HALF_SIZE, MAP_SIZE};
 use fps_prototype::MAP_SEED;
 
 fn map() -> TerrainMap {
@@ -15,15 +15,10 @@ fn map_is_five_kilometres_square() {
 }
 
 #[test]
-fn map_has_at_least_one_hill() {
+fn map_has_a_high_peak() {
     let map = map();
-    let hill = map.hills.iter().max_by(|a, b| a.height.total_cmp(&b.height)).unwrap();
-    assert!(hill.height >= 50.0, "tallest hill is {}m", hill.height);
-    assert!(
-        map.height_at(hill.center) >= 50.0,
-        "terrain at hill centre is only {}m",
-        map.height_at(hill.center)
-    );
+    let (_, high) = map.height_range();
+    assert!(high >= 100.0, "highest point is only {high}m");
 }
 
 #[test]
@@ -49,6 +44,9 @@ fn river_bed_sits_below_its_water() {
             let Some(level) = map.water_level(ix, iz) else {
                 continue;
             };
+            if map.river_distance(grid_pos(ix, iz)) > 0.0 {
+                continue;
+            }
             let bed = map.vertex_height(ix, iz);
             assert!(bed < level - 0.5, "river bed {bed}m is not below its water {level}m");
             checked += 1;
@@ -60,7 +58,7 @@ fn river_bed_sits_below_its_water() {
 #[test]
 fn map_has_points_of_interest_on_dry_land() {
     let map = map();
-    assert!(map.pois.len() >= 5, "only {} POIs generated", map.pois.len());
+    assert!(map.pois.len() >= 8, "only {} POIs generated", map.pois.len());
     for kind in [PoiKind::Village, PoiKind::Church, PoiKind::Farm, PoiKind::Mill] {
         assert!(map.pois.iter().any(|p| p.kind == kind), "no {kind:?} generated");
     }
@@ -105,7 +103,7 @@ fn every_settlement_has_water_nearby() {
         let map = TerrainMap::generate(seed);
         for poi in &map.pois {
             assert!(
-                map.river_distance(poi.position) <= 390.0,
+                map.river_distance(poi.position) <= 540.0,
                 "seed {seed}: {:?} is {}m from water",
                 poi.kind,
                 map.river_distance(poi.position)
@@ -129,7 +127,7 @@ fn land_below_sea_level_is_lake_water() {
     for iz in 0..n {
         for ix in 0..n {
             if let Some(level) = map.water_level(ix, iz) {
-                if map.vertex_height(ix, iz) < 0.0 {
+                if map.river_distance(grid_pos(ix, iz)) > 20.0 && map.vertex_height(ix, iz) < 0.0 {
                     assert_eq!(level, 0.0, "lake cell at ({ix},{iz}) not at sea level");
                 }
             }

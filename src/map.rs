@@ -1,4 +1,7 @@
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
 use bevy::prelude::*;
 
 pub const MAP_SIZE: f32 = 5000.0;
@@ -9,22 +12,21 @@ const VERTS: usize = CELLS + 1;
 const COUNT: usize = VERTS * VERTS;
 
 const RIVER_MIN_SPAN: f32 = 3500.0;
+const NONE: u32 = u32::MAX;
+const RIVER_UPHILL_PENALTY: f32 = 6.0;
+const RIVER_ELEVATION_SCALE: f32 = 12.0;
+const RIVER_WIGGLE: f32 = 4.0;
 const VALLEY_DEPTH: f32 = 22.0;
 const VALLEY_FLAT: f32 = 30.0;
 const VALLEY_WIDTH: f32 = 150.0;
-const WATER_SURFACE_BELOW_FILL: f32 = 0.5;
-const RIVER_BED_BELOW_WATER: f32 = 1.2;
+const WATER_SURFACE_BELOW_FILL: f32 = 0.2;
+const RIVER_FILL_WIDTH: f32 = 18.0;
+const RIVER_BED_BELOW_WATER: f32 = 1.5;
 const CARVE_CORE: f32 = CELL * 0.5;
 const CARVE_BANK: f32 = CELL * 4.0;
-const POI_MIN_SPACING: f32 = 400.0;
-const SETTLEMENT_WATER_REACH: f32 = 350.0;
+const POI_MIN_SPACING: f32 = 250.0;
+const SETTLEMENT_WATER_REACH: f32 = 500.0;
 
-#[derive(Clone, Copy, Debug)]
-pub struct Hill {
-    pub center: Vec2,
-    pub radius: f32,
-    pub height: f32,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PoiKind {
@@ -47,22 +49,20 @@ pub struct TerrainMap {
     water: Vec<Option<f32>>,
     river_distance: Vec<f32>,
     river_len: f32,
-    pub hills: Vec<Hill>,
     pub pois: Vec<Poi>,
 }
 
 impl TerrainMap {
     pub fn generate(seed: u64) -> Self {
         let mut rng = Rng(seed);
-        let hills = make_hills(&mut rng);
 
         let mut base: Vec<f32> = (0..COUNT)
             .map(|idx| {
                 let (ix, iz) = (idx % VERTS, idx / VERTS);
-                raw_height(grid_pos(ix, iz), seed, &hills)
+                base_height(grid_pos(ix, iz), seed)
             })
             .collect();
-        let path = river_path(&mut Rng(seed ^ 0x51DE_0001));
+        let path = river_path(&base, seed, &mut Rng(seed ^ 0x51DE_0001));
         carve_valley(&mut base, &path);
         for h in &mut base {
             *h /= EROSION_HEIGHT_UNIT;
@@ -95,6 +95,8 @@ impl TerrainMap {
             .map(|idx| {
                 if is_river[idx] {
                     Some(level[idx])
+                } else if river_distance[idx] < RIVER_FILL_WIDTH && heights[idx] < river_level[idx] {
+                    Some(river_level[idx])
                 } else if heights[idx] < 0.0 {
                     Some(0.0)
                 } else {
@@ -109,7 +111,6 @@ impl TerrainMap {
             water,
             river_distance,
             river_len,
-            hills,
             pois: Vec::new(),
         };
         map.pois = place_pois(&mut rng, &map);
@@ -143,7 +144,6 @@ impl TerrainMap {
             water: vec![None; COUNT],
             river_distance: vec![f32::MAX; COUNT],
             river_len: 0.0,
-            hills: Vec::new(),
             pois: Vec::new(),
         }
     }
@@ -170,6 +170,12 @@ impl TerrainMap {
     pub fn river_distance(&self, p: Vec2) -> f32 {
         let (ix, iz) = nearest_vertex(p);
         self.river_distance[iz * VERTS + ix]
+    }
+
+    pub fn height_range(&self) -> (f32, f32) {
+        self.heights
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), &h| (lo.min(h), hi.max(h)))
     }
 
     pub fn grid_size(&self) -> usize {
@@ -202,74 +208,95 @@ pub fn fbm(x: f32, z: f32, seed: u64, octaves: u32) -> f32 {
     sum / norm
 }
 
-fn raw_height(p: Vec2, seed: u64, hills: &[Hill]) -> f32 {
-    let mut h = fbm(p.x / 800.0, p.y / 800.0, seed, 5) * 60.0 + 4.0;
-    for hill in hills {
-        let d = p.distance(hill.center) / hill.radius;
-        if d < 1.0 {
-            h += hill.height * (1.0 - d * d).powi(2);
-        }
-    }
-    h
+// Layered noise: a domain-warped broad field, then rolling and small undulations.
+fn base_height(p: Vec2, seed: u64) -> f32 {
+    let warp = Vec2::new(
+        fbm(p.x / 1200.0, p.y / 1200.0, seed ^ 0x1, 3) - 0.5,
+        fbm(p.x / 1200.0 + 7.3, p.y / 1200.0 + 1.9, seed ^ 0x2, 3) - 0.5,
+    ) * 900.0;
+    let q = p + warp;
+    let broad = fbm(q.x / 1400.0, q.y / 1400.0, seed, 3) - 0.5;
+    let rolling = fbm(q.x / 500.0, q.y / 500.0, seed ^ 0x3, 4) - 0.5;
+    let small = fbm(q.x / 140.0, q.y / 140.0, seed ^ 0x4, 4) - 0.5;
+    broad * 320.0 + rolling * 120.0 + small * 35.0 + 50.0
 }
 
-// The main river is a sinuous curve between two points on different edges. Its
-// amplitude is chosen so the channel's length is close to pi times the straight-line
-// distance, giving a strongly meandering river. The valley is then cut along it.
-fn river_path(rng: &mut Rng) -> Vec<usize> {
-    let max = (VERTS - 1) as f32;
-    let edge_point = |side: usize, along: f32| match side {
-        0 => Vec2::new(along * max, 0.0),
-        1 => Vec2::new(along * max, max),
-        2 => Vec2::new(0.0, along * max),
-        _ => Vec2::new(max, along * max),
+fn neighbours(idx: usize) -> impl Iterator<Item = usize> {
+    let (ix, iz) = ((idx % VERTS) as isize, (idx / VERTS) as isize);
+    (-1..=1isize)
+        .flat_map(move |dz| (-1..=1isize).map(move |dx| (dx, dz)))
+        .filter(|&(dx, dz)| (dx, dz) != (0, 0))
+        .filter_map(move |(dx, dz)| {
+            let (x, z) = (ix + dx, iz + dz);
+            let inside = (0..VERTS as isize).contains(&x) && (0..VERTS as isize).contains(&z);
+            inside.then(|| z as usize * VERTS + x as usize)
+        })
+}
+
+fn on_edge(idx: usize, side: usize) -> bool {
+    let (ix, iz) = (idx % VERTS, idx / VERTS);
+    match side {
+        0 => iz == 0,
+        1 => iz == VERTS - 1,
+        2 => ix == 0,
+        _ => ix == VERTS - 1,
+    }
+}
+
+// The main river enters at a random point on one edge and crosses to the opposite edge
+// along the cheapest path, where climbing costs more than flowing, so it follows low
+// ground and the valleys that erosion carved.
+fn river_path(heights: &[f32], seed: u64, rng: &mut Rng) -> Vec<usize> {
+    let side = (rng.range(0.0, 4.0) as usize).min(3);
+    let along = (rng.range(0.2, 0.8) * (VERTS - 1) as f32) as usize;
+    let source = match side {
+        0 => along,
+        1 => (VERTS - 1) * VERTS + along,
+        2 => along * VERTS,
+        _ => along * VERTS + VERTS - 1,
     };
-    let (a, b) = loop {
-        let side = (rng.range(0.0, 4.0) as usize).min(3);
-        let target_side = (side + 1 + (rng.range(0.0, 3.0) as usize).min(2)) % 4;
-        let a = edge_point(side, rng.range(0.2, 0.8));
-        let b = edge_point(target_side, rng.range(0.2, 0.8));
-        if a.distance(b) * CELL >= RIVER_MIN_SPAN {
-            break (a, b);
-        }
+    let (sx, sz) = ((source % VERTS) as f32, (source / VERTS) as f32);
+    let is_target = |c: usize| {
+        let (dx, dz) = ((c % VERTS) as f32 - sx, (c / VERTS) as f32 - sz);
+        (0..4).any(|s| s != side && on_edge(c, s)) && (dx * dx + dz * dz).sqrt() * CELL >= RIVER_MIN_SPAN
     };
 
-    let chord = a.distance(b);
-    let dir = (b - a) / chord;
-    let normal = Vec2::new(-dir.y, dir.x);
-    let cycles = 2.0 + (rng.range(0.0, 3.0)).floor();
-    let point = |t: f32, amp: f32| {
-        let taper = (std::f32::consts::PI * t).sin();
-        let wiggle = amp * taper * (std::f32::consts::TAU * cycles * t).sin();
-        a + dir * (t * chord) + normal * wiggle
-    };
-    let length_of = |amp: f32| {
-        let steps = 2000;
-        (1..=steps)
-            .map(|i| point((i - 1) as f32 / steps as f32, amp).distance(point(i as f32 / steps as f32, amp)))
-            .sum::<f32>()
-    };
-    let target = std::f32::consts::PI * chord;
-    let (mut lo, mut hi) = (0.0, chord * 0.5);
-    for _ in 0..40 {
-        let mid = (lo + hi) / 2.0;
-        if length_of(mid) < target {
-            lo = mid;
-        } else {
-            hi = mid;
+    let mut cost = vec![f32::MAX; COUNT];
+    let mut previous = vec![NONE; COUNT];
+    let mut heap = BinaryHeap::new();
+    cost[source] = 0.0;
+    heap.push(Reverse((0u32, source as u32)));
+    let mut end = None;
+    while let Some(Reverse((_, current))) = heap.pop() {
+        let c = current as usize;
+        if is_target(c) {
+            end = Some(c);
+            break;
+        }
+        for n in neighbours(c) {
+            let diagonal = (n % VERTS != c % VERTS) && (n / VERTS != c / VERTS);
+            let step = if diagonal { CELL * std::f32::consts::SQRT_2 } else { CELL };
+            let climb = (heights[n] - heights[c]).max(0.0) / CELL;
+            let wiggle = (1.0 + RIVER_WIGGLE * (value_noise((n % VERTS) as f32 / 6.0, (n / VERTS) as f32 / 6.0, seed) - 0.5)).max(0.1);
+            let next_cost = cost[c] + step * wiggle * (1.0 + RIVER_UPHILL_PENALTY * climb) * (1.0 + heights[n].max(0.0) / RIVER_ELEVATION_SCALE);
+            if next_cost < cost[n] {
+                cost[n] = next_cost;
+                previous[n] = current;
+                heap.push(Reverse((next_cost.to_bits(), n as u32)));
+            }
         }
     }
-    let amp = (lo + hi) / 2.0;
 
-    let samples = (chord * 8.0) as usize;
-    let mut path: Vec<usize> = Vec::new();
-    for i in 0..=samples {
-        let p = point(i as f32 / samples as f32, amp).clamp(Vec2::ZERO, Vec2::splat(max));
-        let idx = (p.y.round() as usize) * VERTS + p.x.round() as usize;
-        if path.last() != Some(&idx) {
-            path.push(idx);
+    let mut path = Vec::new();
+    let mut current = end.expect("river reaches the opposite edge");
+    loop {
+        path.push(current);
+        if current == source {
+            break;
         }
+        current = previous[current] as usize;
     }
+    path.reverse();
     path
 }
 
@@ -300,7 +327,8 @@ fn grid_pos_of(idx: usize) -> Vec2 {
 const DROPLETS: usize = 300_000;
 const DROPLET_LIFETIME: usize = 80;
 const DROPLET_INERTIA: f32 = 0.1;
-const DROPLET_CAPACITY: f32 = 1.5;
+const DROPLET_CAPACITY: f32 = 1.0;
+const DROPLET_STEP_LIMIT: f32 = 0.2;
 const DROPLET_MIN_SLOPE: f32 = 0.01;
 const DROPLET_ERODE: f32 = 0.4;
 const DROPLET_DEPOSIT: f32 = 0.2;
@@ -344,7 +372,7 @@ fn erode(heights: &mut [f32], rng: &mut Rng) {
                 sediment -= amount;
                 deposit(heights, pos, amount);
             } else {
-                let amount = ((capacity - sediment) * DROPLET_ERODE).min(-delta);
+                let amount = ((capacity - sediment) * DROPLET_ERODE).min(-delta).min(DROPLET_STEP_LIMIT);
                 sediment += amount;
                 erode_brush(heights, pos, amount);
             }
@@ -446,26 +474,6 @@ fn distance_to_rivers(is_river: &[bool], level: &[f32]) -> (Vec<f32>, Vec<f32>) 
     (dist, carried)
 }
 
-fn make_hills(rng: &mut Rng) -> Vec<Hill> {
-    let mut hills = Vec::new();
-    let main_angle = rng.range(0.0, std::f32::consts::TAU);
-    let main_dist = rng.range(900.0, 1500.0);
-    hills.push(Hill {
-        center: Vec2::from_angle(main_angle) * main_dist,
-        radius: rng.range(600.0, 800.0),
-        height: rng.range(150.0, 200.0),
-    });
-    for _ in 0..2 {
-        let angle = rng.range(0.0, std::f32::consts::TAU);
-        let dist = rng.range(500.0, 1800.0);
-        hills.push(Hill {
-            center: Vec2::from_angle(angle) * dist,
-            radius: rng.range(300.0, 450.0),
-            height: rng.range(60.0, 90.0),
-        });
-    }
-    hills
-}
 
 pub fn settlement_radius(kind: PoiKind) -> f32 {
     match kind {
@@ -482,6 +490,9 @@ fn place_pois(rng: &mut Rng, map: &TerrainMap) -> Vec<Poi> {
         PoiKind::Church,
         PoiKind::Village,
         PoiKind::Farm,
+        PoiKind::Farm,
+        PoiKind::Farm,
+        PoiKind::Village,
         PoiKind::Farm,
         PoiKind::Farm,
         PoiKind::Mill,
@@ -515,11 +526,11 @@ fn find_site(rng: &mut Rng, map: &TerrainMap, existing: &[Poi], kind: PoiKind) -
         let h = map.height_at(p);
         let river_ok = match kind {
             PoiKind::Mill => river_dist > CELL && river_dist < 40.0,
-            _ => river_dist > 40.0 && river_dist < SETTLEMENT_WATER_REACH,
+            _ => river_dist > 25.0 && river_dist < SETTLEMENT_WATER_REACH,
         };
         let height_ok = match kind {
-            PoiKind::Mill => h > 0.0 && h < 45.0,
-            _ => h > 3.0 && h < 65.0,
+            PoiKind::Mill => h > 0.0 && h < 90.0,
+            _ => h > 0.0 && h < 90.0,
         };
         let spacing_ok = existing
             .iter()
