@@ -1,3 +1,5 @@
+use std::f32::consts::FRAC_PI_2;
+
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -21,6 +23,153 @@ pub fn spawn_fill(
     spawn_trees(commands, meshes, materials, map, zones);
     spawn_fields(commands, meshes, materials, map, zones);
     spawn_sheds(commands, meshes, materials, map, zones);
+    spawn_farm_fields(commands, meshes, materials, map);
+}
+
+const PLOT_SIZE: f32 = 70.0;
+const PLOT_SUBDIVISIONS: usize = 7;
+const PLOT_MAX_RELIEF: f32 = 12.0;
+
+// Square fields in a ring around each farm, each with a hedge, stone wall or fence on
+// every edge. Plots that are too steep, too uneven or in water are left out.
+fn spawn_farm_fields(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    map: &TerrainMap,
+) {
+    let mut positions = Vec::new();
+    let mut colors = Vec::new();
+    let mut indices = Vec::new();
+    let mut plots: Vec<(Vec2, usize)> = Vec::new();
+    for farm in map.pois.iter().filter(|p| p.kind == crate::map::PoiKind::Farm) {
+        for j in -2i32..=2 {
+            for i in -2i32..=2 {
+                if i == 0 && j == 0 {
+                    continue;
+                }
+                let centre = farm.position + Vec2::new(i as f32, j as f32) * PLOT_SIZE;
+                if !plot_is_suitable(map, centre) {
+                    continue;
+                }
+                let kind = (hash01(centre.x as usize ^ 0x5151, centre.y as usize, 21) * 3.0) as usize;
+                plots.push((centre, kind.min(2)));
+                add_plot_grid(map, centre, &mut positions, &mut colors, &mut indices);
+            }
+        }
+    }
+    if positions.is_empty() {
+        return;
+    }
+    let normals = vec![[0.0, 1.0, 0.0]; positions.len()];
+    let mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+        .with_inserted_indices(Indices::U32(indices));
+    commands.spawn((
+        TerrainRoot,
+        Mesh3d(meshes.add(mesh)),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 1.0,
+            ..default()
+        })),
+    ));
+
+    let unit = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+    let hedge = materials.add(leaf_material([0.18, 0.38, 0.16]));
+    let wall = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.66, 0.64, 0.6),
+        ..default()
+    });
+    let fence = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.42, 0.30, 0.18),
+        ..default()
+    });
+    for (centre, kind) in plots {
+        let (material, thickness, height) = match kind {
+            0 => (hedge.clone(), 1.6, 1.9),
+            1 => (wall.clone(), 0.6, 1.1),
+            _ => (fence.clone(), 0.18, 1.2),
+        };
+        let half = PLOT_SIZE * 0.5;
+        for (offset, along_x) in [
+            (Vec2::new(0.0, -half), true),
+            (Vec2::new(0.0, half), true),
+            (Vec2::new(-half, 0.0), false),
+            (Vec2::new(half, 0.0), false),
+        ] {
+            let mid = centre + offset;
+            let ground = map.height_at(mid);
+            let (length_scale, rotation) = if along_x {
+                (PLOT_SIZE, Quat::IDENTITY)
+            } else {
+                (PLOT_SIZE, Quat::from_rotation_y(FRAC_PI_2))
+            };
+            commands.spawn((
+                TerrainRoot,
+                Mesh3d(unit.clone()),
+                MeshMaterial3d(material.clone()),
+                Transform::from_xyz(mid.x, ground + height / 2.0, mid.y)
+                    .with_rotation(rotation)
+                    .with_scale(Vec3::new(length_scale, height, thickness)),
+            ));
+        }
+    }
+}
+
+fn plot_is_suitable(map: &TerrainMap, centre: Vec2) -> bool {
+    let half = PLOT_SIZE * 0.5;
+    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+    for k in 0..=PLOT_SUBDIVISIONS {
+        for m in 0..=PLOT_SUBDIVISIONS {
+            let p = centre
+                + Vec2::new(
+                    -half + k as f32 * PLOT_SIZE / PLOT_SUBDIVISIONS as f32,
+                    -half + m as f32 * PLOT_SIZE / PLOT_SUBDIVISIONS as f32,
+                );
+            let (ix, iz) = nearest_cell(map, p);
+            if map.water_level(ix, iz).is_some() {
+                return false;
+            }
+            let h = map.height_at(p);
+            lo = lo.min(h);
+            hi = hi.max(h);
+        }
+    }
+    hi - lo <= PLOT_MAX_RELIEF
+}
+
+fn add_plot_grid(
+    map: &TerrainMap,
+    centre: Vec2,
+    positions: &mut Vec<[f32; 3]>,
+    colors: &mut Vec<[f32; 4]>,
+    indices: &mut Vec<u32>,
+) {
+    let half = PLOT_SIZE * 0.5;
+    let step = PLOT_SIZE / PLOT_SUBDIVISIONS as f32;
+    let crop = crop_colour(centre.x as usize, centre.y as usize);
+    let c = [crop[0], crop[1], crop[2], 1.0];
+    let n = PLOT_SUBDIVISIONS + 1;
+    let base = positions.len() as u32;
+    for m in 0..n {
+        for k in 0..n {
+            let p = centre + Vec2::new(-half + k as f32 * step, -half + m as f32 * step);
+            positions.push([p.x, map.height_at(p) + FIELD_LIFT, p.y]);
+            colors.push(c);
+        }
+    }
+    for m in 0..PLOT_SUBDIVISIONS {
+        for k in 0..PLOT_SUBDIVISIONS {
+            let a = base + (m * n + k) as u32;
+            let b = a + 1;
+            let d = a + n as u32;
+            let e = d + 1;
+            indices.extend_from_slice(&[a, d, b, b, d, e]);
+        }
+    }
 }
 
 fn spawn_trees(

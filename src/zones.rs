@@ -107,7 +107,7 @@ fn rule_for(zone: Zone) -> Rule {
             0.47,
         ),
         Zone::Moorland => (|s| s.elevation > 100.0 && s.slope < 0.5, 500.0, 0.50),
-        Zone::Pasture => (|s| s.elevation < 150.0 && s.slope < 0.30, 1.0, 0.0),
+        Zone::Pasture => (|s| s.elevation < 200.0 && s.slope < 0.50, 1.0, 0.0),
         Zone::Water | Zone::Open => (|_| false, 1.0, 0.0),
     };
     Rule {
