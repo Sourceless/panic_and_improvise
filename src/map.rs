@@ -12,7 +12,7 @@ const COUNT: usize = VERTS * VERTS;
 const NONE: u32 = u32::MAX;
 
 const FILL_EPSILON: f32 = 0.001;
-const SOURCE_EDGE_MARGIN: f32 = 60.0;
+const RIVER_SOURCE_MARGIN: f32 = 80.0;
 const WATER_SURFACE_BELOW_FILL: f32 = 0.5;
 const RIVER_BED_BELOW_WATER: f32 = 1.2;
 const CARVE_CORE: f32 = CELL * 0.5;
@@ -56,12 +56,19 @@ impl TerrainMap {
         let mut rng = Rng(seed);
         let hills = make_hills(&mut rng);
 
-        let base: Vec<f32> = (0..COUNT)
+        let mut base: Vec<f32> = (0..COUNT)
             .map(|idx| {
                 let (ix, iz) = (idx % VERTS, idx / VERTS);
                 raw_height(grid_pos(ix, iz), seed, &hills)
             })
             .collect();
+        for h in &mut base {
+            *h /= EROSION_HEIGHT_UNIT;
+        }
+        erode(&mut base, &mut Rng(seed ^ 0xE20D_E000));
+        for h in &mut base {
+            *h *= EROSION_HEIGHT_UNIT;
+        }
 
         let (filled, _order, receiver) = priority_flood(&base);
         let is_river = main_river(&filled, &receiver);
@@ -180,7 +187,7 @@ pub fn fbm(x: f32, z: f32, seed: u64, octaves: u32) -> f32 {
 }
 
 fn raw_height(p: Vec2, seed: u64, hills: &[Hill]) -> f32 {
-    let mut h = fbm(p.x / 160.0, p.y / 160.0, seed, 4) * 14.0 + 6.0;
+    let mut h = fbm(p.x / 170.0, p.y / 170.0, seed, 5) * 34.0 + 8.0;
     for hill in hills {
         let d = p.distance(hill.center) / hill.radius;
         if d < 1.0 {
@@ -237,10 +244,10 @@ fn priority_flood(base: &[f32]) -> (Vec<f32>, Vec<u32>, Vec<u32>) {
     (filled, order, receiver)
 }
 
-// The main river starts at the highest interior point and follows the flood's
-// receiver chain, so it always reaches the map edge as one continuous channel.
+// The main river rises at the highest interior point and follows the flow route down
+// to the map edge, so it is one continuous channel draining the eroded terrain.
 fn main_river(filled: &[f32], receiver: &[u32]) -> Vec<bool> {
-    let margin = (SOURCE_EDGE_MARGIN / CELL) as usize;
+    let margin = (RIVER_SOURCE_MARGIN / CELL) as usize;
     let source = (0..COUNT)
         .filter(|&i| {
             let (ix, iz) = (i % VERTS, i / VERTS);
@@ -259,6 +266,112 @@ fn main_river(filled: &[f32], receiver: &[u32]) -> Vec<bool> {
         }
     }
     is_river
+}
+
+const DROPLETS: usize = 120_000;
+const DROPLET_LIFETIME: usize = 80;
+const DROPLET_INERTIA: f32 = 0.1;
+const DROPLET_CAPACITY: f32 = 6.0;
+const DROPLET_MIN_SLOPE: f32 = 0.01;
+const DROPLET_ERODE: f32 = 0.4;
+const DROPLET_DEPOSIT: f32 = 0.2;
+const DROPLET_EVAPORATE: f32 = 0.02;
+const DROPLET_GRAVITY: f32 = 4.0;
+const EROSION_RADIUS: isize = 2;
+// Droplet erosion is tuned for heights of order one, so it runs in units of this many metres.
+const EROSION_HEIGHT_UNIT: f32 = 50.0;
+
+// Particle-based hydraulic erosion (after Lague, and Mei et al. 2007): water droplets roll
+// downhill, carry sediment up to a capacity set by speed and slope, erode when under
+// capacity and deposit when over it.
+fn erode(heights: &mut [f32], rng: &mut Rng) {
+    let max = (VERTS - 1) as f32;
+    for _ in 0..DROPLETS {
+        let mut pos = Vec2::new(rng.range(0.0, max), rng.range(0.0, max));
+        let mut dir = Vec2::ZERO;
+        let mut speed = 1.0_f32;
+        let mut water = 1.0_f32;
+        let mut sediment = 0.0_f32;
+
+        for _ in 0..DROPLET_LIFETIME {
+            let (grad, h) = gradient(heights, pos);
+            dir = (dir * DROPLET_INERTIA - grad * (1.0 - DROPLET_INERTIA)).normalize_or_zero();
+            if dir == Vec2::ZERO {
+                break;
+            }
+            let next = pos + dir;
+            if next.x < 0.0 || next.y < 0.0 || next.x >= max || next.y >= max {
+                break;
+            }
+            let delta = sample(heights, next) - h;
+
+            let capacity = (-delta).max(DROPLET_MIN_SLOPE) * speed * water * DROPLET_CAPACITY;
+            if sediment > capacity || delta > 0.0 {
+                let amount = if delta > 0.0 {
+                    delta.min(sediment)
+                } else {
+                    (sediment - capacity) * DROPLET_DEPOSIT
+                };
+                sediment -= amount;
+                deposit(heights, pos, amount);
+            } else {
+                let amount = ((capacity - sediment) * DROPLET_ERODE).min(-delta);
+                sediment += amount;
+                erode_brush(heights, pos, amount);
+            }
+
+            speed = (speed * speed - delta * DROPLET_GRAVITY).max(0.0).sqrt();
+            water *= 1.0 - DROPLET_EVAPORATE;
+            pos = next;
+        }
+    }
+}
+
+fn cell(heights: &[f32], ix: usize, iz: usize) -> f32 {
+    heights[iz * VERTS + ix]
+}
+
+fn sample(heights: &[f32], p: Vec2) -> f32 {
+    gradient(heights, p).1
+}
+
+// Bilinear height and its gradient (per grid cell) at a grid-space position.
+fn gradient(heights: &[f32], p: Vec2) -> (Vec2, f32) {
+    let (ix, iz) = (p.x.floor() as usize, p.y.floor() as usize);
+    let (fx, fz) = (p.x - ix as f32, p.y - iz as f32);
+    let (h00, h10) = (cell(heights, ix, iz), cell(heights, ix + 1, iz));
+    let (h01, h11) = (cell(heights, ix, iz + 1), cell(heights, ix + 1, iz + 1));
+    let gx = (h10 - h00) * (1.0 - fz) + (h11 - h01) * fz;
+    let gz = (h01 - h00) * (1.0 - fx) + (h11 - h10) * fx;
+    let h = h00 * (1.0 - fx) * (1.0 - fz) + h10 * fx * (1.0 - fz) + h01 * (1.0 - fx) * fz + h11 * fx * fz;
+    (Vec2::new(gx, gz), h)
+}
+
+fn deposit(heights: &mut [f32], p: Vec2, amount: f32) {
+    let (ix, iz) = (p.x.floor() as usize, p.y.floor() as usize);
+    let (fx, fz) = (p.x - ix as f32, p.y - iz as f32);
+    heights[iz * VERTS + ix] += amount * (1.0 - fx) * (1.0 - fz);
+    heights[iz * VERTS + ix + 1] += amount * fx * (1.0 - fz);
+    heights[(iz + 1) * VERTS + ix] += amount * (1.0 - fx) * fz;
+    heights[(iz + 1) * VERTS + ix + 1] += amount * fx * fz;
+}
+
+fn erode_brush(heights: &mut [f32], p: Vec2, amount: f32) {
+    let (cx, cz) = (p.x.round() as isize, p.y.round() as isize);
+    let mut weights = Vec::new();
+    for dz in -EROSION_RADIUS..=EROSION_RADIUS {
+        for dx in -EROSION_RADIUS..=EROSION_RADIUS {
+            let (x, z) = (cx + dx, cz + dz);
+            let d = ((dx * dx + dz * dz) as f32).sqrt();
+            if d < EROSION_RADIUS as f32 && x >= 0 && z >= 0 && (x as usize) < VERTS && (z as usize) < VERTS {
+                weights.push((z as usize * VERTS + x as usize, EROSION_RADIUS as f32 - d));
+            }
+        }
+    }
+    let total: f32 = weights.iter().map(|w| w.1).sum();
+    for (idx, w) in weights {
+        heights[idx] -= amount * w / total;
+    }
 }
 
 // Two-pass chamfer distance transform that also carries each cell's nearest river level.
@@ -372,11 +485,11 @@ fn find_site(rng: &mut Rng, map: &TerrainMap, existing: &[Poi], kind: PoiKind) -
         let river_dist = map.river_distance(p);
         let h = map.height_at(p);
         let river_ok = match kind {
-            PoiKind::Mill => river_dist > CELL && river_dist < 12.0,
+            PoiKind::Mill => river_dist > CELL && river_dist < 16.0,
             _ => river_dist > 40.0,
         };
         let height_ok = match kind {
-            PoiKind::Mill => h < 15.0,
+            PoiKind::Mill => h < 45.0,
             _ => h > 3.0 && h < 40.0,
         };
         let spacing_ok = existing
