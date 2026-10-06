@@ -1,5 +1,7 @@
 use bevy::prelude::*;
 
+use crate::map::TerrainMap;
+
 pub const DUMMY_HALF_EXTENTS: Vec3 = Vec3::new(0.35, 1.0, 0.35);
 const DUMMY_MAX_HEALTH: f32 = 100.0;
 const RESPAWN_DELAY: f32 = 2.0;
@@ -41,9 +43,20 @@ pub fn dummy_aabb(base: Vec3) -> (Vec3, Vec3) {
 
 pub fn spawn_dummy(
     mut commands: Commands,
+    map: Res<TerrainMap>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    let eye_ground = map.height_at(Vec2::ZERO);
+    let z = (-10..=-40)
+        .map(|z| -(z as f32))
+        .min_by(|&a, &b| {
+            (map.height_at(Vec2::new(0.0, a)) - eye_ground)
+                .abs()
+                .total_cmp(&(map.height_at(Vec2::new(0.0, b)) - eye_ground).abs())
+        })
+        .unwrap_or(-15.0);
+    let position = Vec3::new(0.0, map.height_at(Vec2::new(0.0, z)), z);
     let material = materials.add(StandardMaterial {
         base_color: Color::srgb(0.85, 0.75, 0.6),
         ..default()
@@ -53,7 +66,7 @@ pub fn spawn_dummy(
 
     commands
         .spawn((
-            Transform::from_xyz(0.0, 0.0, -15.0),
+            Transform::from_translation(position),
             Visibility::default(),
             TargetDummy {
                 health: DUMMY_MAX_HEALTH,

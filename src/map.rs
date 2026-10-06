@@ -17,7 +17,6 @@ const WATER_SURFACE_BELOW_FILL: f32 = 0.5;
 const RIVER_BED_BELOW_WATER: f32 = 1.2;
 const CARVE_CORE: f32 = CELL * 0.5;
 const CARVE_BANK: f32 = CELL * 4.0;
-const SPAWN_CLEARING: f32 = 60.0;
 const POI_MIN_SPACING: f32 = 150.0;
 
 #[derive(Clone, Copy, Debug)]
@@ -60,7 +59,7 @@ impl TerrainMap {
         let base: Vec<f32> = (0..COUNT)
             .map(|idx| {
                 let (ix, iz) = (idx % VERTS, idx / VERTS);
-                base_height(grid_pos(ix, iz), seed, &hills)
+                raw_height(grid_pos(ix, iz), seed, &hills)
             })
             .collect();
 
@@ -71,17 +70,16 @@ impl TerrainMap {
         let level: Vec<f32> = filled.iter().map(|f| f - WATER_SURFACE_BELOW_FILL).collect();
         let (river_distance, river_level) = distance_to_rivers(&is_river, &level);
 
-        let shift = clearing_level(seed, &hills);
         let heights: Vec<f32> = (0..COUNT)
             .map(|idx| {
                 let blend = 1.0 - smoothstep(CARVE_CORE, CARVE_BANK, river_distance[idx]);
                 let bed = base[idx].min(river_level[idx] - RIVER_BED_BELOW_WATER);
-                base[idx] + (bed - base[idx]) * blend - shift
+                base[idx] + (bed - base[idx]) * blend
             })
             .collect();
 
         let water = (0..COUNT)
-            .map(|idx| is_river[idx].then_some(level[idx] - shift))
+            .map(|idx| is_river[idx].then_some(level[idx]))
             .collect();
 
         let mut map = TerrainMap {
@@ -94,7 +92,37 @@ impl TerrainMap {
             pois: Vec::new(),
         };
         map.pois = place_pois(&mut rng, &map);
+        map.flatten_settlements();
         map
+    }
+
+    fn flatten_settlements(&mut self) {
+        for poi in self.pois.clone() {
+            let ground = self.height_at(poi.position);
+            let radius = settlement_radius(poi.kind);
+            for iz in 0..VERTS {
+                for ix in 0..VERTS {
+                    let d = grid_pos(ix, iz).distance(poi.position);
+                    if d < radius {
+                        let t = smoothstep(radius * 0.6, radius, d);
+                        let idx = iz * VERTS + ix;
+                        self.heights[idx] = ground + (self.heights[idx] - ground) * t;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn flat(height: f32) -> Self {
+        TerrainMap {
+            seed: 0,
+            heights: vec![height; COUNT],
+            water: vec![None; COUNT],
+            river_distance: vec![f32::MAX; COUNT],
+            river_cells: 0,
+            hills: Vec::new(),
+            pois: Vec::new(),
+        }
     }
 
     pub fn height_at(&self, p: Vec2) -> f32 {
@@ -149,32 +177,6 @@ pub fn fbm(x: f32, z: f32, seed: u64, octaves: u32) -> f32 {
         freq *= 2.0;
     }
     sum / norm
-}
-
-fn base_height(p: Vec2, seed: u64, hills: &[Hill]) -> f32 {
-    let clearing = clearing_level(seed, hills);
-    let t = smoothstep(SPAWN_CLEARING * 0.3, SPAWN_CLEARING, p.length());
-    clearing + (raw_height(p, seed, hills) - clearing) * t
-}
-
-// The spawn clearing sits at the average height of the ground around it, so a
-// low spot in the noise does not become a bowl.
-fn clearing_level(seed: u64, hills: &[Hill]) -> f32 {
-    let samples = 16;
-    let mut sum = 0.0;
-    let mut count = 0.0;
-    for iz in 0..samples {
-        for ix in 0..samples {
-            let u = ix as f32 / (samples - 1) as f32 * 2.0 - 1.0;
-            let v = iz as f32 / (samples - 1) as f32 * 2.0 - 1.0;
-            let p = Vec2::new(u, v) * SPAWN_CLEARING;
-            if p.length() <= SPAWN_CLEARING {
-                sum += raw_height(p, seed, hills);
-                count += 1.0;
-            }
-        }
-    }
-    sum / count
 }
 
 fn raw_height(p: Vec2, seed: u64, hills: &[Hill]) -> f32 {
@@ -323,6 +325,15 @@ fn make_hills(rng: &mut Rng) -> Vec<Hill> {
     hills
 }
 
+pub fn settlement_radius(kind: PoiKind) -> f32 {
+    match kind {
+        PoiKind::Village => 30.0,
+        PoiKind::Church => 12.0,
+        PoiKind::Farm => 22.0,
+        PoiKind::Mill => 10.0,
+    }
+}
+
 fn place_pois(rng: &mut Rng, map: &TerrainMap) -> Vec<Poi> {
     let plan = [
         PoiKind::Village,
@@ -338,7 +349,7 @@ fn place_pois(rng: &mut Rng, map: &TerrainMap) -> Vec<Poi> {
         let position = if kind == PoiKind::Church {
             let village = pois.iter().rev().find(|p| p.kind == PoiKind::Village).copied();
             match village {
-                Some(v) => v.position + Vec2::new(12.0, 0.0),
+                Some(v) => v.position + Vec2::new(0.0, 26.0),
                 None => continue,
             }
         } else {

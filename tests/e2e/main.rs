@@ -19,6 +19,7 @@ use cucumber::writer::Stats;
 use fps_prototype::player::{spawn_player, CursorIntent, FpsCamera};
 use fps_prototype::target::{spawn_dummy, TargetDummy};
 use fps_prototype::weapon::{spawn_gun, Bullet, BulletAssets, Gun};
+use fps_prototype::map::TerrainMap;
 use fps_prototype::GamePlugin;
 
 pub enum Command {
@@ -126,7 +127,8 @@ fn build_app(headed: bool, rx: Receiver<Command>) -> App {
         ));
     }
 
-    app.add_plugins(GamePlugin)
+    app.insert_resource(TerrainMap::flat(0.0))
+        .add_plugins(GamePlugin)
         .insert_resource(Bridge { rx: Mutex::new(rx) })
         .init_resource::<PendingTaps>()
         .init_resource::<HeldButtons>()

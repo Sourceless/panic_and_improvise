@@ -1,5 +1,6 @@
 pub mod map;
 pub mod player;
+pub mod settlement;
 pub mod target;
 pub mod terrain;
 pub mod weapon;
@@ -15,11 +16,13 @@ pub struct GamePlugin;
 
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(TerrainMap::generate(MAP_SEED))
-            .add_plugins((
-                player::PlayerPlugin,
-                weapon::WeaponPlugin,
-                target::TargetPlugin,
-            ));
+        if !app.world().contains_resource::<TerrainMap>() {
+            app.insert_resource(TerrainMap::generate(MAP_SEED));
+        }
+        app.add_plugins((
+            player::PlayerPlugin,
+            weapon::WeaponPlugin,
+            target::TargetPlugin,
+        ));
     }
 }

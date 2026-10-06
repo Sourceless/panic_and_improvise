@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use crate::player::{spawn_player, toggle_cursor_grab, FpsCamera};
+use crate::map::TerrainMap;
 use crate::target::{dummy_aabb, TargetDummy};
 
 const FIRE_INTERVAL: f32 = 0.12;
@@ -146,6 +147,7 @@ fn move_bullets(
     time: Res<Time>,
     mut bullets: Query<(Entity, &mut Transform, &mut Bullet)>,
     mut dummies: Query<(&Transform, &mut TargetDummy), Without<Bullet>>,
+    map: Res<TerrainMap>,
 ) {
     let dt = time.delta_secs();
     for (entity, mut transform, mut bullet) in &mut bullets {
@@ -167,7 +169,8 @@ fn move_bullets(
         }
 
         transform.translation = end;
-        if hit || bullet.age > BULLET_LIFETIME || end.y < 0.0 {
+        let ground = map.height_at(Vec2::new(end.x, end.z));
+        if hit || bullet.age > BULLET_LIFETIME || end.y < ground {
             commands.entity(entity).despawn();
         }
     }

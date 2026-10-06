@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use fps_prototype::target::TargetDummy;
 use fps_prototype::terrain::TerrainPlugin;
+use fps_prototype::map::TerrainMap;
 use fps_prototype::GamePlugin;
 
 #[derive(Component)]
@@ -23,6 +24,7 @@ fn main() {
 
 fn setup_scene(
     mut commands: Commands,
+    map: Res<TerrainMap>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -39,10 +41,11 @@ fn setup_scene(
         Vec3::new(0.0, 1.0, -20.0),
     ];
     for pos in positions {
+        let ground = map.height_at(Vec2::new(pos.x, pos.z));
         commands.spawn((
             Mesh3d(box_mesh.clone()),
             MeshMaterial3d(box_material.clone()),
-            Transform::from_translation(pos),
+            Transform::from_xyz(pos.x, ground + pos.y, pos.z),
         ));
     }
 

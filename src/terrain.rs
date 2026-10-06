@@ -6,7 +6,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
 
-use crate::map::{grid_pos, Poi, PoiKind, TerrainMap, CELL};
+use crate::map::{grid_pos, TerrainMap, CELL};
 
 const WATER_LIFT: f32 = 0.05;
 const YARD_RADIUS: f32 = 10.0;
@@ -71,18 +71,6 @@ fn load_textures(mut commands: Commands, asset_server: Res<AssetServer>) {
     });
 }
 
-struct PoiMaterials {
-    building: Handle<StandardMaterial>,
-    stone: Handle<StandardMaterial>,
-    brick: Handle<StandardMaterial>,
-    white: Handle<StandardMaterial>,
-}
-
-enum Shape {
-    Box(Vec3),
-    Cylinder(f32, f32),
-}
-
 fn spawn_world(
     mut commands: Commands,
     map: Res<TerrainMap>,
@@ -137,74 +125,7 @@ pub fn spawn_terrain(
         })),
     ));
 
-    let poi_materials = PoiMaterials {
-        building: standard.add(StandardMaterial {
-            base_color: Color::srgb(0.86, 0.8, 0.68),
-            ..default()
-        }),
-        stone: standard.add(StandardMaterial {
-            base_color: Color::srgb(0.6, 0.6, 0.58),
-            ..default()
-        }),
-        brick: standard.add(StandardMaterial {
-            base_color: Color::srgb(0.55, 0.22, 0.16),
-            ..default()
-        }),
-        white: standard.add(StandardMaterial {
-            base_color: Color::srgb(0.92, 0.92, 0.9),
-            ..default()
-        }),
-    };
-    for poi in &map.pois {
-        let ground = map.height_at(poi.position);
-        spawn_poi(commands, meshes, &poi_materials, poi, ground);
-    }
-}
-
-fn spawn_poi(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &PoiMaterials,
-    poi: &Poi,
-    ground: f32,
-) {
-    let root = commands
-        .spawn((
-            TerrainRoot,
-            Transform::from_xyz(poi.position.x, ground, poi.position.y),
-            Visibility::default(),
-        ))
-        .id();
-
-    let parts: Vec<(Shape, Handle<StandardMaterial>, Vec3)> = match poi.kind {
-        PoiKind::Village => (0..6)
-            .map(|i| {
-                let x = (i % 3) as f32 * 14.0 - 14.0;
-                let z = (i / 3) as f32 * 16.0 - 8.0;
-                (Shape::Box(Vec3::new(7.0, 4.0, 6.0)), materials.building.clone(), Vec3::new(x, 2.0, z))
-            })
-            .collect(),
-        PoiKind::Church => vec![
-            (Shape::Box(Vec3::new(6.0, 14.0, 6.0)), materials.stone.clone(), Vec3::new(0.0, 7.0, 0.0)),
-            (Shape::Box(Vec3::new(2.0, 8.0, 2.0)), materials.stone.clone(), Vec3::new(0.0, 18.0, 0.0)),
-        ],
-        PoiKind::Farm => vec![
-            (Shape::Box(Vec3::new(14.0, 7.0, 8.0)), materials.brick.clone(), Vec3::new(0.0, 3.5, 0.0)),
-            (Shape::Cylinder(2.5, 9.0), materials.white.clone(), Vec3::new(-14.0, 4.5, 0.0)),
-        ],
-        PoiKind::Mill => vec![(Shape::Cylinder(4.0, 13.0), materials.white.clone(), Vec3::new(0.0, 6.5, 0.0))],
-    };
-
-    for (shape, material, offset) in parts {
-        let mesh = match shape {
-            Shape::Box(size) => meshes.add(Cuboid::new(size.x, size.y, size.z)),
-            Shape::Cylinder(radius, height) => meshes.add(Cylinder::new(radius, height)),
-        };
-        let child = commands
-            .spawn((Mesh3d(mesh), MeshMaterial3d(material), Transform::from_translation(offset)))
-            .id();
-        commands.entity(root).add_child(child);
-    }
+    crate::settlement::spawn_settlements(commands, meshes, standard, map);
 }
 
 fn terrain_mesh(map: &TerrainMap) -> Mesh {

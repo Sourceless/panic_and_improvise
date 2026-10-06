@@ -74,12 +74,6 @@ fn map_has_points_of_interest_on_dry_land() {
 }
 
 #[test]
-fn spawn_area_is_flat_ground() {
-    let map = map();
-    assert_eq!(map.height_at(Vec2::ZERO), 0.0);
-}
-
-#[test]
 fn terrain_has_real_relief() {
     let map = map();
     let n = map.grid_size();
