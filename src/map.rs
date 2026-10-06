@@ -21,6 +21,8 @@ const VALLEY_FLAT: f32 = 30.0;
 const VALLEY_WIDTH: f32 = 150.0;
 const WATER_SURFACE_BELOW_FILL: f32 = 0.2;
 const RIVER_FILL_WIDTH: f32 = 18.0;
+const RIVER_LEVEL_WINDOW: usize = 10;
+const RIVER_FILL_OVERFLOW: f32 = 2.0;
 const RIVER_BED_BELOW_WATER: f32 = 1.5;
 const CARVE_CORE: f32 = CELL * 0.5;
 const CARVE_BANK: f32 = CELL * 4.0;
@@ -74,11 +76,14 @@ impl TerrainMap {
 
         let mut is_river = vec![false; COUNT];
         let mut level: Vec<f32> = base.iter().map(|h| h - WATER_SURFACE_BELOW_FILL).collect();
-        let mut surface = f32::MAX;
-        for &i in &path {
+        let raw: Vec<f32> = path
+            .iter()
+            .map(|&i| if base[i] < 0.0 { 0.0 } else { base[i] - WATER_SURFACE_BELOW_FILL })
+            .collect();
+        for (k, &i) in path.iter().enumerate() {
             is_river[i] = true;
-            surface = surface.min(base[i] - WATER_SURFACE_BELOW_FILL);
-            level[i] = surface;
+            let window = k.saturating_sub(RIVER_LEVEL_WINDOW)..(k + RIVER_LEVEL_WINDOW + 1).min(path.len());
+            level[i] = raw[window].iter().cloned().fold(f32::MAX, f32::min);
         }
         let river_len = path.windows(2).map(|w| grid_pos_of(w[0]).distance(grid_pos_of(w[1]))).sum();
         let (river_distance, river_level) = distance_to_rivers(&is_river, &level);
@@ -95,7 +100,7 @@ impl TerrainMap {
             .map(|idx| {
                 if is_river[idx] {
                     Some(level[idx])
-                } else if river_distance[idx] < RIVER_FILL_WIDTH && heights[idx] < river_level[idx] {
+                } else if river_distance[idx] < RIVER_FILL_WIDTH && heights[idx] < river_level[idx] + RIVER_FILL_OVERFLOW {
                     Some(river_level[idx])
                 } else if heights[idx] < 0.0 {
                     Some(0.0)
