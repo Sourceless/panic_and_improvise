@@ -291,14 +291,9 @@ fn spawn_field_colour(
 // Traces the boundary of the coarse ownership grid (between two different fields, or a
 // field and open ground) and merges consecutive same-kind cell-edges into single, longer
 // segments, rather than placing one box per cell-edge.
-fn spawn_field_boundaries(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    map: &TerrainMap,
-    coarse_owner: &[Option<u32>],
-    cn: usize,
-) {
+// Traces the coarse ownership grid for boundary cell-edges and merges consecutive
+// same-kind edges into single, longer run segments, bucketed by material kind.
+fn collect_boundary_segments(map: &TerrainMap, coarse_owner: &[Option<u32>], cn: usize) -> [Vec<Segment>; 3] {
     let n = map.grid_size();
     let tile = RENDER_STRIDE as f32 * CELL;
     let get = |cx: usize, cz: usize| coarse_owner[cz * cn + cx].unwrap_or(NONE_OWNER);
@@ -353,6 +348,19 @@ fn spawn_field_boundaries(
             }
         }
     }
+    buckets
+}
+
+fn spawn_field_boundaries(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    map: &TerrainMap,
+    coarse_owner: &[Option<u32>],
+    cn: usize,
+) {
+    let tile = RENDER_STRIDE as f32 * CELL;
+    let buckets = collect_boundary_segments(map, coarse_owner, cn);
 
     let specs = [
         (leaf_material([0.18, 0.38, 0.16]), 1.6, 1.9),
@@ -382,27 +390,24 @@ fn spawn_field_boundaries(
         let mut normals = Vec::new();
         let mut indices = Vec::new();
         for seg in segments {
-            // Step along the run's length rather than spanning it with one flat box, so a
-            // long wall or hedge follows the ground rising and falling beneath it instead
-            // of floating over dips and clipping into hills at its ends.
+            // Step along the run's length, pinning each short prism to the true ground
+            // height at both of its own endpoints - the same trick road_mesh uses for its
+            // ribbons - rather than one flat box spanning the whole run at a single height,
+            // which floated over dips and clipped into hills wherever the run climbed.
             let total_len = seg.half_len * 2.0;
             let steps = (total_len / tile).round().max(1.0) as usize;
             let step_len = total_len / steps as f32;
             for i in 0..steps {
-                let offset = -seg.half_len + step_len * (i as f32 + 0.5);
-                let sub_centre = if seg.along_z {
-                    Vec2::new(seg.centre.x, seg.centre.y + offset)
+                let t0 = -seg.half_len + step_len * i as f32;
+                let t1 = t0 + step_len;
+                let (a, b) = if seg.along_z {
+                    (Vec2::new(seg.centre.x, seg.centre.y + t0), Vec2::new(seg.centre.x, seg.centre.y + t1))
                 } else {
-                    Vec2::new(seg.centre.x + offset, seg.centre.y)
+                    (Vec2::new(seg.centre.x + t0, seg.centre.y), Vec2::new(seg.centre.x + t1, seg.centre.y))
                 };
-                let ground = map.height_at(sub_centre);
-                let centre = Vec3::new(sub_centre.x, ground + height / 2.0, sub_centre.y);
-                let half_extent = if seg.along_z {
-                    Vec3::new(thickness / 2.0, height / 2.0, step_len / 2.0)
-                } else {
-                    Vec3::new(step_len / 2.0, height / 2.0, thickness / 2.0)
-                };
-                push_box(&mut positions, &mut normals, &mut indices, centre, half_extent);
+                let ground_a = map.height_at(a);
+                let ground_b = map.height_at(b);
+                push_wall_segment(&mut positions, &mut normals, &mut indices, a, ground_a, b, ground_b, thickness, height);
             }
         }
         let mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
@@ -422,24 +427,54 @@ fn field_hash(p: Vec2, salt: u64) -> f32 {
     hash01((p.x + crate::map::HALF_SIZE).max(0.0) as usize, (p.y + crate::map::HALF_SIZE).max(0.0) as usize, salt)
 }
 
-fn push_box(positions: &mut Vec<[f32; 3]>, normals: &mut Vec<[f32; 3]>, indices: &mut Vec<u32>, centre: Vec3, half: Vec3) {
-    let (hx, hy, hz) = (half.x, half.y, half.z);
-    let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
-        ([1.0, 0.0, 0.0], [[hx, -hy, -hz], [hx, -hy, hz], [hx, hy, hz], [hx, hy, -hz]]),
-        ([-1.0, 0.0, 0.0], [[-hx, -hy, hz], [-hx, -hy, -hz], [-hx, hy, -hz], [-hx, hy, hz]]),
-        ([0.0, 1.0, 0.0], [[-hx, hy, -hz], [hx, hy, -hz], [hx, hy, hz], [-hx, hy, hz]]),
-        ([0.0, -1.0, 0.0], [[-hx, -hy, hz], [hx, -hy, hz], [hx, -hy, -hz], [-hx, -hy, -hz]]),
-        ([0.0, 0.0, 1.0], [[hx, -hy, hz], [-hx, -hy, hz], [-hx, hy, hz], [hx, hy, hz]]),
-        ([0.0, 0.0, -1.0], [[-hx, -hy, -hz], [hx, -hy, -hz], [hx, hy, -hz], [-hx, hy, -hz]]),
-    ];
-    for (normal, corners) in faces {
+// A short prism between two points, each pinned to its own ground height, rather than a
+// box translated to one flat height - so a chain of these follows the ground rising and
+// falling along its length exactly at each sample point, the same technique road_mesh uses
+// for its ribbons, extended with a top, two sides and end caps for real thickness/height.
+fn push_wall_segment(
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    indices: &mut Vec<u32>,
+    a: Vec2,
+    ground_a: f32,
+    b: Vec2,
+    ground_b: f32,
+    thickness: f32,
+    height: f32,
+) {
+    let dir = (b - a).normalize_or_zero();
+    let perp = Vec2::new(-dir.y, dir.x) * (thickness * 0.5);
+    let dir3 = Vec3::new(dir.x, 0.0, dir.y);
+    let perp3 = Vec3::new(perp.x, 0.0, perp.y).normalize_or_zero();
+
+    let corner = |p: Vec2, sign: f32, y: f32| {
+        let c = p + perp * sign;
+        Vec3::new(c.x, y, c.y)
+    };
+    let a_left_bot = corner(a, -1.0, ground_a);
+    let a_left_top = corner(a, -1.0, ground_a + height);
+    let a_right_bot = corner(a, 1.0, ground_a);
+    let a_right_top = corner(a, 1.0, ground_a + height);
+    let b_left_bot = corner(b, -1.0, ground_b);
+    let b_left_top = corner(b, -1.0, ground_b + height);
+    let b_right_bot = corner(b, 1.0, ground_b);
+    let b_right_top = corner(b, 1.0, ground_b + height);
+
+    let mut quad = |corners: [Vec3; 4], normal: Vec3| {
         let base = positions.len() as u32;
-        for corner in corners {
-            positions.push([centre.x + corner[0], centre.y + corner[1], centre.z + corner[2]]);
-            normals.push(normal);
+        for c in corners {
+            positions.push([c.x, c.y, c.z]);
+            normals.push([normal.x, normal.y, normal.z]);
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    }
+    };
+
+    // The underside sits exactly on the ground and is never seen, so it's skipped.
+    quad([a_left_top, a_right_top, b_right_top, b_left_top], Vec3::Y);
+    quad([a_left_bot, a_left_top, b_left_top, b_left_bot], -perp3);
+    quad([a_right_top, a_right_bot, b_right_bot, b_right_top], perp3);
+    quad([a_left_top, a_left_bot, a_right_bot, a_right_top], -dir3);
+    quad([b_left_bot, b_left_top, b_right_top, b_right_bot], dir3);
 }
 
 fn pasture_colour(bx: usize, bz: usize) -> [f32; 3] {
@@ -686,6 +721,80 @@ mod tests {
         // Each transition becomes at most one segment before merging; merging only reduces
         // this. The old rectangle grid produced on the order of a few thousand segments.
         assert!(transitions < 40000, "{transitions} raw boundary transitions, too many");
+    }
+
+    // Diagnostic, not an assertion: prints the merged boundary run with the largest height
+    // range along its length, as a MAP_VIEWER_TARGET to point the viewer at for a visual
+    // check of the contour-following fix. Run with:
+    //   cargo test --lib find_screenshot_hotspot -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn find_screenshot_hotspot() {
+        let (map, zones, params) = generate();
+        let n = map.grid_size();
+        let roads = crate::roads::RoadNetwork::generate(&map, &params);
+        let farms: Vec<Vec2> = map
+            .pois
+            .iter()
+            .filter(|p| p.kind == crate::map::PoiKind::Farm)
+            .map(|p| p.position)
+            .collect();
+        let is_farmland: Vec<bool> = (0..n * n)
+            .map(|idx| {
+                let (ix, iz) = (idx % n, idx / n);
+                let zone = zones.zone_at(ix, iz);
+                if zone != Zone::Arable && zone != Zone::Pasture {
+                    return false;
+                }
+                if roads.kind_at(ix, iz).is_some() {
+                    return false;
+                }
+                !farms.iter().any(|f| f.distance(grid_pos(ix, iz)) < FARM_YARD_RADIUS)
+            })
+            .collect();
+        let seeds = scatter_seeds(&map, &is_farmland, &params);
+        let owner = smooth_owners(&map, &is_farmland, claim_regions(&map, &is_farmland, &seeds, &params), SMOOTH_PASSES);
+        let cn = n.div_ceil(RENDER_STRIDE);
+        let coarse_owner: Vec<Option<u32>> = (0..cn * cn)
+            .map(|i| {
+                let (cx, cz) = (i % cn, i / cn);
+                let (fx, fz) = ((cx * RENDER_STRIDE).min(n - 1), (cz * RENDER_STRIDE).min(n - 1));
+                owner[fz * n + fx]
+            })
+            .collect();
+        let buckets = collect_boundary_segments(&map, &coarse_owner, cn);
+
+        let mut best: Option<(f32, Vec2, f32, bool)> = None;
+        for segments in &buckets {
+            for seg in segments {
+                if seg.half_len < 20.0 {
+                    continue;
+                }
+                let samples = 6;
+                let mut lo = f32::MAX;
+                let mut hi = f32::MIN;
+                for i in 0..=samples {
+                    let t = -seg.half_len + (2.0 * seg.half_len) * (i as f32 / samples as f32);
+                    let p = if seg.along_z {
+                        Vec2::new(seg.centre.x, seg.centre.y + t)
+                    } else {
+                        Vec2::new(seg.centre.x + t, seg.centre.y)
+                    };
+                    let h = map.height_at(p);
+                    lo = lo.min(h);
+                    hi = hi.max(h);
+                }
+                let range = hi - lo;
+                if best.map_or(true, |(b, ..)| range > b) {
+                    best = Some((range, seg.centre, seg.half_len, seg.along_z));
+                }
+            }
+        }
+        let (range, centre, half_len, along_z) = best.expect("no boundary segments found");
+        println!(
+            "HOTSPOT target={:.0},{:.0} half_len={:.0} along_z={} height_range={:.1}",
+            centre.x, centre.y, half_len, along_z, range
+        );
     }
 }
 

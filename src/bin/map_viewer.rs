@@ -73,8 +73,8 @@ fn main() {
         .insert_resource(Viewer {
             seed,
             pending_regen: false,
-            yaw: 0.8,
-            pitch: 0.6,
+            yaw: std::env::var("MAP_VIEWER_YAW").ok().and_then(|v| v.parse().ok()).unwrap_or(0.8),
+            pitch: std::env::var("MAP_VIEWER_PITCH").ok().and_then(|v| v.parse().ok()).unwrap_or(0.6),
             distance: distance.unwrap_or(4500.0),
             zones_on: std::env::var("MAP_VIEWER_ZONES").is_ok(),
             params_open: false,
