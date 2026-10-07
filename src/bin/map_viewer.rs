@@ -9,12 +9,12 @@ use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::pbr::{MeshMaterial3d};
 use fps_prototype::map::TerrainMap;
 use fps_prototype::fill::spawn_fill;
+use fps_prototype::roads::{road_mesh, RoadKind, RoadNetwork};
 use fps_prototype::zones::{overlay_mesh, ZoneMap};
 use fps_prototype::settlement::SettlementRoot;
 use fps_prototype::terrain::{spawn_terrain, TerrainMaterial, TerrainPlugin, TerrainRoot, TerrainTextures};
 use fps_prototype::MAP_SEED;
 
-const ORBIT_TARGET: Vec3 = Vec3::ZERO;
 const MIN_DISTANCE: f32 = 300.0;
 const MAX_DISTANCE: f32 = 20000.0;
 const ORBIT_SENSITIVITY: f32 = 0.005;
@@ -28,6 +28,7 @@ struct Viewer {
     pitch: f32,
     distance: f32,
     zones_on: bool,
+    target: Vec2,
 }
 
 #[derive(Component)]
@@ -72,6 +73,13 @@ fn main() {
             pitch: 0.6,
             distance: distance.unwrap_or(4500.0),
             zones_on: std::env::var("MAP_VIEWER_ZONES").is_ok(),
+            target: std::env::var("MAP_VIEWER_TARGET")
+                .ok()
+                .and_then(|v| {
+                    let mut parts = v.split(',').filter_map(|n| n.trim().parse::<f32>().ok());
+                    Some(Vec2::new(parts.next()?, parts.next()?))
+                })
+                .unwrap_or(Vec2::ZERO),
         })
         .insert_resource(TerrainMap::generate(seed))
         .insert_non_send(ClipboardHandle(arboard::Clipboard::new().ok()))
@@ -80,7 +88,7 @@ fn main() {
             brightness: 300.0,
             ..default()
         })
-        .add_systems(Startup, (setup_scene, setup_hud, build_zones, build_fill).chain())
+        .add_systems(Startup, (setup_scene, setup_hud, build_zones, build_roads, build_fill).chain())
         .add_systems(
             Update,
             (handle_keys, copy_screenshot_key, orbit_input, regenerate, zone_overlay, update_camera, update_hud).chain(),
@@ -233,9 +241,12 @@ fn regenerate(
     }
     let map = TerrainMap::generate(viewer.seed);
     let zones = ZoneMap::generate(&map);
+    let roads = RoadNetwork::generate(&map);
     spawn_terrain(&mut commands, &mut meshes, &mut standard, &mut terrain, &textures, &map);
+    spawn_roads(&mut commands, &mut meshes, &mut standard, &map, &roads);
     spawn_fill(&mut commands, &mut meshes, &mut standard, &map, &zones);
     commands.insert_resource(zones);
+    commands.insert_resource(roads);
     commands.insert_resource(map);
 }
 
@@ -251,6 +262,38 @@ fn build_fill(
     mut standard: ResMut<Assets<StandardMaterial>>,
 ) {
     spawn_fill(&mut commands, &mut meshes, &mut standard, &map, &zones);
+}
+
+fn build_roads(mut commands: Commands, map: Res<TerrainMap>, mut meshes: ResMut<Assets<Mesh>>, mut standard: ResMut<Assets<StandardMaterial>>) {
+    let roads = RoadNetwork::generate(&map);
+    spawn_roads(&mut commands, &mut meshes, &mut standard, &map, &roads);
+    commands.insert_resource(roads);
+}
+
+fn spawn_roads(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    standard: &mut Assets<StandardMaterial>,
+    map: &TerrainMap,
+    roads: &RoadNetwork,
+) {
+    let major = standard.add(StandardMaterial {
+        base_color: Color::srgb(0.30, 0.29, 0.28),
+        perceptual_roughness: 0.95,
+        ..default()
+    });
+    let minor = standard.add(StandardMaterial {
+        base_color: Color::srgb(0.52, 0.42, 0.30),
+        perceptual_roughness: 1.0,
+        ..default()
+    });
+    for (kind, material) in [(RoadKind::Major, major), (RoadKind::Minor, minor)] {
+        commands.spawn((
+            TerrainRoot,
+            Mesh3d(meshes.add(road_mesh(map, roads, kind))),
+            MeshMaterial3d(material),
+        ));
+    }
 }
 
 fn zone_overlay(
@@ -303,6 +346,7 @@ fn orbit_input(
 }
 
 fn update_camera(viewer: Res<Viewer>, mut cameras: Query<&mut Transform, With<Camera3d>>) {
+    let orbit_target = Vec3::new(viewer.target.x, 0.0, viewer.target.y);
     let Ok(mut transform) = cameras.single_mut() else {
         return;
     };
@@ -311,16 +355,22 @@ fn update_camera(viewer: Res<Viewer>, mut cameras: Query<&mut Transform, With<Ca
         viewer.pitch.sin(),
         viewer.pitch.cos() * viewer.yaw.cos(),
     ) * viewer.distance;
-    *transform = Transform::from_translation(ORBIT_TARGET + offset).looking_at(ORBIT_TARGET, Vec3::Y);
+    *transform = Transform::from_translation(orbit_target + offset).looking_at(orbit_target, Vec3::Y);
 }
 
-fn update_hud(viewer: Res<Viewer>, map: Res<TerrainMap>, mut hud: Query<&mut Text, With<Hud>>) {
+fn update_hud(
+    viewer: Res<Viewer>,
+    map: Res<TerrainMap>,
+    roads: Res<RoadNetwork>,
+    mut hud: Query<&mut Text, With<Hud>>,
+) {
     let Ok(mut text) = hud.single_mut() else {
         return;
     };
     let (low, high) = map.height_range();
     text.0 = format!(
-        "Seed {}\nRelief: {:.0} to {:.0} m   River: {:.1} km   POIs: {}\n\n\
+        "Seed {}\nRelief: {:.0} to {:.0} m   River: {:.1} km   POIs: {}\n\
+         Roads: {:.1} km major, {:.1} km minor\n\n\
          N new seed   [ / ] previous / next seed\n\
          Drag: orbit   Wheel: zoom   C: copy screenshot   Z: zones",
         viewer.seed,
@@ -328,5 +378,7 @@ fn update_hud(viewer: Res<Viewer>, map: Res<TerrainMap>, mut hud: Query<&mut Tex
         high,
         map.river_length() / 1000.0,
         map.pois.len(),
+        roads.length(RoadKind::Major) / 1000.0,
+        roads.length(RoadKind::Minor) / 1000.0,
     );
 }

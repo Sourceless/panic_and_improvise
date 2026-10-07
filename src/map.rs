@@ -494,6 +494,8 @@ fn place_pois(rng: &mut Rng, map: &TerrainMap) -> Vec<Poi> {
         PoiKind::Village,
         PoiKind::Village,
         PoiKind::Village,
+        PoiKind::Village,
+        PoiKind::Village,
         PoiKind::Farm,
         PoiKind::Farm,
         PoiKind::Farm,
@@ -512,6 +514,8 @@ fn place_pois(rng: &mut Rng, map: &TerrainMap) -> Vec<Poi> {
         PoiKind::Farm,
         PoiKind::Village,
         PoiKind::Village,
+        PoiKind::Village,
+        PoiKind::Mill,
         PoiKind::Mill,
     ];
     let mut pois: Vec<Poi> = Vec::new();

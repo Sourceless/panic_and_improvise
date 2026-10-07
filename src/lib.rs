@@ -1,6 +1,7 @@
 pub mod fill;
 pub mod map;
 pub mod player;
+pub mod roads;
 pub mod settlement;
 pub mod target;
 pub mod terrain;
