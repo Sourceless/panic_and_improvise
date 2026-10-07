@@ -235,8 +235,14 @@ fn spawn_field_colour(
     field_colour: &[[f32; 3]],
     cn: usize,
 ) {
+    // Each coarse tile is split into a small sub-grid, rather than one flat quad, so the
+    // colour mesh follows the terrain's curvature inside a tile instead of only matching it
+    // at the tile's 4 corners.
+    const SUB: usize = 3;
     let n = map.grid_size();
-    let half = (RENDER_STRIDE as f32 * CELL) * 0.5;
+    let tile = RENDER_STRIDE as f32 * CELL;
+    let half = tile * 0.5;
+    let step = tile / SUB as f32;
     let mut positions = Vec::new();
     let mut colors = Vec::new();
     let mut indices = Vec::new();
@@ -247,13 +253,19 @@ fn spawn_field_colour(
             let p = grid_pos(fx, fz);
             let c = field_colour[id as usize];
             let colour = [c[0], c[1], c[2], 1.0];
-            let base = positions.len() as u32;
-            for (dx, dz) in [(-half, -half), (half, -half), (half, half), (-half, half)] {
-                let corner = p + Vec2::new(dx, dz);
-                positions.push([corner.x, map.height_at(corner) + FIELD_LIFT, corner.y]);
-                colors.push(colour);
+            let origin = p + Vec2::new(-half, -half);
+            for sz in 0..SUB {
+                for sx in 0..SUB {
+                    let corner0 = origin + Vec2::new(sx as f32 * step, sz as f32 * step);
+                    let base = positions.len() as u32;
+                    for (dx, dz) in [(0.0, 0.0), (step, 0.0), (step, step), (0.0, step)] {
+                        let corner = corner0 + Vec2::new(dx, dz);
+                        positions.push([corner.x, map.height_at(corner) + FIELD_LIFT, corner.y]);
+                        colors.push(colour);
+                    }
+                    indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+                }
             }
-            indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
         }
     }
     if positions.is_empty() {
@@ -370,14 +382,28 @@ fn spawn_field_boundaries(
         let mut normals = Vec::new();
         let mut indices = Vec::new();
         for seg in segments {
-            let ground = map.height_at(seg.centre);
-            let centre = Vec3::new(seg.centre.x, ground + height / 2.0, seg.centre.y);
-            let half_extent = if seg.along_z {
-                Vec3::new(thickness / 2.0, height / 2.0, seg.half_len)
-            } else {
-                Vec3::new(seg.half_len, height / 2.0, thickness / 2.0)
-            };
-            push_box(&mut positions, &mut normals, &mut indices, centre, half_extent);
+            // Step along the run's length rather than spanning it with one flat box, so a
+            // long wall or hedge follows the ground rising and falling beneath it instead
+            // of floating over dips and clipping into hills at its ends.
+            let total_len = seg.half_len * 2.0;
+            let steps = (total_len / tile).round().max(1.0) as usize;
+            let step_len = total_len / steps as f32;
+            for i in 0..steps {
+                let offset = -seg.half_len + step_len * (i as f32 + 0.5);
+                let sub_centre = if seg.along_z {
+                    Vec2::new(seg.centre.x, seg.centre.y + offset)
+                } else {
+                    Vec2::new(seg.centre.x + offset, seg.centre.y)
+                };
+                let ground = map.height_at(sub_centre);
+                let centre = Vec3::new(sub_centre.x, ground + height / 2.0, sub_centre.y);
+                let half_extent = if seg.along_z {
+                    Vec3::new(thickness / 2.0, height / 2.0, step_len / 2.0)
+                } else {
+                    Vec3::new(step_len / 2.0, height / 2.0, thickness / 2.0)
+                };
+                push_box(&mut positions, &mut normals, &mut indices, centre, half_extent);
+            }
         }
         let mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
             .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
