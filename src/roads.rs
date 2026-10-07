@@ -8,6 +8,8 @@ use bevy::prelude::*;
 use crate::map::{grid_pos, PoiKind, TerrainMap, CELL, HALF_SIZE};
 
 const ROAD_LIFT: f32 = 0.25;
+const MAJOR_HALF_WIDTH: f32 = 4.0;
+const MINOR_HALF_WIDTH: f32 = 2.2;
 
 // Major roads (between villages and the mill) tolerate more climbing and wider water
 // crossings than minor roads (farm tracks), which stick closer to flat, dry ground.
@@ -26,6 +28,7 @@ pub enum RoadKind {
 #[derive(Resource)]
 pub struct RoadNetwork {
     cells: Vec<Option<RoadKind>>,
+    edges: Vec<(usize, usize, RoadKind)>,
     verts: usize,
 }
 
@@ -33,6 +36,7 @@ impl RoadNetwork {
     pub fn generate(map: &TerrainMap) -> Self {
         let n = map.grid_size();
         let mut cells: Vec<Option<RoadKind>> = vec![None; n * n];
+        let mut edges: Vec<(usize, usize, RoadKind)> = Vec::new();
 
         let hubs: Vec<usize> = map
             .pois
@@ -48,7 +52,7 @@ impl RoadNetwork {
             .collect();
 
         if let Some((&first, rest)) = hubs.split_first() {
-            grow_network(map, vec![first], rest.to_vec(), RoadKind::Major, &mut cells);
+            grow_network(map, vec![first], rest.to_vec(), RoadKind::Major, &mut cells, &mut edges);
         }
 
         let seeds: Vec<usize> = hubs
@@ -56,9 +60,9 @@ impl RoadNetwork {
             .copied()
             .chain((0..n * n).filter(|&i| cells[i].is_some()))
             .collect();
-        grow_network(map, seeds, farms, RoadKind::Minor, &mut cells);
+        grow_network(map, seeds, farms, RoadKind::Minor, &mut cells, &mut edges);
 
-        RoadNetwork { cells, verts: n }
+        RoadNetwork { cells, edges, verts: n }
     }
 
     pub fn kind_at(&self, ix: usize, iz: usize) -> Option<RoadKind> {
@@ -74,7 +78,14 @@ impl RoadNetwork {
 // everything already connected, the cheapest path to the nearest still-unconnected
 // target. The search stops as soon as it reaches any target, so each step costs roughly
 // the distance to the nearest unconnected settlement rather than the whole grid.
-fn grow_network(map: &TerrainMap, seeds: Vec<usize>, targets: Vec<usize>, kind: RoadKind, cells: &mut [Option<RoadKind>]) {
+fn grow_network(
+    map: &TerrainMap,
+    seeds: Vec<usize>,
+    targets: Vec<usize>,
+    kind: RoadKind,
+    cells: &mut [Option<RoadKind>],
+    edges: &mut Vec<(usize, usize, RoadKind)>,
+) {
     let mut connected = seeds;
     let mut remaining: HashSet<usize> = targets.into_iter().collect();
 
@@ -82,13 +93,22 @@ fn grow_network(map: &TerrainMap, seeds: Vec<usize>, targets: Vec<usize>, kind: 
         let Some((reached, previous)) = dijkstra_to_any(map, &connected, &remaining, kind, cells) else {
             break;
         };
+        // Walk back from the newly reached settlement toward the network, recording each
+        // step as an edge. Stop as soon as a cell that was already part of the network is
+        // hit, since the rest of the path back to its root was already recorded earlier -
+        // without this, every later connection would re-walk and re-record the whole shared
+        // corridor back to the root, multiplying the ribbon geometry.
         let mut current = reached;
         loop {
-            if cells[current].is_none() {
-                cells[current] = Some(kind);
+            if cells[current].is_some() {
+                break;
             }
+            cells[current] = Some(kind);
             match previous[current] {
-                Some(p) => current = p,
+                Some(p) => {
+                    edges.push((current, p, kind));
+                    current = p;
+                }
                 None => break,
             }
         }
@@ -174,32 +194,39 @@ fn nearest_cell(map: &TerrainMap, p: Vec2) -> usize {
     iz * n + ix
 }
 
-// A quad per road cell, lifted above the terrain (and above any water, for bridges).
+// An oriented ribbon quad per edge of the path, rather than a tile per grid cell, so the
+// road follows its actual route (including diagonal steps) instead of looking like
+// stacked grid squares. Corner heights come from the smooth, bilinearly interpolated
+// terrain height rather than the grid vertex, and are raised above any water for bridges.
 pub fn road_mesh(map: &TerrainMap, roads: &RoadNetwork, kind: RoadKind) -> Mesh {
-    let n = map.grid_size();
-    // Full cell width so adjacent road cells tile with no gaps, matching how water and
-    // fields are rendered elsewhere on the map.
-    let half = CELL * 0.5;
+    let half_width = if kind == RoadKind::Major { MAJOR_HALF_WIDTH } else { MINOR_HALF_WIDTH };
     let mut positions = Vec::new();
     let mut indices = Vec::new();
-    for iz in 0..n {
-        for ix in 0..n {
-            if roads.kind_at(ix, iz) != Some(kind) {
-                continue;
-            }
-            let p = grid_pos(ix, iz);
-            let ground = map.vertex_height(ix, iz).max(map.water_level(ix, iz).unwrap_or(f32::MIN));
-            let y = ground + ROAD_LIFT;
-            let base = positions.len() as u32;
-            for (dx, dz) in [(-half, -half), (half, -half), (half, half), (-half, half)] {
-                positions.push([p.x + dx, y, p.y + dz]);
-            }
-            indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+    for &(from, to, edge_kind) in &roads.edges {
+        if edge_kind != kind {
+            continue;
         }
+        let a = idx_to_pos(map, from);
+        let b = idx_to_pos(map, to);
+        let dir = (b - a).normalize_or_zero();
+        let perp = Vec2::new(-dir.y, dir.x) * half_width;
+        let base = positions.len() as u32;
+        for p in [a - perp, b - perp, b + perp, a + perp] {
+            let cell = nearest_cell(map, p);
+            let n = map.grid_size();
+            let ground = map.height_at(p).max(map.water_level(cell % n, cell / n).unwrap_or(f32::MIN));
+            positions.push([p.x, ground + ROAD_LIFT, p.y]);
+        }
+        indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
     }
     let normals = vec![[0.0, 1.0, 0.0]; positions.len()];
     Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
         .with_inserted_indices(Indices::U32(indices))
+}
+
+fn idx_to_pos(map: &TerrainMap, idx: usize) -> Vec2 {
+    let n = map.grid_size();
+    grid_pos(idx % n, idx / n)
 }

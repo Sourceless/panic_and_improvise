@@ -73,7 +73,7 @@ pub fn spawn_settlements(
                 );
                 village(meshes, &palette, &mut rng, church_offset)
             }
-            PoiKind::Farm => farm(meshes, &palette),
+            PoiKind::Farm => farm(meshes, &palette, &mut rng),
             PoiKind::Mill => mill(meshes, &palette),
         };
         for part in parts {
@@ -91,14 +91,21 @@ pub fn spawn_settlements(
 
 fn village(meshes: &mut Assets<Mesh>, palette: &Palette, rng: &mut Rng, church_offset: Vec3) -> Vec<Part> {
     let mut parts = Vec::new();
+    let rows = [-22.0_f32, -9.0, 9.0, 22.0];
     for i in 0..9 {
-        for &row_z in &[-22.0_f32, -9.0, 9.0, 22.0] {
-            if rng.unit() < 0.15 {
+        for (row_idx, &row_z) in rows.iter().enumerate() {
+            // Taper the skip chance toward the edges so the village reads as a loose
+            // cluster rather than a crisp rectangle of houses.
+            let dx = (i as f32 - 4.0).abs() / 4.0;
+            let dz = (row_idx as f32 - 1.5).abs() / 1.5;
+            let edge = dx.max(dz);
+            if rng.unit() < 0.08 + 0.4 * edge {
                 continue;
             }
-            let x = -48.0 + i as f32 * 12.0 + rng.range(-1.5, 1.5);
-            let z = row_z + rng.range(-1.0, 1.0);
-            let yaw = if rng.unit() < 0.15 { FRAC_PI_2 } else { 0.0 };
+            let x = -48.0 + i as f32 * 12.0 + rng.range(-4.5, 4.5);
+            let z = row_z + rng.range(-3.5, 3.5);
+            let base_yaw = if rng.unit() < 0.15 { FRAC_PI_2 } else { 0.0 };
+            let yaw = base_yaw + rng.range(-0.35, 0.35);
             let walls = palette.walls[(rng.unit() * palette.walls.len() as f32) as usize % palette.walls.len()].clone();
             let roof = if rng.unit() < 0.7 { palette.slate.clone() } else { palette.tile.clone() };
             house(
@@ -133,54 +140,60 @@ fn church(meshes: &mut Assets<Mesh>, palette: &Palette) -> Vec<Part> {
     parts
 }
 
-fn farm(meshes: &mut Assets<Mesh>, palette: &Palette) -> Vec<Part> {
+fn farm(meshes: &mut Assets<Mesh>, palette: &Palette, rng: &mut Rng) -> Vec<Part> {
     let mut parts = Vec::new();
+    let jitter = |rng: &mut Rng| Vec2::new(rng.range(-2.0, 2.0), rng.range(-2.0, 2.0));
+    let j = jitter(rng);
     house(
         &mut parts,
         meshes,
         palette.walls[0].clone(),
         palette.tile.clone(),
-        Vec3::new(-12.0, 0.0, 0.0),
-        0.0,
+        Vec3::new(-12.0 + j.x, 0.0, j.y),
+        rng.range(-0.15, 0.15),
         9.0,
         6.5,
         4.5,
     );
+    let j = jitter(rng);
     house(
         &mut parts,
         meshes,
         palette.brick.clone(),
         palette.slate.clone(),
-        Vec3::new(8.0, 0.0, 6.0),
-        0.0,
+        Vec3::new(8.0 + j.x, 0.0, 6.0 + j.y),
+        rng.range(-0.15, 0.15),
         16.0,
         9.0,
         6.5,
     );
+    let j = jitter(rng);
     house(
         &mut parts,
         meshes,
         palette.brick.clone(),
         palette.slate.clone(),
-        Vec3::new(10.0, 0.0, -14.0),
-        0.0,
+        Vec3::new(10.0 + j.x, 0.0, -14.0 + j.y),
+        rng.range(-0.15, 0.15),
         22.0,
         10.0,
         7.0,
     );
     for x in [-4.0, 0.0] {
+        let j = jitter(rng);
         push(
             &mut parts,
             meshes.add(Cylinder::new(2.6, 9.5)),
             palette.white.clone(),
-            Transform::from_xyz(x - 2.0, 4.75, -9.0),
+            Transform::from_xyz(x - 2.0 + j.x, 4.75, -9.0 + j.y),
         );
     }
+    let j = jitter(rng);
     push(
         &mut parts,
         meshes.add(Cylinder::new(3.0, 12.0)),
         palette.stone.clone(),
-        Transform::from_xyz(-14.0, 6.0, 14.0),
+        Transform::from_xyz(-14.0 + j.x, 6.0, 14.0 + j.y),
     );
     parts
 }
