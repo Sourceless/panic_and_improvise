@@ -34,7 +34,7 @@ fn arable_is_never_on_high_ground() {
     for iz in 0..n {
         for ix in 0..n {
             if zones.zone_at(ix, iz) == Zone::Arable {
-                assert!(map.vertex_height(ix, iz) < 90.0, "arable at {}m", map.vertex_height(ix, iz));
+                assert!(map.vertex_height(ix, iz) < 130.0, "arable at {}m", map.vertex_height(ix, iz));
             }
         }
     }

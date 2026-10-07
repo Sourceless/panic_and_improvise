@@ -81,12 +81,12 @@ fn rule_for(zone: Zone) -> Rule {
         Zone::Industrial => (
             |s| (250.0..1200.0).contains(&s.village_distance) && s.slope < 0.06 && s.elevation < 110.0 && s.river_distance > 80.0,
             400.0,
-            0.58,
+            0.68,
         ),
         Zone::Military => (
             |s| s.village_distance > 1500.0 && s.slope < 0.10 && s.elevation < 150.0,
             900.0,
-            0.62,
+            0.74,
         ),
         Zone::Orchard => (
             |s| s.farm_distance < 300.0 && s.elevation < 70.0 && s.slope < 0.12,
@@ -98,16 +98,16 @@ fn rule_for(zone: Zone) -> Rule {
             150.0,
             0.45,
         ),
-        Zone::Quarry => (|s| s.slope > 0.45 && s.elevation > 90.0, 120.0, 0.55),
-        Zone::Conifer => (|s| s.elevation > 110.0 && s.slope < 0.7, 250.0, 0.50),
-        Zone::Woodland => (|s| s.elevation < 150.0 && s.slope < 0.5, 300.0, 0.50),
+        Zone::Quarry => (|s| s.slope > 0.5 && s.elevation > 100.0, 120.0, 0.62),
+        Zone::Conifer => (|s| s.elevation > 140.0 && s.slope < 0.7, 250.0, 0.62),
+        Zone::Woodland => (|s| s.elevation < 170.0 && s.slope < 0.5, 300.0, 0.70),
         Zone::Arable => (
-            |s| s.elevation < 90.0 && s.slope < 0.10 && s.river_distance > 40.0,
+            |s| s.elevation < 130.0 && s.slope < 0.14 && s.river_distance > 30.0,
             350.0,
-            0.47,
+            0.38,
         ),
-        Zone::Moorland => (|s| s.elevation > 100.0 && s.slope < 0.5, 500.0, 0.50),
-        Zone::Pasture => (|s| s.elevation < 200.0 && s.slope < 0.50, 1.0, 0.0),
+        Zone::Moorland => (|s| s.elevation > 150.0 && s.slope < 0.5, 500.0, 0.60),
+        Zone::Pasture => (|s| s.elevation < 230.0 && s.slope < 0.55, 1.0, 0.0),
         Zone::Water | Zone::Open => (|_| false, 1.0, 0.0),
     };
     Rule {
