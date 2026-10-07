@@ -9,6 +9,7 @@ use crate::zones::{Zone, ZoneMap};
 
 const TREE_SPACING: f32 = 16.0;
 const FIELD_LIFT: f32 = 0.15;
+const PLOT_MAX_RELIEF: f32 = 14.0;
 const SHED_SPACING: f32 = 60.0;
 
 pub fn spawn_fill(
@@ -23,13 +24,37 @@ pub fn spawn_fill(
     spawn_sheds(commands, meshes, materials, map, zones);
 }
 
-const PLOT_SIZE: f32 = 100.0;
-const PLOT_SUBDIVISIONS: usize = 4;
-const PLOT_MAX_RELIEF: f32 = 14.0;
+const PARCEL_SIZE: f32 = 320.0;
+const MIN_LEAF_AREA: f32 = 7000.0;
+const MAX_LEAF_AREA: f32 = 20000.0;
+const MAX_SPLIT_DEPTH: u32 = 5;
 const FARM_YARD_RADIUS: f32 = 42.0;
+const SUBCELL_TARGET: f32 = 22.0;
 
-// Tiles the whole farmland zone (Arable and Pasture) into square fields, each bordered
-// by a hedge, stone wall or fence. Farmyards around each farm's buildings are left clear.
+// A leaf rectangle from the field subdivision, in world space.
+#[derive(Clone, Copy)]
+struct Field {
+    min: Vec2,
+    max: Vec2,
+}
+
+impl Field {
+    fn centre(self) -> Vec2 {
+        (self.min + self.max) * 0.5
+    }
+
+    fn size(self) -> Vec2 {
+        self.max - self.min
+    }
+}
+
+// Tiles the whole farmland zone (Arable and Pasture) into fields, each bordered by a
+// hedge, stone wall or fence. Farmyards around each farm's buildings are left clear.
+//
+// Fields are not a uniform grid: each 320m parcel is recursively split in two along its
+// longer side, at a randomised ratio, until the pieces are field-sized. This gives the
+// varied rectangle shapes and sizes real field patterns have, rather than identical
+// squares.
 fn spawn_field_tiling(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -47,37 +72,41 @@ fn spawn_field_tiling(
     let mut positions = Vec::new();
     let mut colors = Vec::new();
     let mut indices = Vec::new();
-    let mut boundaries: [Vec<Vec2>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    let mut boundaries: [Vec<Field>; 3] = [Vec::new(), Vec::new(), Vec::new()];
 
     let half_map = crate::map::HALF_SIZE;
-    let cols = (crate::map::MAP_SIZE / PLOT_SIZE) as i32;
+    let cols = (crate::map::MAP_SIZE / PARCEL_SIZE).ceil() as i32;
+    let mut leaves = Vec::new();
     for pz in 0..cols {
         for px in 0..cols {
-            let centre = Vec2::new(
-                -half_map + (px as f32 + 0.5) * PLOT_SIZE,
-                -half_map + (pz as f32 + 0.5) * PLOT_SIZE,
-            );
-            let (cx, cz) = nearest_cell(map, centre);
-            let zone = zones.zone_at(cx, cz);
-            if zone != Zone::Arable && zone != Zone::Pasture {
-                continue;
-            }
-            if farms.iter().any(|f| f.distance(centre) < FARM_YARD_RADIUS) {
-                continue;
-            }
-            if !plot_is_suitable(map, centre) {
-                continue;
-            }
-            let block = (px.div_euclid(2), pz.div_euclid(2));
-            let colour = if zone == Zone::Arable {
-                crop_colour(block.0 as usize, block.1 as usize)
-            } else {
-                pasture_colour(block.0 as usize, block.1 as usize)
-            };
-            add_plot_grid(map, centre, colour, &mut positions, &mut colors, &mut indices);
+            let min = Vec2::new(-half_map + px as f32 * PARCEL_SIZE, -half_map + pz as f32 * PARCEL_SIZE);
+            let max = (min + Vec2::splat(PARCEL_SIZE)).min(Vec2::splat(half_map));
+            leaves.clear();
+            subdivide(min, max, 0, &mut leaves);
+            for field in leaves.drain(..) {
+                let centre = field.centre();
+                let (cx, cz) = nearest_cell(map, centre);
+                let zone = zones.zone_at(cx, cz);
+                if zone != Zone::Arable && zone != Zone::Pasture {
+                    continue;
+                }
+                if farms.iter().any(|f| f.distance(centre) < FARM_YARD_RADIUS) {
+                    continue;
+                }
+                if !field_is_suitable(map, field) {
+                    continue;
+                }
+                let block = ((centre.x / 150.0) as i64, (centre.y / 150.0) as i64);
+                let colour = if zone == Zone::Arable {
+                    crop_colour(block.0 as usize, block.1 as usize)
+                } else {
+                    pasture_colour(block.0 as usize, block.1 as usize)
+                };
+                add_field_grid(map, field, colour, &mut positions, &mut colors, &mut indices);
 
-            let kind = (hash01(px as usize, pz as usize, 21) * 3.0) as usize;
-            boundaries[kind.min(2)].push(centre);
+                let kind = (field_hash(centre, 21) * 3.0) as usize;
+                boundaries[kind.min(2)].push(field);
+            }
         }
     }
 
@@ -118,21 +147,22 @@ fn spawn_field_tiling(
             1.2,
         ),
     ];
-    for (centres, (material, thickness, height)) in boundaries.into_iter().zip(specs) {
-        if centres.is_empty() {
+    for (fields, (material, thickness, height)) in boundaries.into_iter().zip(specs) {
+        if fields.is_empty() {
             continue;
         }
         let mat = materials.add(material);
         let mut positions = Vec::new();
         let mut normals = Vec::new();
         let mut indices = Vec::new();
-        let half = PLOT_SIZE * 0.5;
-        for centre in centres {
+        for field in fields {
+            let half = field.size() * 0.5;
+            let centre = field.centre();
             for (offset, half_extent) in [
-                (Vec2::new(0.0, -half), Vec3::new(half, height / 2.0, thickness / 2.0)),
-                (Vec2::new(0.0, half), Vec3::new(half, height / 2.0, thickness / 2.0)),
-                (Vec2::new(-half, 0.0), Vec3::new(thickness / 2.0, height / 2.0, half)),
-                (Vec2::new(half, 0.0), Vec3::new(thickness / 2.0, height / 2.0, half)),
+                (Vec2::new(0.0, -half.y), Vec3::new(half.x, height / 2.0, thickness / 2.0)),
+                (Vec2::new(0.0, half.y), Vec3::new(half.x, height / 2.0, thickness / 2.0)),
+                (Vec2::new(-half.x, 0.0), Vec3::new(thickness / 2.0, height / 2.0, half.y)),
+                (Vec2::new(half.x, 0.0), Vec3::new(thickness / 2.0, height / 2.0, half.y)),
             ] {
                 let mid = centre + offset;
                 let ground = map.height_at(mid);
@@ -146,6 +176,38 @@ fn spawn_field_tiling(
             .with_inserted_indices(Indices::U32(indices));
         commands.spawn((TerrainRoot, Mesh3d(meshes.add(mesh)), MeshMaterial3d(mat)));
     }
+}
+
+// Splits a rectangle in two along its longer axis at a randomised ratio, recursing until
+// the pieces are field-sized. Larger pieces have a chance to stop early too, so fields end
+// up with varied sizes rather than all bottoming out at the same minimum.
+fn subdivide(min: Vec2, max: Vec2, depth: u32, out: &mut Vec<Field>) {
+    let size = max - min;
+    let area = size.x * size.y;
+    let centre = (min + max) * 0.5;
+    let stop_early = area <= MAX_LEAF_AREA && field_hash(centre, 30) < 0.3;
+    let ratio = 0.35 + field_hash(centre, 31) * 0.3;
+    // Don't split if either resulting child would fall below the minimum: an area just
+    // above the floor can still produce an undersized child from an uneven ratio.
+    let smallest_child = area * ratio.min(1.0 - ratio);
+    let would_undersize = smallest_child < MIN_LEAF_AREA;
+    if depth >= MAX_SPLIT_DEPTH || area <= MIN_LEAF_AREA || stop_early || would_undersize {
+        out.push(Field { min, max });
+        return;
+    }
+    if size.x >= size.y {
+        let cut = min.x + size.x * ratio;
+        subdivide(min, Vec2::new(cut, max.y), depth + 1, out);
+        subdivide(Vec2::new(cut, min.y), max, depth + 1, out);
+    } else {
+        let cut = min.y + size.y * ratio;
+        subdivide(min, Vec2::new(max.x, cut), depth + 1, out);
+        subdivide(Vec2::new(min.x, cut), max, depth + 1, out);
+    }
+}
+
+fn field_hash(p: Vec2, salt: u64) -> f32 {
+    hash01((p.x + crate::map::HALF_SIZE).max(0.0) as usize, (p.y + crate::map::HALF_SIZE).max(0.0) as usize, salt)
 }
 
 fn push_box(positions: &mut Vec<[f32; 3]>, normals: &mut Vec<[f32; 3]>, indices: &mut Vec<u32>, centre: Vec3, half: Vec3) {
@@ -168,16 +230,12 @@ fn push_box(positions: &mut Vec<[f32; 3]>, normals: &mut Vec<[f32; 3]>, indices:
     }
 }
 
-fn plot_is_suitable(map: &TerrainMap, centre: Vec2) -> bool {
-    let half = PLOT_SIZE * 0.5;
+fn field_is_suitable(map: &TerrainMap, field: Field) -> bool {
+    let (sub_x, sub_z) = subdivisions(field);
     let (mut lo, mut hi) = (f32::MAX, f32::MIN);
-    for k in 0..=PLOT_SUBDIVISIONS {
-        for m in 0..=PLOT_SUBDIVISIONS {
-            let p = centre
-                + Vec2::new(
-                    -half + k as f32 * PLOT_SIZE / PLOT_SUBDIVISIONS as f32,
-                    -half + m as f32 * PLOT_SIZE / PLOT_SUBDIVISIONS as f32,
-                );
+    for k in 0..=sub_x {
+        for m in 0..=sub_z {
+            let p = field.min + field.size() * Vec2::new(k as f32 / sub_x as f32, m as f32 / sub_z as f32);
             let (ix, iz) = nearest_cell(map, p);
             if map.water_level(ix, iz).is_some() {
                 return false;
@@ -190,31 +248,38 @@ fn plot_is_suitable(map: &TerrainMap, centre: Vec2) -> bool {
     hi - lo <= PLOT_MAX_RELIEF
 }
 
-fn add_plot_grid(
+fn subdivisions(field: Field) -> (usize, usize) {
+    let size = field.size();
+    (
+        ((size.x / SUBCELL_TARGET).round() as usize).clamp(2, 8),
+        ((size.y / SUBCELL_TARGET).round() as usize).clamp(2, 8),
+    )
+}
+
+fn add_field_grid(
     map: &TerrainMap,
-    centre: Vec2,
+    field: Field,
     colour: [f32; 3],
     positions: &mut Vec<[f32; 3]>,
     colors: &mut Vec<[f32; 4]>,
     indices: &mut Vec<u32>,
 ) {
-    let half = PLOT_SIZE * 0.5;
-    let step = PLOT_SIZE / PLOT_SUBDIVISIONS as f32;
+    let (sub_x, sub_z) = subdivisions(field);
     let c = [colour[0], colour[1], colour[2], 1.0];
-    let n = PLOT_SUBDIVISIONS + 1;
+    let (nx, nz) = (sub_x + 1, sub_z + 1);
     let base = positions.len() as u32;
-    for m in 0..n {
-        for k in 0..n {
-            let p = centre + Vec2::new(-half + k as f32 * step, -half + m as f32 * step);
+    for m in 0..nz {
+        for k in 0..nx {
+            let p = field.min + field.size() * Vec2::new(k as f32 / sub_x as f32, m as f32 / sub_z as f32);
             positions.push([p.x, map.height_at(p) + FIELD_LIFT, p.y]);
             colors.push(c);
         }
     }
-    for m in 0..PLOT_SUBDIVISIONS {
-        for k in 0..PLOT_SUBDIVISIONS {
-            let a = base + (m * n + k) as u32;
+    for m in 0..sub_z {
+        for k in 0..sub_x {
+            let a = base + (m * nx + k) as u32;
             let b = a + 1;
-            let d = a + n as u32;
+            let d = a + nx as u32;
             let e = d + 1;
             indices.extend_from_slice(&[a, d, b, b, d, e]);
         }
@@ -375,4 +440,44 @@ fn hash01(ix: usize, iz: usize, salt: u64) -> f32 {
     h = (h ^ (h >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     h ^= h >> 31;
     (h >> 40) as f32 / (1u64 << 24) as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subdivide_produces_varied_sizes() {
+        let mut leaves = Vec::new();
+        subdivide(Vec2::new(0.0, 0.0), Vec2::new(PARCEL_SIZE, PARCEL_SIZE), 0, &mut leaves);
+        assert!(leaves.len() > 1, "expected more than one field, got {}", leaves.len());
+        let areas: Vec<f32> = leaves.iter().map(|f| f.size().x * f.size().y).collect();
+        let min = areas.iter().cloned().fold(f32::MAX, f32::min);
+        let max = areas.iter().cloned().fold(f32::MIN, f32::max);
+        assert!(max > min * 1.2, "field sizes are too uniform: min {min} max {max}");
+        for a in &areas {
+            assert!(*a >= MIN_LEAF_AREA * 0.9, "field area {a} below minimum");
+        }
+    }
+
+    #[test]
+    fn total_field_count_stays_reasonable() {
+        let cols = (crate::map::MAP_SIZE / PARCEL_SIZE).ceil() as i32;
+        let half_map = crate::map::HALF_SIZE;
+        let mut total = 0;
+        for pz in 0..cols {
+            for px in 0..cols {
+                let min = Vec2::new(-half_map + px as f32 * PARCEL_SIZE, -half_map + pz as f32 * PARCEL_SIZE);
+                let max = (min + Vec2::splat(PARCEL_SIZE)).min(Vec2::splat(half_map));
+                let mut leaves = Vec::new();
+                subdivide(min, max, 0, &mut leaves);
+                total += leaves.len();
+            }
+        }
+        // The old uniform 100m grid produced roughly 2000 fields; subdivision should land
+        // in a similar range rather than exploding into tens of thousands (which previously
+        // made the scene heavy enough to stall rendering).
+        assert!(total < 4000, "subdivision produced {total} fields, too many");
+        assert!(total > 500, "subdivision produced only {total} fields, too few");
+    }
 }
