@@ -110,6 +110,7 @@ fn spawn_field_tiling(
     let styles = build_field_styles(map, zones, &owner);
 
     let labels: Vec<u32> = owner.iter().map(|o| o.unwrap_or(OPEN)).collect();
+    commands.insert_resource(ground_cover(map, zones, &labels, &styles, &keep_clear));
     let contour = Contour::build(n, &labels, map.seed, None, Smoothing::FIELD);
     if !crate::world::skip("fields") {
         spawn_field_colour(commands, meshes, field_materials, textures, map, &labels, &contour, &styles);
@@ -614,6 +615,36 @@ fn merge_tiny_fields(map: &TerrainMap, owner: &mut [Option<u32>]) {
         sizes[target as usize] += moved;
         sizes[id as usize] = 0;
     }
+}
+
+// What grass grows where, for the near-camera grass: grazed and mown fields get their own
+// kinds, and open ground that isn't a field (verges, orchards, moor) gets a sparse cover.
+// Roads, settlements, woods and farmyards stay bare.
+fn ground_cover(map: &TerrainMap, zones: &ZoneMap, labels: &[u32], styles: &[FieldStyle], keep_clear: &[bool]) -> crate::grass::GroundCover {
+    use crate::grass::Cover;
+    let n = map.grid_size();
+    let kinds = (0..n * n)
+        .map(|idx| {
+            if keep_clear[idx] || map.water_level(idx % n, idx / n).is_some() {
+                return Cover::None as u8;
+            }
+            if labels[idx] != OPEN {
+                let cover = match styles[labels[idx] as usize].kind {
+                    FieldKind::Hay => Cover::Meadow,
+                    FieldKind::Pasture => Cover::Pasture,
+                    FieldKind::Rough => Cover::Rough,
+                    _ => Cover::None,
+                };
+                return cover as u8;
+            }
+            let cover = match zones.zone_at(idx % n, idx / n) {
+                Zone::Pasture | Zone::Arable | Zone::Orchard | Zone::Open | Zone::Moorland | Zone::Wetland => Cover::Verge,
+                _ => Cover::None,
+            };
+            cover as u8
+        })
+        .collect();
+    crate::grass::GroundCover::new(n, kinds)
 }
 
 // Spots along hedgerows (the first of the three boundary kinds) where an occasional full-size

@@ -75,7 +75,8 @@ impl TerrainMap {
         let mut base: Vec<f32> = (0..COUNT)
             .map(|idx| {
                 let (ix, iz) = (idx % VERTS, idx / VERTS);
-                base_height(grid_pos(ix, iz), seed, params)
+                let p = grid_pos(ix, iz);
+                coastal_height(base_height(p, seed, params), p, seed, params)
             })
             .collect();
         let path = river_path(&base, seed, params, &mut Rng(seed ^ 0x51DE_0001));
@@ -260,6 +261,24 @@ fn base_height(p: Vec2, seed: u64, params: &GenParams) -> f32 {
     let rolling = fbm(q.x / 500.0, q.y / 500.0, seed ^ 0x3, 4) - 0.5;
     let small = fbm(q.x / 140.0, q.y / 140.0, seed ^ 0x4, 4) - 0.5;
     (broad * 320.0 + rolling * 120.0 + small * 35.0) * params.relief_scale + 50.0
+}
+
+// How far below sea level the sea floor drops at the very edge of the map.
+const SEA_FLOOR: f32 = -55.0;
+
+// Slopes the land down into the sea toward the map edge, so the world ends in a coastline
+// (with beaches where the land crosses sea level) instead of a hard cut. The band's width is
+// varied by noise so the coast wanders rather than following a straight, square line.
+fn coastal_height(h: f32, p: Vec2, seed: u64, params: &GenParams) -> f32 {
+    let width = params.coast_width;
+    if width <= 0.0 {
+        return h;
+    }
+    let edge_distance = (HALF_SIZE - p.x.abs()).min(HALF_SIZE - p.y.abs());
+    let wobble = (fbm(p.x / 380.0, p.y / 380.0, seed ^ 0xC0A5, 3) - 0.5) * 2.0 * width * 0.5;
+    let t = ((edge_distance + wobble) / width).clamp(0.0, 1.0);
+    let sunk = 1.0 - smoothstep(0.0, 1.0, t);
+    h + (SEA_FLOOR - h) * sunk.powf(1.3)
 }
 
 fn neighbours(idx: usize) -> impl Iterator<Item = usize> {
@@ -526,10 +545,11 @@ pub fn settlement_radius(kind: PoiKind) -> f32 {
 fn place_pois(rng: &mut Rng, map: &TerrainMap) -> Vec<Poi> {
     // Biggest first, so the one town and the large villages get first pick of level ground
     // and the roads (which root at the first village) grow out from the town.
-    let mut plan: Vec<(PoiKind, f32)> = vec![(PoiKind::Village, 230.0)];
+    // Mills need a specific stretch of riverbank, which the coast now leaves short, so they
+    // are placed before anything else can take it.
+    let mut plan: Vec<(PoiKind, f32)> = (0..3).map(|_| (PoiKind::Mill, settlement_radius(PoiKind::Mill))).collect();
+    plan.push((PoiKind::Village, 230.0));
     plan.extend((0..4).map(|_| (PoiKind::Village, rng.range(90.0, 120.0))));
-    // Mills need a specific stretch of riverbank, so they go before the bank fills up.
-    plan.extend((0..3).map(|_| (PoiKind::Mill, settlement_radius(PoiKind::Mill))));
     plan.extend((0..12).map(|_| (PoiKind::Village, rng.range(58.0, 80.0))));
     plan.extend((0..15).map(|_| (PoiKind::Village, rng.range(28.0, 42.0))));
     plan.extend((0..60).map(|_| (PoiKind::Farm, settlement_radius(PoiKind::Farm))));
@@ -585,14 +605,16 @@ fn find_site(rng: &mut Rng, map: &TerrainMap, existing: &[Poi], kind: PoiKind, r
         let river_dist = map.river_distance(p);
         let h = map.height_at(p);
         let river_ok = match kind {
-            PoiKind::Mill => river_dist > CELL && river_dist < 40.0,
+            // Mills stand on a shore (a river bank, or the edge of a lake or the sea), kept
+            // within reach of the river so they still sit in a settled part of the map.
+            PoiKind::Mill => river_dist > CELL && river_dist < SETTLEMENT_WATER_REACH,
             _ if radius < SMALL_SETTLEMENT_RADIUS => river_dist > 25.0,
             _ => river_dist > 25.0 && river_dist < SETTLEMENT_WATER_REACH,
         };
         // The whole flattened footprint must stay clear of water, not just the centre
         // point - otherwise a village or farm can end up overlapping a lake.
         let water_ok = match kind {
-            PoiKind::Mill => map.water_distance(p) > 8.0,
+            PoiKind::Mill => (10.0..32.0).contains(&map.water_distance(p)),
             _ if radius >= LARGE_SETTLEMENT_RADIUS => map.water_distance(p) > 40.0,
             _ => map.water_distance(p) > radius + 20.0,
         };

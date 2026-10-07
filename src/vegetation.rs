@@ -19,6 +19,7 @@ use bevy::prelude::*;
 
 use crate::map::{fbm, TerrainMap, CELL, HALF_SIZE, MAP_SIZE};
 use crate::mipmaps::MipQueue;
+use crate::wind_material::{WindExtension, WindMaterial};
 use crate::terrain::TerrainRoot;
 use crate::zones::{Zone, ZoneMap};
 
@@ -63,6 +64,37 @@ impl Species {
         Species::Hawthorn,
         Species::Gorse,
     ];
+
+    // Wind: how far the top of the tree sways (m), the height that is reached at, and how much
+    // individual leaves flutter (m).
+    fn sway(self) -> f32 {
+        match self {
+            Species::Spruce | Species::Pine => 0.28,
+            Species::Hawthorn | Species::Gorse => 0.07,
+            Species::Apple => 0.14,
+            _ => 0.38,
+        }
+    }
+
+    fn wind_height(self) -> f32 {
+        match self {
+            Species::Oak => 15.0,
+            Species::Beech => 17.0,
+            Species::Birch => 13.0,
+            Species::Maple => 12.0,
+            Species::Spruce => 16.0,
+            Species::Pine => 14.0,
+            Species::Apple => 4.6,
+            Species::Hawthorn | Species::Gorse => 1.4,
+        }
+    }
+
+    fn flutter(self) -> f32 {
+        match self {
+            Species::Spruce | Species::Pine => 0.015,
+            _ => 0.05,
+        }
+    }
 
     fn is_bush(self) -> bool {
         matches!(self, Species::Hawthorn | Species::Gorse)
@@ -647,8 +679,8 @@ struct Variant {
 
 struct SpeciesAssets {
     variants: Vec<Variant>,
-    bark: Handle<StandardMaterial>,
-    leaves: Vec<Handle<StandardMaterial>>,
+    bark: Handle<WindMaterial>,
+    leaves: Vec<Handle<WindMaterial>>,
 }
 
 #[derive(Resource)]
@@ -660,7 +692,7 @@ fn build_vegetation_assets(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<WindMaterial>>,
     mut mips: ResMut<MipQueue>,
 ) {
     let mut load = |path: &'static str, repeat: bool| {
@@ -680,7 +712,7 @@ fn build_vegetation_assets(
         handle
     };
 
-    let mut barks: HashMap<&'static str, Handle<StandardMaterial>> = HashMap::new();
+    let mut barks: HashMap<&'static str, Handle<WindMaterial>> = HashMap::new();
     let mut leaf_textures: HashMap<&'static str, Handle<Image>> = HashMap::new();
     let mut species = HashMap::new();
     for sp in Species::ALL {
@@ -688,11 +720,14 @@ fn build_vegetation_assets(
             .entry(sp.bark())
             .or_insert_with(|| {
                 let tex = load(sp.bark(), true);
-                materials.add(StandardMaterial {
-                    base_color_texture: Some(tex),
-                    base_color: Color::srgb(0.75, 0.72, 0.68),
-                    perceptual_roughness: 0.95,
-                    ..default()
+                materials.add(WindMaterial {
+                    base: StandardMaterial {
+                        base_color_texture: Some(tex),
+                        base_color: Color::srgb(0.75, 0.72, 0.68),
+                        perceptual_roughness: 0.95,
+                        ..default()
+                    },
+                    extension: WindExtension::new(sp.sway(), sp.wind_height(), 0.0),
                 })
             })
             .clone();
@@ -701,15 +736,18 @@ fn build_vegetation_assets(
         let leaves = [0.88_f32, 1.0, 1.12]
             .iter()
             .map(|&k| {
-                materials.add(StandardMaterial {
-                    base_color_texture: Some(leaf_tex.clone()),
-                    base_color: Color::srgb((t[0] * k).min(1.0), (t[1] * k).min(1.0), (t[2] * k).min(1.0)),
-                    alpha_mode: AlphaMode::Mask(0.42),
-                    cull_mode: None,
-                    double_sided: false,
-                    perceptual_roughness: 0.8,
-                    reflectance: 0.08,
-                    ..default()
+                materials.add(WindMaterial {
+                    base: StandardMaterial {
+                        base_color_texture: Some(leaf_tex.clone()),
+                        base_color: Color::srgb((t[0] * k).min(1.0), (t[1] * k).min(1.0), (t[2] * k).min(1.0)),
+                        alpha_mode: AlphaMode::Mask(0.42),
+                        cull_mode: None,
+                        double_sided: false,
+                        perceptual_roughness: 0.8,
+                        reflectance: 0.08,
+                        ..default()
+                    },
+                    extension: WindExtension::new(sp.sway(), sp.wind_height(), sp.flutter()),
                 })
             })
             .collect();

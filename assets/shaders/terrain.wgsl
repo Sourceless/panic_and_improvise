@@ -93,7 +93,8 @@ fn fragment(
     color = color * macro_tone;
 
     let height_from_contour = abs(fract(in.world_position.y / CONTOUR_SPACING + 0.5) - 0.5) * CONTOUR_SPACING;
-    let on_contour = 1.0 - smoothstep(0.0, CONTOUR_HALF_WIDTH, height_from_contour);
+    // No contour lines on the sea floor, where they show through the water as a grid.
+    let on_contour = (1.0 - smoothstep(0.0, CONTOUR_HALF_WIDTH, height_from_contour)) * step(0.0, in.world_position.y);
     color = color * (1.0 - 0.35 * on_contour);
 
     pbr_input.material.base_color = vec4<f32>(color, 1.0);

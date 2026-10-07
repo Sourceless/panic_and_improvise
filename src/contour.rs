@@ -219,7 +219,30 @@ impl Contour {
     /// `segs`, built from the same relaxed vertices so the two always agree. `cell` holds
     /// the corner labels in TL, TR, BR, BL order. [`OPEN`] gets no polygon.
     pub fn cell_regions(&self, ix: usize, iz: usize, cell: [u32; 4]) -> Vec<(u32, Vec<Vec2>)> {
+        let origin = grid_pos(ix, iz);
         let corner = [Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.0), Vec2::new(1.0, 1.0), Vec2::new(0.0, 1.0)];
+        let mid = self.cell_mids_world(ix, iz).map(|w| (w - origin) / CELL);
+        self.regions(cell, corner, mid, Vec2::splat(0.5))
+    }
+
+    /// Like [`cell_regions`](Self::cell_regions) but in world coordinates, with the shared
+    /// vertices taken straight from the contour rather than converted through cell-local
+    /// space. Neighbouring cells therefore get bit-identical vertices, with no hairline
+    /// cracks between them (which show through anything translucent, like water).
+    pub fn cell_regions_world(&self, ix: usize, iz: usize, cell: [u32; 4]) -> Vec<(u32, Vec<Vec2>)> {
+        let corner = [grid_pos(ix, iz), grid_pos(ix + 1, iz), grid_pos(ix + 1, iz + 1), grid_pos(ix, iz + 1)];
+        let centre = (corner[0] + corner[2]) * 0.5;
+        self.regions(cell, corner, self.cell_mids_world(ix, iz), centre)
+    }
+
+    fn cell_mids_world(&self, ix: usize, iz: usize) -> [Vec2; 4] {
+        let keys = edge_keys(self.n, ix, iz);
+        let default = cell_mids(ix, iz);
+        std::array::from_fn(|i| self.mids.get(&keys[i]).copied().unwrap_or(default[i]))
+    }
+
+    // The regions themselves, in whatever space the corner, mid and centre points are given in.
+    fn regions(&self, cell: [u32; 4], corner: [Vec2; 4], mid: [Vec2; 4], centre: Vec2) -> Vec<(u32, Vec<Vec2>)> {
         let mut distinct: Vec<u32> = Vec::with_capacity(4);
         for &v in &cell {
             if !distinct.contains(&v) {
@@ -229,14 +252,6 @@ impl Contour {
         if distinct.len() == 1 {
             return if cell[0] == OPEN { Vec::new() } else { vec![(cell[0], corner.to_vec())] };
         }
-
-        let origin = grid_pos(ix, iz);
-        let keys = edge_keys(self.n, ix, iz);
-        let default = cell_mids(ix, iz);
-        let mid: Vec<Vec2> = (0..4)
-            .map(|i| (self.mids.get(&keys[i]).copied().unwrap_or(default[i]) - origin) / CELL)
-            .collect();
-        let centre = Vec2::splat(0.5);
 
         // Saddle: the lower label holds two opposite corners that the contour cuts off,
         // leaving the other label connected through the middle.

@@ -9,7 +9,7 @@ use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
 
 use crate::contour::{triangulate, Contour, Smoothing, OPEN};
-use crate::map::{grid_pos, PoiKind, TerrainMap, CELL, TILE_CELLS};
+use crate::map::{grid_pos, PoiKind, TerrainMap, CELL, HALF_SIZE, TILE_CELLS};
 use crate::params::GenParams;
 use crate::zones::{Zone, ZoneMap};
 
@@ -25,8 +25,11 @@ impl Plugin for TerrainPlugin {
             crate::vegetation::VegetationPlugin,
             crate::perf::PerfPlugin,
             crate::look::LookPlugin,
+            crate::grass::GrassPlugin,
             MaterialPlugin::<TerrainMaterial>::default(),
             MaterialPlugin::<crate::field_material::FieldMaterial>::default(),
+            MaterialPlugin::<crate::water_material::WaterMaterial>::default(),
+            MaterialPlugin::<crate::wind_material::WindMaterial>::default(),
         ))
             .add_systems(Startup, (load_textures, spawn_world).chain());
     }
@@ -144,6 +147,8 @@ fn spawn_world(
     mut standard: ResMut<Assets<StandardMaterial>>,
     mut terrain: ResMut<Assets<TerrainMaterial>>,
     mut fields: ResMut<Assets<crate::field_material::FieldMaterial>>,
+    mut waters: ResMut<Assets<crate::water_material::WaterMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     crate::world::build_world(
         &mut commands,
@@ -151,6 +156,8 @@ fn spawn_world(
         &mut standard,
         &mut terrain,
         &mut fields,
+        &mut waters,
+        &mut images,
         &textures,
         &map,
         &params,
@@ -165,6 +172,8 @@ pub fn spawn_terrain(
     textures: &TerrainTextures,
     map: &TerrainMap,
     zones: &ZoneMap,
+    waters: &mut Assets<crate::water_material::WaterMaterial>,
+    images: &mut Assets<Image>,
 ) {
     let ground = terrain.add(ExtendedMaterial {
         base: StandardMaterial {
@@ -194,12 +203,12 @@ pub fn spawn_terrain(
         }
     }
 
-    let water = standard.add(StandardMaterial {
-        base_color: Color::srgb(0.18, 0.38, 0.62),
-        perceptual_roughness: 0.2,
-        ..default()
-    });
-    for mesh in river_meshes(map) {
+    let water = waters.add(crate::water_material::water_material(map, images));
+    for mesh in river_meshes(map).into_iter().filter(|_| !crate::world::skip("water")) {
+        commands.spawn((TerrainRoot, bevy::light::NotShadowCaster, Mesh3d(meshes.add(mesh)), MeshMaterial3d(water.clone())));
+    }
+    // Past the map's edge the sea carries on to the horizon, where the atmosphere takes over.
+    for mesh in ocean_meshes() {
         commands.spawn((TerrainRoot, bevy::light::NotShadowCaster, Mesh3d(meshes.add(mesh)), MeshMaterial3d(water.clone())));
     }
 
@@ -331,6 +340,31 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 // cell, so the river and lake shores curve instead of stair-stepping. Each cell's wet
 // polygon takes its height from bilinear interpolation of the cell's water levels, with any
 // dry corner borrowing the average of the wet ones.
+// Four big rectangles around the map, at sea level, that stand in for the open sea. They sit
+// a hair below the lake surface inside the map so the two never z-fight where they overlap.
+fn ocean_meshes() -> Vec<Mesh> {
+    const REACH: f32 = 60_000.0;
+    let inner = HALF_SIZE - 3.0;
+    let rects = [
+        (-REACH, -REACH, REACH, -inner),
+        (-REACH, inner, REACH, REACH),
+        (-REACH, -inner, -inner, inner),
+        (inner, -inner, REACH, inner),
+    ];
+    rects
+        .into_iter()
+        .map(|(x0, z0, x1, z1)| {
+            let positions = vec![[x0, -0.02, z0], [x1, -0.02, z0], [x1, -0.02, z1], [x0, -0.02, z1]];
+            Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+                .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+                .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; 4])
+                // Deep open water everywhere.
+                .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, vec![[40.0, 0.0, 0.0, 1.0]; 4])
+                .with_inserted_indices(Indices::U32(vec![0, 2, 1, 0, 3, 2]))
+        })
+        .collect()
+}
+
 fn river_meshes(map: &TerrainMap) -> Vec<Mesh> {
     const WATER: u32 = 0;
     let n = map.grid_size();
@@ -367,7 +401,7 @@ fn river_meshes(map: &TerrainMap) -> Vec<Mesh> {
     let contour = Contour::build(n, &labels, map.seed ^ 0x77A7, Some(WATER), Smoothing::WATER);
 
     // One mesh per tile, so frustum culling can skip the water that isn't in view.
-    let mut tiles: HashMap<(usize, usize), (Vec<[f32; 3]>, Vec<u32>)> = HashMap::new();
+    let mut tiles: HashMap<(usize, usize), (Vec<[f32; 3]>, Vec<[f32; 4]>, Vec<u32>)> = HashMap::new();
     for iz in 0..n - 1 {
         for ix in 0..n - 1 {
             let corners = [(ix, iz), (ix + 1, iz), (ix + 1, iz + 1), (ix, iz + 1)];
@@ -385,21 +419,24 @@ fn river_meshes(map: &TerrainMap) -> Vec<Mesh> {
                 let bottom = l_bl + (l_br - l_bl) * p.x;
                 top + (bottom - top) * p.y + WATER_LIFT
             };
-            let (positions, indices) = tiles.entry((ix / TILE_CELLS, iz / TILE_CELLS)).or_default();
-            for (_, poly) in contour.cell_regions(ix, iz, cell) {
+            let (positions, colors, indices) = tiles.entry((ix / TILE_CELLS, iz / TILE_CELLS)).or_default();
+            for (_, poly) in contour.cell_regions_world(ix, iz, cell) {
                 for mut tri in triangulate(&poly) {
-                    // Wind upward; (u, v) maps to (x, z).
+                    // Wind upward; world (x, z) is the plane.
                     let area = (tri[1].y - tri[0].y) * (tri[2].x - tri[0].x) - (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y);
-                    if area.abs() < 1e-7 {
+                    if area.abs() < 1e-5 {
                         continue;
                     }
                     if area < 0.0 {
                         tri.swap(1, 2);
                     }
                     let base = positions.len() as u32;
-                    for p in tri {
-                        let w = origin + p * CELL;
-                        positions.push([w.x, height(p), w.y]);
+                    for w in tri {
+                        let surface = height((w - origin) / CELL);
+                        positions.push([w.x, surface, w.y]);
+                        // How deep the water is here, which the shader turns into colour,
+                        // clarity and shoreline foam.
+                        colors.push([(surface - map.height_at(w)).max(0.0), 0.0, 0.0, 1.0]);
                     }
                     indices.extend_from_slice(&[base, base + 1, base + 2]);
                 }
@@ -408,11 +445,12 @@ fn river_meshes(map: &TerrainMap) -> Vec<Mesh> {
     }
     tiles
         .into_values()
-        .map(|(positions, indices)| {
+        .map(|(positions, colors, indices)| {
             let normals = vec![[0.0, 1.0, 0.0]; positions.len()];
             Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
                 .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
                 .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+                .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
                 .with_inserted_indices(Indices::U32(indices))
         })
         .collect()

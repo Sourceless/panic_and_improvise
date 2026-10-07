@@ -90,7 +90,7 @@ fn main() {
         .insert_resource(TerrainMap::generate(seed, &GenParams::default()))
         .insert_resource(GenParams::default())
         .insert_non_send(ClipboardHandle(arboard::Clipboard::new().ok()))
-        .insert_resource(LookSettings { shadows: false, ..default() })
+        .insert_resource(LookSettings { shadows: false, atmosphere: false, ..default() })
         .add_systems(Startup, (setup_scene, setup_hud))
         .add_systems(
             Update,
@@ -241,6 +241,7 @@ fn ui_panel(mut contexts: EguiContexts, mut params: ResMut<GenParams>, mut viewe
         ui.add(egui::Slider::new(&mut params.field_contour_weight, 0.5..=15.0).text("Field contour weight"));
         ui.add(egui::Slider::new(&mut params.field_max_slope, 0.1..=2.0).text("Field max slope change"));
         ui.add(egui::Slider::new(&mut params.large_field_fraction, 0.0..=0.6).text("Large field chance"));
+        ui.add(egui::Slider::new(&mut params.coast_width, 0.0..=1500.0).text("Coast width"));
         ui.add(egui::Slider::new(&mut params.max_arable_slope, 0.02..=0.5).text("Max arable slope"));
         ui.add(egui::Slider::new(&mut params.max_pasture_slope, 0.1..=1.0).text("Max pasture slope"));
         ui.separator();
@@ -276,6 +277,8 @@ fn regenerate(
     mut standard: ResMut<Assets<StandardMaterial>>,
     mut terrain: ResMut<Assets<TerrainMaterial>>,
     mut fields: ResMut<Assets<FieldMaterial>>,
+    mut waters: ResMut<Assets<fps_prototype::water_material::WaterMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     if !viewer.pending_regen {
         return;
@@ -285,7 +288,7 @@ fn regenerate(
         commands.entity(entity).despawn();
     }
     let map = TerrainMap::generate(viewer.seed, &params);
-    build_world(&mut commands, &mut meshes, &mut standard, &mut terrain, &mut fields, &textures, &map, &params);
+    build_world(&mut commands, &mut meshes, &mut standard, &mut terrain, &mut fields, &mut waters, &mut images, &textures, &map, &params);
     commands.insert_resource(map);
 }
 

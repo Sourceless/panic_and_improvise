@@ -1,6 +1,7 @@
 pub mod contour;
 pub mod field_material;
 pub mod fill;
+pub mod grass;
 pub mod look;
 pub mod map;
 pub mod mipmaps;
@@ -12,7 +13,9 @@ pub mod settlement;
 pub mod target;
 pub mod vegetation;
 pub mod terrain;
+pub mod water_material;
 pub mod weapon;
+pub mod wind_material;
 pub mod world;
 pub mod zones;
 

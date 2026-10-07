@@ -31,6 +31,10 @@ pub struct GenParams {
     /// field seeds are thinned out so the few that remain claim a much bigger area than
     /// usual. 0 keeps every field close to the normal size.
     pub large_field_fraction: f32,
+    /// Width of the coastal band around the map edge, in metres, where the land slopes down
+    /// and sinks beneath the sea so the world ends in a coastline instead of a hard edge.
+    /// 0 turns the coast off.
+    pub coast_width: f32,
 }
 
 impl Default for GenParams {
@@ -47,6 +51,7 @@ impl Default for GenParams {
             max_arable_slope: 0.5,
             max_pasture_slope: 0.55,
             large_field_fraction: 0.0,
+            coast_width: 650.0,
         }
     }
 }

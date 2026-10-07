@@ -11,6 +11,7 @@ use bevy::render::view::window::screenshot::{save_to_disk, Screenshot};
 use bevy::prelude::*;
 use bevy::window::{PresentMode, PrimaryWindow};
 
+use crate::grass::{Cover, GroundCover};
 use crate::map::{PoiKind, TerrainMap};
 use crate::player::FpsCamera;
 use crate::vegetation::VegetationPlan;
@@ -122,10 +123,32 @@ struct Bench {
 }
 
 // Named places to stand: the summit, the densest forest and the biggest village.
-fn camera_spots(map: &TerrainMap, plan: &VegetationPlan) -> Vec<(&'static str, Vec2, f32)> {
+fn camera_spots(map: &TerrainMap, plan: &VegetationPlan, cover: Option<&GroundCover>) -> Vec<(&'static str, Vec2, f32)> {
     let mut spots = vec![("summit", map.spawn_point(), 0.0)];
+    if let Some(at) = cover.and_then(|c| c.find(Cover::Meadow).or_else(|| c.find(Cover::Pasture))) {
+        spots.push(("meadow", at, 0.3));
+    }
     if let Some(c) = plan.densest_chunk_centre() {
         spots.push(("forest", c, 0.6));
+    }
+    // A beach: low dry land beside the sea, near the edge of the map, facing out to sea.
+    let n = map.grid_size();
+    let mut beach: Option<(f32, Vec2)> = None;
+    for iz in (0..n).step_by(2) {
+        for ix in (0..n).step_by(2) {
+            let q = crate::map::grid_pos(ix, iz);
+            let edge = crate::map::HALF_SIZE - q.x.abs().max(q.y.abs());
+            let h = map.vertex_height(ix, iz);
+            if edge < 900.0 && (1.0..3.0).contains(&h) && map.water_level(ix, iz).is_none() && map.water_distance(q) < 14.0 && q.x > 0.0 && q.x.abs() > q.y.abs() {
+                if beach.map_or(true, |(e, _)| edge < e) {
+                    beach = Some((edge, q));
+                }
+            }
+        }
+    }
+    if let Some((_, at)) = beach {
+        // Facing +X, toward the east edge and the open sea.
+        spots.push(("coast", at, -std::f32::consts::FRAC_PI_2));
     }
     if let Some(town) = map.pois.iter().filter(|p| p.kind == PoiKind::Village).max_by(|a, b| a.radius.total_cmp(&b.radius)) {
         // Stand on the edge of the village looking toward its centre.
@@ -139,6 +162,7 @@ fn run_bench(
     mut bench: ResMut<Bench>,
     map: Res<TerrainMap>,
     plan: Option<Res<VegetationPlan>>,
+    cover: Option<Res<GroundCover>>,
     mut camera: Query<(&mut Transform, &mut FpsCamera)>,
     diagnostics: Res<DiagnosticsStore>,
     mut exit: MessageWriter<AppExit>,
@@ -146,7 +170,7 @@ fn run_bench(
     let Some(plan) = plan else { return };
     let Ok((mut transform, mut cam)) = camera.single_mut() else { return };
     if bench.spots.is_empty() {
-        let mut spots = camera_spots(&map, &plan);
+        let mut spots = camera_spots(&map, &plan, cover.as_deref());
         // FPS_BENCH_SPOTS=summit,forest limits the run to those spots.
         if let Ok(only) = std::env::var("FPS_BENCH_SPOTS") {
             spots.retain(|s| only.split(',').any(|o| o == s.0));
@@ -217,6 +241,7 @@ fn auto_screenshot(
     path: Res<ScreenshotPath>,
     map: Res<TerrainMap>,
     plan: Option<Res<VegetationPlan>>,
+    cover: Option<Res<GroundCover>>,
     mut camera: Query<(&mut Transform, &mut FpsCamera)>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -224,7 +249,7 @@ fn auto_screenshot(
     // FPS_SPOT=forest|town|summit picks where to stand (default: the summit spawn).
     if *frame == 300 {
         if let (Ok(spot), Some(plan), Ok((mut transform, mut cam))) = (std::env::var("FPS_SPOT"), plan, camera.single_mut()) {
-            if let Some(&(_, at, yaw)) = camera_spots(&map, &plan).iter().find(|s| s.0 == spot) {
+            if let Some(&(_, at, yaw)) = camera_spots(&map, &plan, cover.as_deref()).iter().find(|s| s.0 == spot) {
                 cam.yaw = yaw + std::env::var("FPS_YAW").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
                 cam.pitch = -0.04;
                 transform.translation = Vec3::new(at.x, map.height_at(at) + 1.8, at.y);
@@ -232,10 +257,18 @@ fn auto_screenshot(
             }
         }
     }
-    if *frame == 600 {
+    // The world takes a while to build and stream in, so shoot well after startup.
+    let first: u32 = std::env::var("FPS_SHOT_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(900);
+    if *frame == first {
         commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path.0.clone()));
     }
-    if *frame == 660 {
+    // A second shot a little later (FPS_SCREENSHOT_2), to see things that move.
+    if *frame == first + 40 {
+        if let Ok(second) = std::env::var("FPS_SCREENSHOT_2") {
+            commands.spawn(Screenshot::primary_window()).observe(save_to_disk(second));
+        }
+    }
+    if *frame == first + 100 {
         exit.write(AppExit::Success);
     }
 }

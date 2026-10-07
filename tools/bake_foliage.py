@@ -105,6 +105,31 @@ def conifer_card(atlas, seed, sprays):
     return canvas
 
 
+def grass_tuft(atlas, seed, blades):
+    """A tuft of grass: blades fanning up and out from a point at the bottom centre of the card."""
+    rng = random.Random(seed)
+    sprites = load_sprites(atlas, min_area=250)
+    canvas = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
+    for _ in range(blades):
+        sprite = rng.choice(sprites)
+        length = rng.uniform(0.55, 0.97) * SIZE
+        scale = length / max(sprite.width, sprite.height)
+        s = sprite.resize((max(2, int(sprite.width * scale)), max(2, int(sprite.height * scale))), Image.LANCZOS)
+        # Blades in the atlas can lie either way up; stand them with their longer side vertical.
+        if s.width > s.height:
+            s = s.rotate(90, expand=True)
+        root = (SIZE / 2 + rng.uniform(-28, 28), SIZE - 6)
+        layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+        layer.paste(s, (int(root[0] - s.width / 2), int(root[1] - s.height)), s)
+        angle = rng.uniform(-34, 34) * (0.4 + abs(root[0] - SIZE / 2) / 28.0)
+        layer = layer.rotate(angle, center=root, resample=Image.BICUBIC)
+        shade = rng.uniform(0.75, 1.1)
+        layer = ImageEnhance.Brightness(layer.convert("RGBA")).enhance(shade)
+        layer.putalpha(layer.getchannel("A"))
+        canvas.alpha_composite(layer)
+    return canvas
+
+
 def opaque_hedge(atlas, seed):
     """A seamless-ish dense leaf texture for the faces of hedges (no transparency)."""
     base = leafy_cluster(atlas, seed, 520, 70, spread=(0.62, 0.62))
@@ -124,6 +149,7 @@ def main():
     save(leafy_cluster("leaf_willow.png", 3, 170, 125), "cluster_willow.png")
     save(leafy_cluster("leaf_lime.png", 4, 130, 135), "cluster_lime.png")
     save(conifer_card("leaf_conifer.png", 5, 14), "cluster_conifer.png")
+    save(grass_tuft("blades.png", 7, 16), "grass_tuft.png")
     opaque_hedge("leaf_beech.png", 6).save(os.path.join(OUT, "hedge.jpg"), quality=88)
     for f in sorted(os.listdir(OUT)):
         print(f, os.path.getsize(os.path.join(OUT, f)) // 1024, "KB")

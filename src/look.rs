@@ -31,6 +31,9 @@ impl Plugin for LookPlugin {
 pub struct LookSettings {
     /// The sun casts shadows (off for far-away previews, where they cost and show nothing).
     pub shadows: bool,
+    /// Render the physical sky and atmosphere. Off gives a flat, clear daylight look with no
+    /// distance haze, for high overhead previews of the whole map.
+    pub atmosphere: bool,
     /// Camera exposure; higher is darker.
     pub ev100: f32,
     /// Sun height above the horizon, in degrees.
@@ -41,7 +44,7 @@ pub struct LookSettings {
 
 impl Default for LookSettings {
     fn default() -> Self {
-        LookSettings { shadows: true, ev100: 13.0, sun_elevation: 27.0, sun_azimuth: 130.0 }
+        LookSettings { shadows: true, atmosphere: true, ev100: 13.0, sun_elevation: 27.0, sun_azimuth: 130.0 }
     }
 }
 
@@ -49,8 +52,13 @@ impl Default for LookSettings {
 pub struct Sun;
 
 fn spawn_sun_and_sky(mut commands: Commands, mut media: ResMut<Assets<ScatteringMedium>>, settings: Res<LookSettings>) {
-    if !disabled("atmo") {
+    if settings.atmosphere && !disabled("atmo") {
         commands.spawn(Atmosphere::earth(media.add(ScatteringMedium::default())));
+    } else {
+        // Without the atmosphere there is no sky to light the shadows, so add flat fill light
+        // and a plain sky colour behind everything.
+        commands.insert_resource(GlobalAmbientLight { color: Color::srgb(0.85, 0.9, 1.0), brightness: 2600.0, ..default() });
+        commands.insert_resource(ClearColor(Color::srgb(0.62, 0.74, 0.88)));
     }
 
     // The light travels along its own -Z, so tilt it down by the sun's elevation.
@@ -92,14 +100,23 @@ fn disabled(effect: &str) -> bool {
     std::env::var("LOOK_OFF").is_ok_and(|v| v.split(',').any(|e| e == effect))
 }
 
-fn dress_new_cameras(mut commands: Commands, new: Query<Entity, Added<Camera3d>>, settings: Res<LookSettings>) {
-    for camera in &new {
+fn dress_new_cameras(mut commands: Commands, new: Query<(Entity, Option<&Projection>), Added<Camera3d>>, settings: Res<LookSettings>) {
+    for (camera, projection) in &new {
         let mut entity = commands.entity(camera);
+        if std::env::var("LOOK_MSAA").is_ok_and(|v| v == "off") {
+            entity.insert(Msaa::Off);
+        }
+        // The default far plane is 1 km; the world (and the sea beyond it) reaches much further.
+        let far_enough = matches!(projection, Some(Projection::Perspective(p)) if p.far > 5_000.0);
+        if !far_enough {
+            entity.insert(Projection::Perspective(PerspectiveProjection { far: 80_000.0, ..default() }));
+        }
         entity.insert((Exposure { ev100: settings.ev100 }, Tonemapping::TonyMcMapface));
-        if !disabled("atmo") {
+        let sky = settings.atmosphere && !disabled("atmo");
+        if sky {
             entity.insert(AtmosphereSettings::default());
         }
-        if !disabled("env") && !disabled("atmo") {
+        if sky && !disabled("env") {
             let size = std::env::var("LOOK_ENV_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(64);
             entity.insert(AtmosphereEnvironmentMapLight { size: UVec2::splat(size), ..default() });
         }
