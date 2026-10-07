@@ -1,3 +1,4 @@
+pub mod contour;
 pub mod fill;
 pub mod map;
 pub mod params;

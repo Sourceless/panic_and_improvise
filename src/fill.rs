@@ -6,7 +6,8 @@ use bevy::prelude::*;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use crate::map::{grid_pos, TerrainMap, CELL};
+use crate::contour::{clip_to_terrain_triangle, triangulate, Contour, OPEN};
+use crate::map::{fbm, grid_pos, TerrainMap, CELL};
 use crate::params::GenParams;
 use crate::roads::RoadNetwork;
 use crate::terrain::TerrainRoot;
@@ -31,15 +32,7 @@ pub fn spawn_fill(
 }
 
 const SMOOTH_PASSES: u32 = 2;
-const RENDER_STRIDE: usize = 3;
 const FARM_YARD_RADIUS: f32 = 42.0;
-const NONE_OWNER: u32 = u32::MAX;
-
-struct Segment {
-    centre: Vec2,
-    half_len: f32,
-    along_z: bool,
-}
 
 // Tiles the farmland zone (Arable and Pasture) into organic fields, each bordered by a
 // hedge, stone wall or fence. Farmyards around each farm's buildings are left clear.
@@ -49,9 +42,12 @@ struct Segment {
 // technique used for rivers and roads), where crossing a slope costs more than flowing
 // along it. That makes a region's boundary hug the land's contours rather than cutting
 // across them, and gives organic shapes instead of rectangles. A smoothing pass then rounds
-// off the grid-stepping. Both the fill colour and the boundaries are then rendered from a
-// coarser 30m sampling of the result, which bounds the geometry regardless of how many
-// fields the growth produces.
+// off the grid-stepping, and a connected-components pass splits any field that ended up
+// split into disconnected pieces - most often by a road - into separate fields. Both the
+// fill colour and the boundaries are then rendered at native grid resolution: boundaries
+// via marching squares, which cuts every corner near 45 degrees instead of stair-stepping,
+// and naturally leaves a gap wherever a road interrupts a run since there's no cell there to
+// draw a wall through.
 fn spawn_field_tiling(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -72,6 +68,12 @@ fn spawn_field_tiling(
     // Roads are excluded from the traversable farmland graph, the same way water is, so a
     // field can't grow across one. That splits the field in two either side of the road and
     // gives it a boundary there, instead of the road just being painted over one field.
+    let keep_clear: Vec<bool> = (0..n * n)
+        .map(|idx| {
+            let (ix, iz) = (idx % n, idx / n);
+            roads.kind_at(ix, iz).is_some() || farms.iter().any(|f| f.distance(grid_pos(ix, iz)) < FARM_YARD_RADIUS)
+        })
+        .collect();
     let is_farmland: Vec<bool> = (0..n * n)
         .map(|idx| {
             let (ix, iz) = (idx % n, idx / n);
@@ -91,35 +93,19 @@ fn spawn_field_tiling(
         return;
     }
     let owner = smooth_owners(map, &is_farmland, claim_regions(map, &is_farmland, &seeds, params), SMOOTH_PASSES);
+    // A field can end up split into pieces that aren't actually touching - most often
+    // because a road cuts through it, with the two halves otherwise reconnecting around the
+    // road's ends. Giving every disconnected group its own fresh id makes a road-split field
+    // render (and colour) as two separate fields instead of one that invisibly jumps the gap.
+    let mut owner = split_disconnected_regions(map, &is_farmland, &owner);
+    merge_tiny_fields(map, &mut owner);
+    fill_small_holes(map, &mut owner, &keep_clear);
+    let field_colour = build_field_colours(map, zones, &owner);
 
-    let field_colour: Vec<[f32; 3]> = seeds
-        .iter()
-        .map(|&seed_idx| {
-            let (ix, iz) = (seed_idx % n, seed_idx / n);
-            let p = grid_pos(ix, iz);
-            let block = (
-                ((p.x + crate::map::HALF_SIZE) / 150.0) as usize,
-                ((p.y + crate::map::HALF_SIZE) / 150.0) as usize,
-            );
-            if zones.zone_at(ix, iz) == Zone::Arable {
-                crop_colour(block.0, block.1)
-            } else {
-                pasture_colour(block.0, block.1)
-            }
-        })
-        .collect();
-
-    let cn = n.div_ceil(RENDER_STRIDE);
-    let coarse_owner: Vec<Option<u32>> = (0..cn * cn)
-        .map(|i| {
-            let (cx, cz) = (i % cn, i / cn);
-            let (fx, fz) = ((cx * RENDER_STRIDE).min(n - 1), (cz * RENDER_STRIDE).min(n - 1));
-            owner[fz * n + fx]
-        })
-        .collect();
-
-    spawn_field_colour(commands, meshes, materials, map, &coarse_owner, &field_colour, cn);
-    spawn_field_boundaries(commands, meshes, materials, map, &coarse_owner, cn);
+    let labels: Vec<u32> = owner.iter().map(|o| o.unwrap_or(OPEN)).collect();
+    let contour = Contour::build(n, &labels, map.seed, None);
+    spawn_field_colour(commands, meshes, materials, map, &labels, &contour, &field_colour);
+    spawn_field_boundaries(commands, meshes, materials, map, &contour);
 }
 
 fn scatter_seeds(map: &TerrainMap, is_farmland: &[bool], params: &GenParams) -> Vec<usize> {
@@ -134,6 +120,16 @@ fn scatter_seeds(map: &TerrainMap, is_farmland: &[bool], params: &GenParams) -> 
                 -half_map + (sx as f32 + 0.5) * spacing,
                 -half_map + (sz as f32 + 0.5) * spacing,
             );
+            // A low-frequency noise field marks broad patches as "large field" zones; inside
+            // one, most candidate seeds are thinned out so the few that remain claim a much
+            // bigger area than usual, giving some size variety across the map instead of
+            // every field being close to the same size.
+            if params.large_field_fraction > 0.0 {
+                let patch = fbm(base.x / 700.0, base.y / 700.0, map.seed ^ 0x7A12_0000, 3);
+                if patch < params.large_field_fraction && field_hash(base, 42) > 0.18 {
+                    continue;
+                }
+            }
             let jitter = Vec2::new(
                 (field_hash(base, 40) - 0.5) * spacing * 0.7,
                 (field_hash(base, 41) - 0.5) * spacing * 0.7,
@@ -214,6 +210,68 @@ fn smooth_owners(map: &TerrainMap, is_farmland: &[bool], mut owner: Vec<Option<u
     owner
 }
 
+// After growth and smoothing, a field's cells may no longer all be connected to each other -
+// most often because a road cuts through it and the flood fill reconnected around the road's
+// ends. A simple flood fill over same-owner farmland cells gives every disconnected group its
+// own fresh id, in scan order.
+fn split_disconnected_regions(map: &TerrainMap, is_farmland: &[bool], owner: &[Option<u32>]) -> Vec<Option<u32>> {
+    let n = map.grid_size();
+    let mut relabeled: Vec<Option<u32>> = vec![None; n * n];
+    let mut visited = vec![false; n * n];
+    let mut next_id = 0u32;
+    let mut stack = Vec::new();
+    for start in 0..n * n {
+        if !is_farmland[start] || visited[start] || owner[start].is_none() {
+            continue;
+        }
+        let owner_id = owner[start];
+        visited[start] = true;
+        stack.push(start);
+        while let Some(c) = stack.pop() {
+            relabeled[c] = Some(next_id);
+            // Orthogonal neighbours only: cells touching just at a corner aren't one field,
+            // since marching squares would draw them as two separate outlines anyway.
+            for nb in field_neighbours(n, c).filter(|&nb| nb % n == c % n || nb / n == c / n) {
+                if !is_farmland[nb] || visited[nb] || owner[nb] != owner_id {
+                    continue;
+                }
+                visited[nb] = true;
+                stack.push(nb);
+            }
+        }
+        next_id += 1;
+    }
+    relabeled
+}
+
+// Picks each field's colour from the first cell found for its id. Ids come from
+// split_disconnected_regions rather than directly from the seed list, so two pieces of a
+// road-split field get different ids and so different colours.
+fn build_field_colours(map: &TerrainMap, zones: &ZoneMap, owner: &[Option<u32>]) -> Vec<[f32; 3]> {
+    let n = map.grid_size();
+    let field_count = owner.iter().filter_map(|&o| o).max().map_or(0, |m| m + 1) as usize;
+    let mut colours: Vec<Option<[f32; 3]>> = vec![None; field_count];
+    for (idx, &o) in owner.iter().enumerate() {
+        let Some(id) = o else { continue };
+        let slot = &mut colours[id as usize];
+        if slot.is_some() {
+            continue;
+        }
+        let (ix, iz) = (idx % n, idx / n);
+        let p = grid_pos(ix, iz);
+        let block = (
+            ((p.x + crate::map::HALF_SIZE) / 150.0) as usize,
+            ((p.y + crate::map::HALF_SIZE) / 150.0) as usize,
+        );
+        *slot = Some(if zones.zone_at(ix, iz) == Zone::Arable {
+            crop_colour(block.0, block.1)
+        } else {
+            pasture_colour(block.0, block.1)
+        });
+    }
+    colours.into_iter().map(|c| c.unwrap_or([1.0, 0.0, 1.0])).collect()
+}
+
 fn field_neighbours(n: usize, idx: usize) -> impl Iterator<Item = usize> {
     let (ix, iz) = ((idx % n) as isize, (idx / n) as isize);
     (-1..=1isize)
@@ -231,40 +289,85 @@ fn spawn_field_colour(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     map: &TerrainMap,
-    coarse_owner: &[Option<u32>],
+    labels: &[u32],
+    contour: &Contour,
     field_colour: &[[f32; 3]],
-    cn: usize,
 ) {
-    // Each coarse tile is split into one quad per native terrain cell it covers, sampled at
-    // exact terrain vertices (not interpolated) and triangulated with the same diagonal
-    // terrain_mesh uses - so the colour mesh is exactly coplanar with the real terrain
-    // instead of drifting from it and showing bare slope through on steep ground.
+    // Each cell is clipped to the same smoothed contour the boundary walls follow
+    // (see Contour::cell_regions), so the colour edge meets the wall exactly and a field's outline
+    // against open ground is as smooth as one between two fields. Each clipped polygon is
+    // then split along the terrain's own diagonal and heighted per triangle, so it stays
+    // coplanar with the real terrain.
     let n = map.grid_size();
-    let mut positions = Vec::new();
-    let mut colors = Vec::new();
-    let mut indices = Vec::new();
-    for cz in 0..cn {
-        for cx in 0..cn {
-            let Some(id) = coarse_owner[cz * cn + cx] else { continue };
-            let c = field_colour[id as usize];
-            let colour = [c[0], c[1], c[2], 1.0];
-            let (fx0, fz0) = (cx * RENDER_STRIDE, cz * RENDER_STRIDE);
-            for dz in 0..RENDER_STRIDE {
-                for dx in 0..RENDER_STRIDE {
-                    let (vx0, vz0) = (fx0 + dx, fz0 + dz);
-                    if vx0 + 1 >= n || vz0 + 1 >= n {
-                        continue;
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut colors: Vec<[f32; 4]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    for iz in 0..n - 1 {
+        for ix in 0..n - 1 {
+            let get = |x: usize, z: usize| labels[z * n + x];
+            let cell = [get(ix, iz), get(ix + 1, iz), get(ix + 1, iz + 1), get(ix, iz + 1)];
+            if cell.iter().all(|&o| o == OPEN) {
+                continue;
+            }
+            for (id, poly) in contour.cell_regions(ix, iz, cell) {
+                let c = field_colour[id as usize];
+                let colour = [c[0], c[1], c[2], 1.0];
+                for tri in triangulate(&poly) {
+                    // Relaxed vertices can sit a few metres outside this cell, so each
+                    // triangle is clipped against every terrain triangle it overlaps and
+                    // heighted from that triangle's own plane - which is what keeps it
+                    // flush with the ground rather than dipping under it on a slope.
+                    let lo = tri.iter().fold(Vec2::MAX, |m, p| m.min(*p)).floor();
+                    let hi = tri.iter().fold(Vec2::MIN, |m, p| m.max(*p)).floor();
+                    for dz in lo.y as i32..=hi.y as i32 {
+                        for dx in lo.x as i32..=hi.x as i32 {
+                            let (tx, tz) = (ix as i32 + dx, iz as i32 + dz);
+                            if tx < 0 || tz < 0 || tx as usize >= n - 1 || tz as usize >= n - 1 {
+                                continue;
+                            }
+                            let (tx, tz) = (tx as usize, tz as usize);
+                            let shift = Vec2::new(dx as f32, dz as f32);
+                            let local: Vec<Vec2> = tri.iter().map(|p| *p - shift).collect();
+                            let h_tl = map.vertex_height(tx, tz) + FIELD_LIFT;
+                            let h_tr = map.vertex_height(tx + 1, tz) + FIELD_LIFT;
+                            let h_br = map.vertex_height(tx + 1, tz + 1) + FIELD_LIFT;
+                            let h_bl = map.vertex_height(tx, tz + 1) + FIELD_LIFT;
+                            let origin = grid_pos(tx, tz);
+                            for lower in [true, false] {
+                                let clipped = clip_to_terrain_triangle(&local, lower);
+                                if clipped.len() < 3 {
+                                    continue;
+                                }
+                                // terrain_mesh splits each cell along the TR-BL diagonal.
+                                let height = |p: Vec2| {
+                                    if lower {
+                                        h_tl + p.x * (h_tr - h_tl) + p.y * (h_bl - h_tl)
+                                    } else {
+                                        h_br + (1.0 - p.x) * (h_bl - h_br) + (1.0 - p.y) * (h_tr - h_br)
+                                    }
+                                };
+                                for k in 1..clipped.len() - 1 {
+                                    let mut t = [clipped[0], clipped[k], clipped[k + 1]];
+                                    // Winding must face up; (u, v) maps to (x, z).
+                                    let area = (t[1].y - t[0].y) * (t[2].x - t[0].x)
+                                        - (t[1].x - t[0].x) * (t[2].y - t[0].y);
+                                    if area.abs() < 1e-7 {
+                                        continue;
+                                    }
+                                    if area < 0.0 {
+                                        t.swap(1, 2);
+                                    }
+                                    let base = positions.len() as u32;
+                                    for p in t {
+                                        let w = origin + p * CELL;
+                                        positions.push([w.x, height(p), w.y]);
+                                        colors.push(colour);
+                                    }
+                                    indices.extend_from_slice(&[base, base + 1, base + 2]);
+                                }
+                            }
+                        }
                     }
-                    let corners = [(vx0, vz0), (vx0 + 1, vz0), (vx0 + 1, vz0 + 1), (vx0, vz0 + 1)];
-                    let base = positions.len() as u32;
-                    for (ix, iz) in corners {
-                        let p = grid_pos(ix, iz);
-                        positions.push([p.x, map.vertex_height(ix, iz) + FIELD_LIFT, p.y]);
-                        colors.push(colour);
-                    }
-                    // Matches terrain_mesh's (i, i+row, i+1) / (i+1, i+row, i+row+1) split
-                    // exactly, i.e. the diagonal between corner 1 and corner 3.
-                    indices.extend_from_slice(&[base, base + 3, base + 1, base + 1, base + 3, base + 2]);
                 }
             }
         }
@@ -289,69 +392,99 @@ fn spawn_field_colour(
     ));
 }
 
-// Traces the boundary of the coarse ownership grid (between two different fields, or a
-// field and open ground) and merges consecutive same-kind cell-edges into single, longer
-// segments, rather than placing one box per cell-edge.
-// Traces the coarse ownership grid for boundary cell-edges and merges consecutive
-// same-kind edges into single, longer run segments, bucketed by material kind.
-// Tile cx spans from vertex (cx*RENDER_STRIDE) to ((cx+1)*RENDER_STRIDE), matching exactly
-// how spawn_field_colour tiles the terrain, so a boundary wall lands precisely on the edge
-// of the colour fill instead of drifting from it.
-fn collect_boundary_segments(map: &TerrainMap, coarse_owner: &[Option<u32>], cn: usize) -> [Vec<Segment>; 3] {
+// Small pockets of open ground wholly enclosed by a single field (a few cells of odd zone
+// inside a field) read as noisy specks with their own wall loop, so they're filled in. Road
+// and farmyard cells are never filled, since those are deliberately left clear.
+const MAX_HOLE_CELLS: usize = 80;
+
+fn fill_small_holes(map: &TerrainMap, owner: &mut [Option<u32>], keep_clear: &[bool]) {
     let n = map.grid_size();
-    let get = |cx: usize, cz: usize| coarse_owner[cz * cn + cx].unwrap_or(NONE_OWNER);
-    let coarse_pos = |c: usize| {
-        let f = (c * RENDER_STRIDE).min(n - 1);
-        grid_pos(f, 0).x
-    };
-
-    let mut buckets: [Vec<Segment>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-
-    for cx in 0..cn.saturating_sub(1) {
-        let mut run: Option<(usize, u32)> = None;
-        for cz in 0..=cn {
-            let kind = (cz < cn && get(cx, cz) != get(cx + 1, cz)).then(|| pair_hash(get(cx, cz), get(cx + 1, cz)));
-            match (run, kind) {
-                (Some((_, k)), Some(k2)) if k == k2 => {}
-                _ => {
-                    if let Some((start, k)) = run {
-                        let x = coarse_pos(cx + 1);
-                        let z0 = coarse_pos(start);
-                        let z1 = coarse_pos(cz);
-                        buckets[(k % 3) as usize].push(Segment {
-                            centre: Vec2::new(x, (z0 + z1) * 0.5),
-                            half_len: (z1 - z0) * 0.5,
-                            along_z: true,
-                        });
+    let mut seen = vec![false; n * n];
+    for start in 0..n * n {
+        if seen[start] || owner[start].is_some() || keep_clear[start] {
+            continue;
+        }
+        let mut comp = vec![start];
+        seen[start] = true;
+        let mut i = 0;
+        let mut surround: Option<u32> = None;
+        let mut fillable = true;
+        while i < comp.len() {
+            let c = comp[i];
+            i += 1;
+            let (ix, iz) = (c % n, c / n);
+            if ix == 0 || iz == 0 || ix == n - 1 || iz == n - 1 {
+                fillable = false;
+            }
+            for nb in field_neighbours(n, c) {
+                match owner[nb] {
+                    Some(o) => match surround {
+                        None => surround = Some(o),
+                        Some(s) if s != o => fillable = false,
+                        _ => {}
+                    },
+                    None if keep_clear[nb] => fillable = false,
+                    None if !seen[nb] => {
+                        seen[nb] = true;
+                        comp.push(nb);
                     }
-                    run = kind.map(|k| (cz, k));
+                    None => {}
                 }
+            }
+            if comp.len() > MAX_HOLE_CELLS {
+                fillable = false;
+            }
+        }
+        if let (true, Some(id)) = (fillable, surround) {
+            for c in comp {
+                owner[c] = Some(id);
             }
         }
     }
-    for cz in 0..cn.saturating_sub(1) {
-        let mut run: Option<(usize, u32)> = None;
-        for cx in 0..=cn {
-            let kind = (cx < cn && get(cx, cz) != get(cx, cz + 1)).then(|| pair_hash(get(cx, cz), get(cx, cz + 1)));
-            match (run, kind) {
-                (Some((_, k)), Some(k2)) if k == k2 => {}
-                _ => {
-                    if let Some((start, k)) = run {
-                        let z = coarse_pos(cz + 1);
-                        let x0 = coarse_pos(start);
-                        let x1 = coarse_pos(cx);
-                        buckets[(k % 3) as usize].push(Segment {
-                            centre: Vec2::new((x0 + x1) * 0.5, z),
-                            half_len: (x1 - x0) * 0.5,
-                            along_z: false,
-                        });
+}
+
+// Fields below this many cells (~2500 m2) are slivers left over from growth, smoothing and
+// road/river splitting; they get absorbed into whichever neighbouring field they share the
+// most border with.
+const MIN_FIELD_CELLS: usize = 25;
+
+fn merge_tiny_fields(map: &TerrainMap, owner: &mut [Option<u32>]) {
+    let n = map.grid_size();
+    let count = owner.iter().filter_map(|&o| o).max().map_or(0, |m| m + 1) as usize;
+    let mut sizes = vec![0usize; count];
+    for &o in owner.iter().flatten() {
+        sizes[o as usize] += 1;
+    }
+    let mut order: Vec<usize> = (0..count).filter(|&id| sizes[id] > 0 && sizes[id] < MIN_FIELD_CELLS).collect();
+    order.sort_by_key(|&id| sizes[id]);
+    for id in order {
+        let id = id as u32;
+        let mut border: Vec<(u32, u32)> = Vec::new();
+        for idx in (0..n * n).filter(|&i| owner[i] == Some(id)) {
+            for nb in field_neighbours(n, idx).filter(|&nb| nb % n == idx % n || nb / n == idx / n) {
+                if let Some(o) = owner[nb].filter(|&o| o != id) {
+                    match border.iter_mut().find(|(b, _)| *b == o) {
+                        Some(e) => e.1 += 1,
+                        None => border.push((o, 1)),
                     }
-                    run = kind.map(|k| (cx, k));
                 }
             }
         }
+        let Some(&(target, _)) = border.iter().max_by_key(|(_, c)| *c) else {
+            // Nothing to merge into: an orphan sliver, better dropped than drawn as a speck.
+            for o in owner.iter_mut().filter(|o| **o == Some(id)) {
+                *o = None;
+            }
+            sizes[id as usize] = 0;
+            continue;
+        };
+        let moved = sizes[id as usize];
+        for o in owner.iter_mut().filter(|o| **o == Some(id)) {
+            *o = Some(target);
+        }
+        sizes[target as usize] += moved;
+        sizes[id as usize] = 0;
     }
-    buckets
 }
 
 fn spawn_field_boundaries(
@@ -359,11 +492,9 @@ fn spawn_field_boundaries(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     map: &TerrainMap,
-    coarse_owner: &[Option<u32>],
-    cn: usize,
+    contour: &Contour,
 ) {
-    let tile = RENDER_STRIDE as f32 * CELL;
-    let buckets = collect_boundary_segments(map, coarse_owner, cn);
+    let segs = &contour.segs;
 
     let specs = [
         (leaf_material([0.18, 0.38, 0.16]), 1.6, 1.9),
@@ -384,34 +515,26 @@ fn spawn_field_boundaries(
             1.2,
         ),
     ];
-    for (segments, (material, thickness, height)) in buckets.into_iter().zip(specs) {
-        if segments.is_empty() {
+    let mut buckets: [Vec<&crate::contour::Seg>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    for seg in segs {
+        buckets[pair_hash(seg.pair.0, seg.pair.1) as usize % 3].push(seg);
+    }
+    for (bucket, (material, thickness, height)) in buckets.into_iter().zip(specs) {
+        if bucket.is_empty() {
             continue;
         }
         let mat = materials.add(material);
         let mut positions = Vec::new();
         let mut normals = Vec::new();
         let mut indices = Vec::new();
-        for seg in segments {
-            // Step along the run's length, pinning each short prism to the true ground
-            // height at both of its own endpoints - the same trick road_mesh uses for its
-            // ribbons - rather than one flat box spanning the whole run at a single height,
-            // which floated over dips and clipped into hills wherever the run climbed.
-            let total_len = seg.half_len * 2.0;
-            let steps = (total_len / tile).round().max(1.0) as usize;
-            let step_len = total_len / steps as f32;
-            for i in 0..steps {
-                let t0 = -seg.half_len + step_len * i as f32;
-                let t1 = t0 + step_len;
-                let (a, b) = if seg.along_z {
-                    (Vec2::new(seg.centre.x, seg.centre.y + t0), Vec2::new(seg.centre.x, seg.centre.y + t1))
-                } else {
-                    (Vec2::new(seg.centre.x + t0, seg.centre.y), Vec2::new(seg.centre.x + t1, seg.centre.y))
-                };
-                let ground_a = map.height_at(a);
-                let ground_b = map.height_at(b);
-                push_wall_segment(&mut positions, &mut normals, &mut indices, a, ground_a, b, ground_b, thickness, height);
-            }
+        for seg in bucket {
+            // Each segment is already short (at most one grid cell across), and pins to the
+            // true ground height at both of its own endpoints - the same trick road_mesh
+            // uses for its ribbons - so it follows the terrain tightly without needing any
+            // further subdivision.
+            let ground_a = map.height_at(seg.a);
+            let ground_b = map.height_at(seg.b);
+            push_wall_segment(&mut positions, &mut normals, &mut indices, seg.a, ground_a, seg.b, ground_b, thickness, height);
         }
         let mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
             .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
@@ -649,9 +772,7 @@ mod tests {
         (map, zones, params)
     }
 
-    #[test]
-    fn claims_most_of_the_farmland() {
-        let (map, zones, params) = generate();
+    fn farmland(map: &TerrainMap, zones: &ZoneMap) -> Vec<bool> {
         let n = map.grid_size();
         let farms: Vec<Vec2> = map
             .pois
@@ -659,7 +780,7 @@ mod tests {
             .filter(|p| p.kind == crate::map::PoiKind::Farm)
             .map(|p| p.position)
             .collect();
-        let is_farmland: Vec<bool> = (0..n * n)
+        (0..n * n)
             .map(|idx| {
                 let (ix, iz) = (idx % n, idx / n);
                 let zone = zones.zone_at(ix, iz);
@@ -668,7 +789,13 @@ mod tests {
                 }
                 !farms.iter().any(|f| f.distance(grid_pos(ix, iz)) < FARM_YARD_RADIUS)
             })
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn claims_most_of_the_farmland() {
+        let (map, zones, params) = generate();
+        let is_farmland = farmland(&map, &zones);
         let farmland_count = is_farmland.iter().filter(|b| **b).count();
         let seeds = scatter_seeds(&map, &is_farmland, &params);
         assert!(seeds.len() > 500, "only {} field seeds, too sparse", seeds.len());
@@ -683,169 +810,91 @@ mod tests {
     #[test]
     fn boundary_segment_count_stays_bounded() {
         let (map, zones, params) = generate();
-        let n = map.grid_size();
-        let farms: Vec<Vec2> = map
-            .pois
-            .iter()
-            .filter(|p| p.kind == crate::map::PoiKind::Farm)
-            .map(|p| p.position)
-            .collect();
-        let is_farmland: Vec<bool> = (0..n * n)
-            .map(|idx| {
-                let (ix, iz) = (idx % n, idx / n);
-                let zone = zones.zone_at(ix, iz);
-                if zone != Zone::Arable && zone != Zone::Pasture {
-                    return false;
-                }
-                !farms.iter().any(|f| f.distance(grid_pos(ix, iz)) < FARM_YARD_RADIUS)
-            })
-            .collect();
+        let is_farmland = farmland(&map, &zones);
         let seeds = scatter_seeds(&map, &is_farmland, &params);
         let owner = smooth_owners(&map, &is_farmland, claim_regions(&map, &is_farmland, &seeds, &params), SMOOTH_PASSES);
-        let cn = n.div_ceil(RENDER_STRIDE);
-        let coarse_owner: Vec<Option<u32>> = (0..cn * cn)
-            .map(|i| {
-                let (cx, cz) = (i % cn, i / cn);
-                let (fx, fz) = ((cx * RENDER_STRIDE).min(n - 1), (cz * RENDER_STRIDE).min(n - 1));
-                owner[fz * n + fx]
-            })
-            .collect();
-        let mut transitions = 0;
-        for cz in 0..cn {
-            for cx in 0..cn {
-                if cx + 1 < cn && coarse_owner[cz * cn + cx] != coarse_owner[cz * cn + cx + 1] {
-                    transitions += 1;
-                }
-                if cz + 1 < cn && coarse_owner[cz * cn + cx] != coarse_owner[(cz + 1) * cn + cx] {
-                    transitions += 1;
-                }
-            }
-        }
-        // Each transition becomes at most one segment before merging; merging only reduces
-        // this. The old rectangle grid produced on the order of a few thousand segments.
-        assert!(transitions < 40000, "{transitions} raw boundary transitions, too many");
+        let owner = split_disconnected_regions(&map, &is_farmland, &owner);
+        let labels: Vec<u32> = owner.iter().map(|o| o.unwrap_or(OPEN)).collect();
+        let segs = Contour::build(map.grid_size(), &labels, map.seed, None).segs;
+        // Marching squares at native (10m) resolution emits roughly one segment per grid
+        // cell along a field's perimeter, several times more than the old coarse (30m),
+        // merged-run tracing - bounded generously above the measured order of magnitude.
+        assert!(segs.len() < 200_000, "{} boundary segments, too many", segs.len());
     }
 
-    // Diagnostic, not an assertion: prints the merged boundary run with the largest height
-    // range along its length, as a MAP_VIEWER_TARGET to point the viewer at for a visual
-    // check of the contour-following fix. Run with:
-    //   cargo test --lib find_screenshot_hotspot -- --ignored --nocapture
     #[test]
-    #[ignore]
-    fn find_screenshot_hotspot() {
+    fn disconnected_regions_get_separate_ids() {
         let (map, zones, params) = generate();
-        let n = map.grid_size();
-        let roads = crate::roads::RoadNetwork::generate(&map, &params);
-        let farms: Vec<Vec2> = map
-            .pois
-            .iter()
-            .filter(|p| p.kind == crate::map::PoiKind::Farm)
-            .map(|p| p.position)
-            .collect();
-        let is_farmland: Vec<bool> = (0..n * n)
-            .map(|idx| {
-                let (ix, iz) = (idx % n, idx / n);
-                let zone = zones.zone_at(ix, iz);
-                if zone != Zone::Arable && zone != Zone::Pasture {
-                    return false;
-                }
-                if roads.kind_at(ix, iz).is_some() {
-                    return false;
-                }
-                !farms.iter().any(|f| f.distance(grid_pos(ix, iz)) < FARM_YARD_RADIUS)
-            })
-            .collect();
+        let is_farmland = farmland(&map, &zones);
         let seeds = scatter_seeds(&map, &is_farmland, &params);
         let owner = smooth_owners(&map, &is_farmland, claim_regions(&map, &is_farmland, &seeds, &params), SMOOTH_PASSES);
-        let cn = n.div_ceil(RENDER_STRIDE);
-        let coarse_owner: Vec<Option<u32>> = (0..cn * cn)
-            .map(|i| {
-                let (cx, cz) = (i % cn, i / cn);
-                let (fx, fz) = ((cx * RENDER_STRIDE).min(n - 1), (cz * RENDER_STRIDE).min(n - 1));
-                owner[fz * n + fx]
-            })
-            .collect();
-        let buckets = collect_boundary_segments(&map, &coarse_owner, cn);
-
-        let mut best: Option<(f32, Vec2, f32, bool)> = None;
-        for segments in &buckets {
-            for seg in segments {
-                if seg.half_len < 20.0 {
-                    continue;
-                }
-                let samples = 6;
-                let mut lo = f32::MAX;
-                let mut hi = f32::MIN;
-                for i in 0..=samples {
-                    let t = -seg.half_len + (2.0 * seg.half_len) * (i as f32 / samples as f32);
-                    let p = if seg.along_z {
-                        Vec2::new(seg.centre.x, seg.centre.y + t)
-                    } else {
-                        Vec2::new(seg.centre.x + t, seg.centre.y)
-                    };
-                    let h = map.height_at(p);
-                    lo = lo.min(h);
-                    hi = hi.max(h);
-                }
-                let range = hi - lo;
-                if best.map_or(true, |(b, ..)| range > b) {
-                    best = Some((range, seg.centre, seg.half_len, seg.along_z));
-                }
-            }
-        }
-        let (range, centre, half_len, along_z) = best.expect("no boundary segments found");
-        println!(
-            "HOTSPOT target={:.0},{:.0} half_len={:.0} along_z={} height_range={:.1}",
-            centre.x, centre.y, half_len, along_z, range
+        let owner = split_disconnected_regions(&map, &is_farmland, &owner);
+        // If every id is already a single connected blob, splitting again is a no-op:
+        // re-splitting an already-fully-split map can't find more regions than it already
+        // has. An increase here would mean some id still spanned disconnected cells.
+        let resplit = split_disconnected_regions(&map, &is_farmland, &owner);
+        let count = |o: &[Option<u32>]| o.iter().filter_map(|&x| x).max().map_or(0, |m| m + 1);
+        assert_eq!(
+            count(&owner),
+            count(&resplit),
+            "re-splitting found more regions than the first split produced"
         );
     }
 
-    // Diagnostic, not an assertion: prints the owned coarse field tile with the largest
-    // internal height range (sampled the same way spawn_field_colour subdivides a tile),
-    // as a MAP_VIEWER_TARGET to check the field colour overlay against a steep hillside.
+    // Diagnostic, not an assertion: prints a spot where a road runs across farmland on both
+    // sides, as a MAP_VIEWER_TARGET to visually check the road gap and field-split together.
+    //   cargo test --lib find_road_through_field_hotspot -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn find_road_through_field_hotspot() {
+        let (map, zones, params) = generate();
+        let n = map.grid_size();
+        let roads = crate::roads::RoadNetwork::generate(&map, &params);
+        let is_field = |x: usize, z: usize| matches!(zones.zone_at(x, z), Zone::Arable | Zone::Pasture) && roads.kind_at(x, z).is_none();
+        let mut best: Option<Vec2> = None;
+        'search: for iz in 6..n - 6 {
+            for ix in 6..n - 6 {
+                if roads.kind_at(ix, iz).is_none() {
+                    continue;
+                }
+                if is_field(ix - 5, iz) && is_field(ix + 5, iz) {
+                    best = Some(grid_pos(ix, iz));
+                    break 'search;
+                }
+                if is_field(ix, iz - 5) && is_field(ix, iz + 5) {
+                    best = Some(grid_pos(ix, iz));
+                    break 'search;
+                }
+            }
+        }
+        let p = best.expect("no road-through-field spot found");
+        println!("ROAD-THROUGH-FIELD target={:.0},{:.0}", p.x, p.y);
+    }
+
+    // Diagnostic, not an assertion: prints the owned field cell with the largest height
+    // range among its immediate neighbours, as a MAP_VIEWER_TARGET to check the field
+    // colour overlay against a steep hillside.
     //   cargo test --lib find_field_clip_hotspot -- --ignored --nocapture
     #[test]
     #[ignore]
     fn find_field_clip_hotspot() {
         let (map, zones, params) = generate();
-        let n = map.grid_size();
-        let roads = crate::roads::RoadNetwork::generate(&map, &params);
-        let farms: Vec<Vec2> = map
-            .pois
-            .iter()
-            .filter(|p| p.kind == crate::map::PoiKind::Farm)
-            .map(|p| p.position)
-            .collect();
-        let is_farmland: Vec<bool> = (0..n * n)
-            .map(|idx| {
-                let (ix, iz) = (idx % n, idx / n);
-                let zone = zones.zone_at(ix, iz);
-                if zone != Zone::Arable && zone != Zone::Pasture {
-                    return false;
-                }
-                if roads.kind_at(ix, iz).is_some() {
-                    return false;
-                }
-                !farms.iter().any(|f| f.distance(grid_pos(ix, iz)) < FARM_YARD_RADIUS)
-            })
-            .collect();
+        let is_farmland = farmland(&map, &zones);
         let seeds = scatter_seeds(&map, &is_farmland, &params);
         let owner = smooth_owners(&map, &is_farmland, claim_regions(&map, &is_farmland, &seeds, &params), SMOOTH_PASSES);
-        let cn = n.div_ceil(RENDER_STRIDE);
-        let tile = RENDER_STRIDE as f32 * CELL;
-        let half = tile * 0.5;
+        let owner = split_disconnected_regions(&map, &is_farmland, &owner);
+        let n = map.grid_size();
 
         let mut best: Option<(f32, Vec2)> = None;
-        for cz in 0..cn {
-            for cx in 0..cn {
-                let (fx, fz) = ((cx * RENDER_STRIDE).min(n - 1), (cz * RENDER_STRIDE).min(n - 1));
-                if owner[fz * n + fx].is_none() {
+        for iz in 3..n - 3 {
+            for ix in 3..n - 3 {
+                if owner[iz * n + ix].is_none() {
                     continue;
                 }
-                let p = grid_pos(fx, fz);
+                let p = grid_pos(ix, iz);
                 let mut lo = f32::MAX;
                 let mut hi = f32::MIN;
-                for (dx, dz) in [(-half, -half), (half, -half), (half, half), (-half, half), (0.0, 0.0)] {
+                for (dx, dz) in [(-15.0, -15.0), (15.0, -15.0), (15.0, 15.0), (-15.0, 15.0), (0.0, 0.0)] {
                     let h = map.height_at(p + Vec2::new(dx, dz));
                     lo = lo.min(h);
                     hi = hi.max(h);
@@ -856,8 +905,7 @@ mod tests {
                 }
             }
         }
-        let (range, p) = best.expect("no owned field tiles found");
+        let (range, p) = best.expect("no owned field cells found");
         println!("FIELD HOTSPOT target={:.0},{:.0} height_range_over_30m={:.1}", p.x, p.y, range);
     }
 }
-

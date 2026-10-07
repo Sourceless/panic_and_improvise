@@ -17,6 +17,10 @@ struct Palette {
     brick: Handle<StandardMaterial>,
     white: Handle<StandardMaterial>,
     timber: Handle<StandardMaterial>,
+    // Unit-sized shapes every house is scaled from, so a town of hundreds of houses shares
+    // two meshes instead of allocating two each.
+    unit_cube: Handle<Mesh>,
+    unit_gable: Handle<Mesh>,
 }
 
 struct Part {
@@ -52,6 +56,8 @@ pub fn spawn_settlements(
         brick: colour(0.55, 0.22, 0.16),
         white: colour(0.92, 0.92, 0.9),
         timber: colour(0.4, 0.3, 0.2),
+        unit_cube: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
+        unit_gable: meshes.add(gable(1.0, 1.0, 1.0)),
     };
 
     for poi in &map.pois {
@@ -71,7 +77,7 @@ pub fn spawn_settlements(
                     map.height_at(poi.landmark) - ground,
                     poi.landmark.y - poi.position.y,
                 );
-                village(meshes, &palette, &mut rng, church_offset)
+                village(meshes, &palette, &mut rng, map, poi.position, poi.radius, church_offset)
             }
             PoiKind::Farm => farm(meshes, &palette, &mut rng),
             PoiKind::Mill => mill(meshes, &palette),
@@ -89,41 +95,65 @@ pub fn spawn_settlements(
     }
 }
 
-fn village(meshes: &mut Assets<Mesh>, palette: &Palette, rng: &mut Rng, church_offset: Vec3) -> Vec<Part> {
+// Houses on a loose jittered grid inside the settlement's radius, thinning out toward the
+// edge. A bigger settlement is simply a bigger grid, so the same code makes a hamlet and the
+// town; the town additionally gets a clear central square, and taller buildings in its core.
+fn village(
+    meshes: &mut Assets<Mesh>,
+    palette: &Palette,
+    rng: &mut Rng,
+    map: &TerrainMap,
+    origin: Vec2,
+    radius: f32,
+    church_offset: Vec3,
+) -> Vec<Part> {
     let mut parts = Vec::new();
-    let rows = [-22.0_f32, -9.0, 9.0, 22.0];
-    for i in 0..9 {
-        for (row_idx, &row_z) in rows.iter().enumerate() {
-            // Taper the skip chance toward the edges so the village reads as a loose
-            // cluster rather than a crisp rectangle of houses.
-            let dx = (i as f32 - 4.0).abs() / 4.0;
-            let dz = (row_idx as f32 - 1.5).abs() / 1.5;
-            let edge = dx.max(dz);
-            if rng.unit() < 0.08 + 0.4 * edge {
+    let ground = map.height_at(origin);
+    let is_town = radius >= 150.0;
+    let (step_x, step_z) = (12.0_f32, 13.0_f32);
+    let (cols, rows) = ((radius / step_x) as i32, (radius / step_z) as i32);
+    for gz in -rows..=rows {
+        for gx in -cols..=cols {
+            let (cx, cz) = (gx as f32 * step_x, gz as f32 * step_z);
+            let dist = Vec2::new(cx, cz).length() / radius;
+            if dist > 0.92 || (is_town && dist < 0.09) {
                 continue;
             }
-            let x = -48.0 + i as f32 * 12.0 + rng.range(-4.5, 4.5);
-            let z = row_z + rng.range(-3.5, 3.5);
+            // Taper the skip chance toward the edges so the settlement reads as a loose
+            // cluster rather than a crisp disc of houses.
+            if rng.unit() < 0.08 + 0.45 * dist * dist {
+                continue;
+            }
+            let x = cx + rng.range(-4.5, 4.5);
+            let z = cz + rng.range(-3.5, 3.5);
+            let world = origin + Vec2::new(x, z);
+            // Keep clear of the river and lakes, which a large footprint can now overlap.
+            if map.water_distance(world) < 10.0 {
+                continue;
+            }
             let base_yaw = if rng.unit() < 0.15 { FRAC_PI_2 } else { 0.0 };
             let yaw = base_yaw + rng.range(-0.35, 0.35);
             let walls = palette.walls[(rng.unit() * palette.walls.len() as f32) as usize % palette.walls.len()].clone();
             let roof = if rng.unit() < 0.7 { palette.slate.clone() } else { palette.tile.clone() };
+            let core_boost = if is_town { 1.0 + 0.7 * (1.0 - dist / 0.5).max(0.0) } else { 1.0 };
             house(
                 &mut parts,
-                meshes,
+                palette,
                 walls,
                 roof,
-                Vec3::new(x, 0.0, z),
+                Vec3::new(x, map.height_at(world) - ground, z),
                 yaw,
                 rng.range(7.0, 9.0),
                 rng.range(5.5, 6.5),
-                rng.range(3.8, 4.4),
+                rng.range(3.8, 4.4) * core_boost,
             );
         }
     }
-    for mut part in church(meshes, palette) {
-        part.transform.translation += church_offset;
-        parts.push(part);
+    if radius >= crate::map::SMALL_SETTLEMENT_RADIUS {
+        for mut part in church(meshes, palette) {
+            part.transform.translation += church_offset;
+            parts.push(part);
+        }
     }
     parts
 }
@@ -146,7 +176,7 @@ fn farm(meshes: &mut Assets<Mesh>, palette: &Palette, rng: &mut Rng) -> Vec<Part
     let j = jitter(rng);
     house(
         &mut parts,
-        meshes,
+        palette,
         palette.walls[0].clone(),
         palette.tile.clone(),
         Vec3::new(-12.0 + j.x, 0.0, j.y),
@@ -158,7 +188,7 @@ fn farm(meshes: &mut Assets<Mesh>, palette: &Palette, rng: &mut Rng) -> Vec<Part
     let j = jitter(rng);
     house(
         &mut parts,
-        meshes,
+        palette,
         palette.brick.clone(),
         palette.slate.clone(),
         Vec3::new(8.0 + j.x, 0.0, 6.0 + j.y),
@@ -170,7 +200,7 @@ fn farm(meshes: &mut Assets<Mesh>, palette: &Palette, rng: &mut Rng) -> Vec<Part
     let j = jitter(rng);
     house(
         &mut parts,
-        meshes,
+        palette,
         palette.brick.clone(),
         palette.slate.clone(),
         Vec3::new(10.0 + j.x, 0.0, -14.0 + j.y),
@@ -214,7 +244,7 @@ fn mill(meshes: &mut Assets<Mesh>, palette: &Palette) -> Vec<Part> {
 #[allow(clippy::too_many_arguments)]
 fn house(
     parts: &mut Vec<Part>,
-    meshes: &mut Assets<Mesh>,
+    palette: &Palette,
     walls: Handle<StandardMaterial>,
     roof: Handle<StandardMaterial>,
     centre: Vec3,
@@ -225,9 +255,23 @@ fn house(
 ) {
     let rotation = Quat::from_rotation_y(yaw);
     let rise = depth * 0.5;
-    let local = |offset: Vec3| Transform::from_translation(centre + rotation * offset).with_rotation(rotation);
-    push(parts, meshes.add(Cuboid::new(width, wall_height, depth)), walls, local(Vec3::new(0.0, wall_height / 2.0, 0.0)));
-    push(parts, meshes.add(gable(width, depth, rise)), roof, local(Vec3::new(0.0, wall_height, 0.0)));
+    let local = |offset: Vec3, scale: Vec3| {
+        Transform::from_translation(centre + rotation * offset)
+            .with_rotation(rotation)
+            .with_scale(scale)
+    };
+    push(
+        parts,
+        palette.unit_cube.clone(),
+        walls,
+        local(Vec3::new(0.0, wall_height / 2.0, 0.0), Vec3::new(width, wall_height, depth)),
+    );
+    push(
+        parts,
+        palette.unit_gable.clone(),
+        roof,
+        local(Vec3::new(0.0, wall_height, 0.0), Vec3::new(width, rise, depth)),
+    );
 }
 
 fn push(parts: &mut Vec<Part>, mesh: Handle<Mesh>, material: Handle<StandardMaterial>, transform: Transform) {

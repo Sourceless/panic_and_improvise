@@ -87,7 +87,7 @@ fn rule_for(zone: Zone, params: &GenParams) -> Rule {
             0.68,
         ),
         Zone::Military => (
-            Box::new(|s| s.village_distance > 1500.0 && s.slope < 0.10 && s.elevation < 150.0),
+            Box::new(|s| s.village_distance > 200.0 && s.slope < 0.10 && s.elevation < 150.0),
             900.0,
             0.74,
         ),
@@ -131,11 +131,13 @@ impl ZoneMap {
     pub fn generate(map: &TerrainMap, params: &GenParams) -> Self {
         let n = map.grid_size();
         let mut zones = Vec::with_capacity(n * n);
-        let villages: Vec<Vec2> = map
+        // Each village's centre and how much bigger than the standard 55m village it is, so
+        // distance-based rules (the Urban zone especially) grow with a large settlement.
+        let villages: Vec<(Vec2, f32)> = map
             .pois
             .iter()
             .filter(|p| p.kind == PoiKind::Village)
-            .map(|p| p.position)
+            .map(|p| (p.position, p.radius - 55.0))
             .collect();
         let farms: Vec<Vec2> = map
             .pois
@@ -157,7 +159,10 @@ impl ZoneMap {
                     elevation: map.vertex_height(ix, iz),
                     slope: slope_at(map, ix, iz),
                     river_distance: map.river_distance(p),
-                    village_distance: nearest(&villages, p),
+                    village_distance: villages
+                        .iter()
+                        .map(|&(q, extra)| (q.distance(p) - extra).max(0.0))
+                        .fold(f32::MAX, f32::min),
                     farm_distance: nearest(&farms, p),
                 };
                 let zone = rules

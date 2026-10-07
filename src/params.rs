@@ -27,6 +27,10 @@ pub struct GenParams {
     pub max_arable_slope: f32,
     /// Steepest ground farmland can form on when it's grazed (the Pasture zone).
     pub max_pasture_slope: f32,
+    /// Fraction of the map that becomes "large field" territory: within it, most candidate
+    /// field seeds are thinned out so the few that remain claim a much bigger area than
+    /// usual. 0 keeps every field close to the normal size.
+    pub large_field_fraction: f32,
 }
 
 impl Default for GenParams {
@@ -42,6 +46,7 @@ impl Default for GenParams {
             field_max_slope: 2.0,
             max_arable_slope: 0.5,
             max_pasture_slope: 0.55,
+            large_field_fraction: 0.0,
         }
     }
 }

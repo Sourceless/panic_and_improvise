@@ -258,6 +258,7 @@ fn ui_panel(mut contexts: EguiContexts, mut params: ResMut<GenParams>, mut viewe
         ui.add(egui::Slider::new(&mut params.field_spacing, 40.0..=200.0).text("Field size"));
         ui.add(egui::Slider::new(&mut params.field_contour_weight, 0.5..=15.0).text("Field contour weight"));
         ui.add(egui::Slider::new(&mut params.field_max_slope, 0.1..=2.0).text("Field max slope change"));
+        ui.add(egui::Slider::new(&mut params.large_field_fraction, 0.0..=0.6).text("Large field chance"));
         ui.add(egui::Slider::new(&mut params.max_arable_slope, 0.02..=0.5).text("Max arable slope"));
         ui.add(egui::Slider::new(&mut params.max_pasture_slope, 0.1..=1.0).text("Max pasture slope"));
         ui.separator();

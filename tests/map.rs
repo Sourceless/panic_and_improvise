@@ -99,6 +99,10 @@ fn every_settlement_has_water_nearby() {
     for seed in [MAP_SEED, 1, 2, 3, 4] {
         let map = TerrainMap::generate(seed, &fps_prototype::params::GenParams::default());
         for poi in &map.pois {
+            // Farms and hamlets have no river requirement; everything else must be near water.
+            if poi.radius < fps_prototype::map::SMALL_SETTLEMENT_RADIUS {
+                continue;
+            }
             assert!(
                 map.river_distance(poi.position) <= 540.0,
                 "seed {seed}: {:?} is {}m from water",

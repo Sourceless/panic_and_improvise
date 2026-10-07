@@ -6,6 +6,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
 
+use crate::contour::{triangulate, Contour, OPEN};
 use crate::map::{grid_pos, TerrainMap, CELL};
 
 const WATER_LIFT: f32 = 0.05;
@@ -178,23 +179,55 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+// Water is contoured like the fields (see contour.rs) rather than drawn as a square per wet
+// cell, so the river and lake shores curve instead of stair-stepping. Each cell's wet
+// polygon takes its height from bilinear interpolation of the cell's water levels, with any
+// dry corner borrowing the average of the wet ones.
 fn river_mesh(map: &TerrainMap) -> Mesh {
+    const WATER: u32 = 0;
     let n = map.grid_size();
-    let half = CELL * 0.5;
-    let mut positions = Vec::new();
-    let mut indices = Vec::new();
-    for iz in 0..n {
-        for ix in 0..n {
-            let Some(level) = map.water_level(ix, iz) else {
+    let labels: Vec<u32> = (0..n * n)
+        .map(|i| if map.water_level(i % n, i / n).is_some() { WATER } else { OPEN })
+        .collect();
+    let contour = Contour::build(n, &labels, map.seed ^ 0x77A7, Some(WATER));
+
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    for iz in 0..n - 1 {
+        for ix in 0..n - 1 {
+            let corners = [(ix, iz), (ix + 1, iz), (ix + 1, iz + 1), (ix, iz + 1)];
+            let levels = corners.map(|(x, z)| map.water_level(x, z));
+            let wet: Vec<f32> = levels.iter().flatten().copied().collect();
+            if wet.is_empty() {
                 continue;
-            };
-            let p = grid_pos(ix, iz);
-            let y = level + WATER_LIFT;
-            let base = positions.len() as u32;
-            for (dx, dz) in [(-half, -half), (half, -half), (half, half), (-half, half)] {
-                positions.push([p.x + dx, y, p.y + dz]);
             }
-            indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+            let mean = wet.iter().sum::<f32>() / wet.len() as f32;
+            let [l_tl, l_tr, l_br, l_bl] = levels.map(|l| l.unwrap_or(mean));
+            let cell = levels.map(|l| if l.is_some() { WATER } else { OPEN });
+            let origin = grid_pos(ix, iz);
+            let height = |p: Vec2| {
+                let top = l_tl + (l_tr - l_tl) * p.x;
+                let bottom = l_bl + (l_br - l_bl) * p.x;
+                top + (bottom - top) * p.y + WATER_LIFT
+            };
+            for (_, poly) in contour.cell_regions(ix, iz, cell) {
+                for mut tri in triangulate(&poly) {
+                    // Wind upward; (u, v) maps to (x, z).
+                    let area = (tri[1].y - tri[0].y) * (tri[2].x - tri[0].x) - (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y);
+                    if area.abs() < 1e-7 {
+                        continue;
+                    }
+                    if area < 0.0 {
+                        tri.swap(1, 2);
+                    }
+                    let base = positions.len() as u32;
+                    for p in tri {
+                        let w = origin + p * CELL;
+                        positions.push([w.x, height(p), w.y]);
+                    }
+                    indices.extend_from_slice(&[base, base + 1, base + 2]);
+                }
+            }
         }
     }
     let normals = vec![[0.0, 1.0, 0.0]; positions.len()];

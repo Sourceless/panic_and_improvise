@@ -30,6 +30,12 @@ const CARVE_BANK: f32 = CELL * 4.0;
 const VILLAGE_CHURCH_SEARCH: f32 = 40.0;
 const POI_MIN_SPACING: f32 = 250.0;
 const SETTLEMENT_WATER_REACH: f32 = 500.0;
+// Farms and hamlets (anything under SMALL_SETTLEMENT_RADIUS) have no river requirement at
+// all, so settlements spread across the whole map instead of crowding the river's banks.
+pub const SMALL_SETTLEMENT_RADIUS: f32 = 45.0;
+// Settlements at least this big are only sited on level ground, since flattening a large
+// footprint on a slope would carve an obvious terrace into the hillside.
+const LARGE_SETTLEMENT_RADIUS: f32 = 100.0;
 
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +50,8 @@ pub struct Poi {
     pub kind: PoiKind,
     pub position: Vec2,
     pub landmark: Vec2,
+    /// Footprint radius: the area flattened and built over. Villages vary widely in size.
+    pub radius: f32,
 }
 
 #[derive(Resource)]
@@ -133,7 +141,7 @@ impl TerrainMap {
     fn flatten_settlements(&mut self) {
         for poi in self.pois.clone() {
             let ground = self.height_at(poi.position);
-            let radius = settlement_radius(poi.kind);
+            let radius = poi.radius;
             for iz in 0..VERTS {
                 for ix in 0..VERTS {
                     let d = grid_pos(ix, iz).distance(poi.position);
@@ -503,45 +511,36 @@ pub fn settlement_radius(kind: PoiKind) -> f32 {
 }
 
 fn place_pois(rng: &mut Rng, map: &TerrainMap) -> Vec<Poi> {
-    let plan = [
-        PoiKind::Village,
-        PoiKind::Village,
-        PoiKind::Village,
-        PoiKind::Village,
-        PoiKind::Village,
-        PoiKind::Farm,
-        PoiKind::Farm,
-        PoiKind::Farm,
-        PoiKind::Farm,
-        PoiKind::Farm,
-        PoiKind::Farm,
-        PoiKind::Farm,
-        PoiKind::Farm,
-        PoiKind::Farm,
-        PoiKind::Farm,
-        PoiKind::Farm,
-        PoiKind::Farm,
-        PoiKind::Farm,
-        PoiKind::Farm,
-        PoiKind::Farm,
-        PoiKind::Farm,
-        PoiKind::Village,
-        PoiKind::Village,
-        PoiKind::Village,
-        PoiKind::Mill,
-        PoiKind::Mill,
-    ];
+    // Biggest first, so the one town and the large villages get first pick of level ground
+    // and the roads (which root at the first village) grow out from the town.
+    let mut plan: Vec<(PoiKind, f32)> = vec![(PoiKind::Village, 230.0)];
+    plan.extend((0..4).map(|_| (PoiKind::Village, rng.range(90.0, 120.0))));
+    // Mills need a specific stretch of riverbank, so they go before the bank fills up.
+    plan.extend((0..3).map(|_| (PoiKind::Mill, settlement_radius(PoiKind::Mill))));
+    plan.extend((0..12).map(|_| (PoiKind::Village, rng.range(58.0, 80.0))));
+    plan.extend((0..15).map(|_| (PoiKind::Village, rng.range(28.0, 42.0))));
+    plan.extend((0..60).map(|_| (PoiKind::Farm, settlement_radius(PoiKind::Farm))));
+
     let mut pois: Vec<Poi> = Vec::new();
-    for kind in plan {
-        let Some(position) = find_site(rng, map, &pois, kind) else {
-            continue;
+    for (kind, wanted) in plan {
+        // If there's no room for the full size (the town especially), settle for smaller.
+        let mut radius = wanted;
+        let position = loop {
+            if let Some(p) = find_site(rng, map, &pois, kind, radius) {
+                break Some(p);
+            }
+            radius *= 0.85;
+            if kind != PoiKind::Village || radius < wanted * 0.5 || radius < 28.0 {
+                break None;
+            }
         };
-        let landmark = if kind == PoiKind::Village {
-            highest_point(map, position, VILLAGE_CHURCH_SEARCH)
+        let Some(position) = position else { continue };
+        let landmark = if kind == PoiKind::Village && radius >= SMALL_SETTLEMENT_RADIUS {
+            highest_point(map, position, VILLAGE_CHURCH_SEARCH.max(radius * 0.4))
         } else {
             position
         };
-        pois.push(Poi { kind, position, landmark });
+        pois.push(Poi { kind, position, landmark, radius });
     }
     pois
 }
@@ -564,7 +563,7 @@ fn highest_point(map: &TerrainMap, centre: Vec2, radius: f32) -> Vec2 {
     best.1
 }
 
-fn find_site(rng: &mut Rng, map: &TerrainMap, existing: &[Poi], kind: PoiKind) -> Option<Vec2> {
+fn find_site(rng: &mut Rng, map: &TerrainMap, existing: &[Poi], kind: PoiKind, radius: f32) -> Option<Vec2> {
     for _ in 0..8000 {
         let p = Vec2::new(
             rng.range(-HALF_SIZE + 30.0, HALF_SIZE - 30.0),
@@ -574,13 +573,15 @@ fn find_site(rng: &mut Rng, map: &TerrainMap, existing: &[Poi], kind: PoiKind) -
         let h = map.height_at(p);
         let river_ok = match kind {
             PoiKind::Mill => river_dist > CELL && river_dist < 40.0,
+            _ if radius < SMALL_SETTLEMENT_RADIUS => river_dist > 25.0,
             _ => river_dist > 25.0 && river_dist < SETTLEMENT_WATER_REACH,
         };
         // The whole flattened footprint must stay clear of water, not just the centre
         // point - otherwise a village or farm can end up overlapping a lake.
         let water_ok = match kind {
             PoiKind::Mill => map.water_distance(p) > 8.0,
-            _ => map.water_distance(p) > settlement_radius(kind) + 20.0,
+            _ if radius >= LARGE_SETTLEMENT_RADIUS => map.water_distance(p) > 40.0,
+            _ => map.water_distance(p) > radius + 20.0,
         };
         let height_ok = match kind {
             PoiKind::Mill => h > 0.0 && h < 90.0,
@@ -588,8 +589,15 @@ fn find_site(rng: &mut Rng, map: &TerrainMap, existing: &[Poi], kind: PoiKind) -
         };
         let spacing_ok = existing
             .iter()
-            .all(|other| other.position.distance(p) >= POI_MIN_SPACING);
-        if river_ok && water_ok && height_ok && spacing_ok && p.length() > 120.0 {
+            .all(|other| other.position.distance(p) >= POI_MIN_SPACING.max(radius + other.radius + 80.0));
+        let level_ok = radius < LARGE_SETTLEMENT_RADIUS || {
+            let limit = radius * 0.1;
+            (0..8).all(|i| {
+                let a = i as f32 * std::f32::consts::FRAC_PI_4;
+                (map.height_at(p + Vec2::new(a.cos(), a.sin()) * radius * 0.8) - h).abs() < limit
+            })
+        };
+        if river_ok && water_ok && height_ok && spacing_ok && level_ok && p.length() > 120.0 {
             return Some(p);
         }
     }
