@@ -51,6 +51,7 @@ pub struct TerrainMap {
     heights: Vec<f32>,
     water: Vec<Option<f32>>,
     river_distance: Vec<f32>,
+    water_distance: Vec<f32>,
     river_len: f32,
     pub pois: Vec<Poi>,
 }
@@ -97,7 +98,7 @@ impl TerrainMap {
             })
             .collect();
 
-        let water = (0..COUNT)
+        let water: Vec<Option<f32>> = (0..COUNT)
             .map(|idx| {
                 if is_river[idx] {
                     Some(level[idx])
@@ -111,11 +112,15 @@ impl TerrainMap {
             })
             .collect();
 
+        let is_water: Vec<bool> = water.iter().map(Option::is_some).collect();
+        let (water_distance, _) = distance_to_rivers(&is_water, &vec![0.0; COUNT]);
+
         let mut map = TerrainMap {
             seed,
             heights,
             water,
             river_distance,
+            water_distance,
             river_len,
             pois: Vec::new(),
         };
@@ -149,6 +154,7 @@ impl TerrainMap {
             heights: vec![height; COUNT],
             water: vec![None; COUNT],
             river_distance: vec![f32::MAX; COUNT],
+            water_distance: vec![f32::MAX; COUNT],
             river_len: 0.0,
             pois: Vec::new(),
         }
@@ -176,6 +182,13 @@ impl TerrainMap {
     pub fn river_distance(&self, p: Vec2) -> f32 {
         let (ix, iz) = nearest_vertex(p);
         self.river_distance[iz * VERTS + ix]
+    }
+
+    // Distance to the nearest water of any kind (river or lake), unlike river_distance
+    // which only measures distance to the flowing river channel.
+    pub fn water_distance(&self, p: Vec2) -> f32 {
+        let (ix, iz) = nearest_vertex(p);
+        self.water_distance[iz * VERTS + ix]
     }
 
     pub fn height_range(&self) -> (f32, f32) {
@@ -563,6 +576,12 @@ fn find_site(rng: &mut Rng, map: &TerrainMap, existing: &[Poi], kind: PoiKind) -
             PoiKind::Mill => river_dist > CELL && river_dist < 40.0,
             _ => river_dist > 25.0 && river_dist < SETTLEMENT_WATER_REACH,
         };
+        // The whole flattened footprint must stay clear of water, not just the centre
+        // point - otherwise a village or farm can end up overlapping a lake.
+        let water_ok = match kind {
+            PoiKind::Mill => map.water_distance(p) > 8.0,
+            _ => map.water_distance(p) > settlement_radius(kind) + 20.0,
+        };
         let height_ok = match kind {
             PoiKind::Mill => h > 0.0 && h < 90.0,
             _ => h > 0.0 && h < 90.0,
@@ -570,7 +589,7 @@ fn find_site(rng: &mut Rng, map: &TerrainMap, existing: &[Poi], kind: PoiKind) -
         let spacing_ok = existing
             .iter()
             .all(|other| other.position.distance(p) >= POI_MIN_SPACING);
-        if river_ok && height_ok && spacing_ok && p.length() > 120.0 {
+        if river_ok && water_ok && height_ok && spacing_ok && p.length() > 120.0 {
             return Some(p);
         }
     }
