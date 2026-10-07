@@ -244,7 +244,7 @@ fn regenerate(
     let roads = RoadNetwork::generate(&map);
     spawn_terrain(&mut commands, &mut meshes, &mut standard, &mut terrain, &textures, &map);
     spawn_roads(&mut commands, &mut meshes, &mut standard, &map, &roads);
-    spawn_fill(&mut commands, &mut meshes, &mut standard, &map, &zones);
+    spawn_fill(&mut commands, &mut meshes, &mut standard, &map, &zones, &roads);
     commands.insert_resource(zones);
     commands.insert_resource(roads);
     commands.insert_resource(map);
@@ -258,10 +258,11 @@ fn build_fill(
     mut commands: Commands,
     map: Res<TerrainMap>,
     zones: Res<ZoneMap>,
+    roads: Res<RoadNetwork>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut standard: ResMut<Assets<StandardMaterial>>,
 ) {
-    spawn_fill(&mut commands, &mut meshes, &mut standard, &map, &zones);
+    spawn_fill(&mut commands, &mut meshes, &mut standard, &map, &zones, &roads);
 }
 
 fn build_roads(mut commands: Commands, map: Res<TerrainMap>, mut meshes: ResMut<Assets<Mesh>>, mut standard: ResMut<Assets<StandardMaterial>>) {

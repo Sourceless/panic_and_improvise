@@ -7,6 +7,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 use crate::map::{grid_pos, TerrainMap, CELL};
+use crate::roads::RoadNetwork;
 use crate::terrain::TerrainRoot;
 use crate::zones::{Zone, ZoneMap};
 
@@ -20,9 +21,10 @@ pub fn spawn_fill(
     materials: &mut Assets<StandardMaterial>,
     map: &TerrainMap,
     zones: &ZoneMap,
+    roads: &RoadNetwork,
 ) {
     spawn_trees(commands, meshes, materials, map, zones);
-    spawn_field_tiling(commands, meshes, materials, map, zones);
+    spawn_field_tiling(commands, meshes, materials, map, zones, roads);
     spawn_sheds(commands, meshes, materials, map, zones);
 }
 
@@ -56,6 +58,7 @@ fn spawn_field_tiling(
     materials: &mut Assets<StandardMaterial>,
     map: &TerrainMap,
     zones: &ZoneMap,
+    roads: &RoadNetwork,
 ) {
     let n = map.grid_size();
     let farms: Vec<Vec2> = map
@@ -65,11 +68,17 @@ fn spawn_field_tiling(
         .map(|p| p.position)
         .collect();
 
+    // Roads are excluded from the traversable farmland graph, the same way water is, so a
+    // field can't grow across one. That splits the field in two either side of the road and
+    // gives it a boundary there, instead of the road just being painted over one field.
     let is_farmland: Vec<bool> = (0..n * n)
         .map(|idx| {
             let (ix, iz) = (idx % n, idx / n);
             let zone = zones.zone_at(ix, iz);
             if zone != Zone::Arable && zone != Zone::Pasture {
+                return false;
+            }
+            if roads.kind_at(ix, iz).is_some() {
                 return false;
             }
             !farms.iter().any(|f| f.distance(grid_pos(ix, iz)) < FARM_YARD_RADIUS)
