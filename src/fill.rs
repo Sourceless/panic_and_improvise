@@ -235,35 +235,36 @@ fn spawn_field_colour(
     field_colour: &[[f32; 3]],
     cn: usize,
 ) {
-    // Each coarse tile is split into a small sub-grid, rather than one flat quad, so the
-    // colour mesh follows the terrain's curvature inside a tile instead of only matching it
-    // at the tile's 4 corners.
-    const SUB: usize = 3;
+    // Each coarse tile is split into one quad per native terrain cell it covers, sampled at
+    // exact terrain vertices (not interpolated) and triangulated with the same diagonal
+    // terrain_mesh uses - so the colour mesh is exactly coplanar with the real terrain
+    // instead of drifting from it and showing bare slope through on steep ground.
     let n = map.grid_size();
-    let tile = RENDER_STRIDE as f32 * CELL;
-    let half = tile * 0.5;
-    let step = tile / SUB as f32;
     let mut positions = Vec::new();
     let mut colors = Vec::new();
     let mut indices = Vec::new();
     for cz in 0..cn {
         for cx in 0..cn {
             let Some(id) = coarse_owner[cz * cn + cx] else { continue };
-            let (fx, fz) = ((cx * RENDER_STRIDE).min(n - 1), (cz * RENDER_STRIDE).min(n - 1));
-            let p = grid_pos(fx, fz);
             let c = field_colour[id as usize];
             let colour = [c[0], c[1], c[2], 1.0];
-            let origin = p + Vec2::new(-half, -half);
-            for sz in 0..SUB {
-                for sx in 0..SUB {
-                    let corner0 = origin + Vec2::new(sx as f32 * step, sz as f32 * step);
+            let (fx0, fz0) = (cx * RENDER_STRIDE, cz * RENDER_STRIDE);
+            for dz in 0..RENDER_STRIDE {
+                for dx in 0..RENDER_STRIDE {
+                    let (vx0, vz0) = (fx0 + dx, fz0 + dz);
+                    if vx0 + 1 >= n || vz0 + 1 >= n {
+                        continue;
+                    }
+                    let corners = [(vx0, vz0), (vx0 + 1, vz0), (vx0 + 1, vz0 + 1), (vx0, vz0 + 1)];
                     let base = positions.len() as u32;
-                    for (dx, dz) in [(0.0, 0.0), (step, 0.0), (step, step), (0.0, step)] {
-                        let corner = corner0 + Vec2::new(dx, dz);
-                        positions.push([corner.x, map.height_at(corner) + FIELD_LIFT, corner.y]);
+                    for (ix, iz) in corners {
+                        let p = grid_pos(ix, iz);
+                        positions.push([p.x, map.vertex_height(ix, iz) + FIELD_LIFT, p.y]);
                         colors.push(colour);
                     }
-                    indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+                    // Matches terrain_mesh's (i, i+row, i+1) / (i+1, i+row, i+row+1) split
+                    // exactly, i.e. the diagonal between corner 1 and corner 3.
+                    indices.extend_from_slice(&[base, base + 3, base + 1, base + 1, base + 3, base + 2]);
                 }
             }
         }
@@ -293,9 +294,11 @@ fn spawn_field_colour(
 // segments, rather than placing one box per cell-edge.
 // Traces the coarse ownership grid for boundary cell-edges and merges consecutive
 // same-kind edges into single, longer run segments, bucketed by material kind.
+// Tile cx spans from vertex (cx*RENDER_STRIDE) to ((cx+1)*RENDER_STRIDE), matching exactly
+// how spawn_field_colour tiles the terrain, so a boundary wall lands precisely on the edge
+// of the colour fill instead of drifting from it.
 fn collect_boundary_segments(map: &TerrainMap, coarse_owner: &[Option<u32>], cn: usize) -> [Vec<Segment>; 3] {
     let n = map.grid_size();
-    let tile = RENDER_STRIDE as f32 * CELL;
     let get = |cx: usize, cz: usize| coarse_owner[cz * cn + cx].unwrap_or(NONE_OWNER);
     let coarse_pos = |c: usize| {
         let f = (c * RENDER_STRIDE).min(n - 1);
@@ -312,9 +315,9 @@ fn collect_boundary_segments(map: &TerrainMap, coarse_owner: &[Option<u32>], cn:
                 (Some((_, k)), Some(k2)) if k == k2 => {}
                 _ => {
                     if let Some((start, k)) = run {
-                        let x = coarse_pos(cx) + tile * 0.5;
-                        let z0 = coarse_pos(start) - tile * 0.5;
-                        let z1 = coarse_pos(cz - 1) + tile * 0.5;
+                        let x = coarse_pos(cx + 1);
+                        let z0 = coarse_pos(start);
+                        let z1 = coarse_pos(cz);
                         buckets[(k % 3) as usize].push(Segment {
                             centre: Vec2::new(x, (z0 + z1) * 0.5),
                             half_len: (z1 - z0) * 0.5,
@@ -334,9 +337,9 @@ fn collect_boundary_segments(map: &TerrainMap, coarse_owner: &[Option<u32>], cn:
                 (Some((_, k)), Some(k2)) if k == k2 => {}
                 _ => {
                     if let Some((start, k)) = run {
-                        let z = coarse_pos(cz) + tile * 0.5;
-                        let x0 = coarse_pos(start) - tile * 0.5;
-                        let x1 = coarse_pos(cx - 1) + tile * 0.5;
+                        let z = coarse_pos(cz + 1);
+                        let x0 = coarse_pos(start);
+                        let x1 = coarse_pos(cx);
                         buckets[(k % 3) as usize].push(Segment {
                             centre: Vec2::new((x0 + x1) * 0.5, z),
                             half_len: (x1 - x0) * 0.5,
@@ -795,6 +798,66 @@ mod tests {
             "HOTSPOT target={:.0},{:.0} half_len={:.0} along_z={} height_range={:.1}",
             centre.x, centre.y, half_len, along_z, range
         );
+    }
+
+    // Diagnostic, not an assertion: prints the owned coarse field tile with the largest
+    // internal height range (sampled the same way spawn_field_colour subdivides a tile),
+    // as a MAP_VIEWER_TARGET to check the field colour overlay against a steep hillside.
+    //   cargo test --lib find_field_clip_hotspot -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn find_field_clip_hotspot() {
+        let (map, zones, params) = generate();
+        let n = map.grid_size();
+        let roads = crate::roads::RoadNetwork::generate(&map, &params);
+        let farms: Vec<Vec2> = map
+            .pois
+            .iter()
+            .filter(|p| p.kind == crate::map::PoiKind::Farm)
+            .map(|p| p.position)
+            .collect();
+        let is_farmland: Vec<bool> = (0..n * n)
+            .map(|idx| {
+                let (ix, iz) = (idx % n, idx / n);
+                let zone = zones.zone_at(ix, iz);
+                if zone != Zone::Arable && zone != Zone::Pasture {
+                    return false;
+                }
+                if roads.kind_at(ix, iz).is_some() {
+                    return false;
+                }
+                !farms.iter().any(|f| f.distance(grid_pos(ix, iz)) < FARM_YARD_RADIUS)
+            })
+            .collect();
+        let seeds = scatter_seeds(&map, &is_farmland, &params);
+        let owner = smooth_owners(&map, &is_farmland, claim_regions(&map, &is_farmland, &seeds, &params), SMOOTH_PASSES);
+        let cn = n.div_ceil(RENDER_STRIDE);
+        let tile = RENDER_STRIDE as f32 * CELL;
+        let half = tile * 0.5;
+
+        let mut best: Option<(f32, Vec2)> = None;
+        for cz in 0..cn {
+            for cx in 0..cn {
+                let (fx, fz) = ((cx * RENDER_STRIDE).min(n - 1), (cz * RENDER_STRIDE).min(n - 1));
+                if owner[fz * n + fx].is_none() {
+                    continue;
+                }
+                let p = grid_pos(fx, fz);
+                let mut lo = f32::MAX;
+                let mut hi = f32::MIN;
+                for (dx, dz) in [(-half, -half), (half, -half), (half, half), (-half, half), (0.0, 0.0)] {
+                    let h = map.height_at(p + Vec2::new(dx, dz));
+                    lo = lo.min(h);
+                    hi = hi.max(h);
+                }
+                let range = hi - lo;
+                if best.map_or(true, |(b, _)| range > b) {
+                    best = Some((range, p));
+                }
+            }
+        }
+        let (range, p) = best.expect("no owned field tiles found");
+        println!("FIELD HOTSPOT target={:.0},{:.0} height_range_over_30m={:.1}", p.x, p.y, range);
     }
 }
 
