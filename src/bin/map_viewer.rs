@@ -30,6 +30,7 @@ struct Viewer {
     pitch: f32,
     distance: f32,
     zones_on: bool,
+    params_open: bool,
     target: Vec2,
 }
 
@@ -76,6 +77,7 @@ fn main() {
             pitch: 0.6,
             distance: distance.unwrap_or(4500.0),
             zones_on: std::env::var("MAP_VIEWER_ZONES").is_ok(),
+            params_open: false,
             target: std::env::var("MAP_VIEWER_TARGET")
                 .ok()
                 .and_then(|v| {
@@ -173,6 +175,9 @@ fn handle_keys(keys: Res<ButtonInput<KeyCode>>, mut viewer: ResMut<Viewer>) {
     if keys.just_pressed(KeyCode::KeyZ) {
         viewer.zones_on = !viewer.zones_on;
     }
+    if keys.just_pressed(KeyCode::KeyP) {
+        viewer.params_open = !viewer.params_open;
+    }
     if keys.just_pressed(KeyCode::BracketLeft) {
         viewer.seed = viewer.seed.wrapping_sub(1);
         viewer.pending_regen = true;
@@ -223,6 +228,20 @@ fn copy_screenshot_to_clipboard(
 
 fn ui_panel(mut contexts: EguiContexts, mut params: ResMut<GenParams>, mut viewer: ResMut<Viewer>) -> Result {
     let ctx = contexts.ctx_mut()?;
+
+    egui::Area::new("params_toggle".into())
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
+        .show(ctx, |ui| {
+            let label = if viewer.params_open { "Hide parameters (P)" } else { "Show parameters (P)" };
+            if ui.button(label).clicked() {
+                viewer.params_open = !viewer.params_open;
+            }
+        });
+
+    if !viewer.params_open {
+        return Ok(());
+    }
+
     let mut viewport_ui = egui::Ui::new(
         ctx.clone(),
         "viewport".into(),
@@ -422,7 +441,7 @@ fn update_hud(
         "Seed {}\nRelief: {:.0} to {:.0} m   River: {:.1} km   POIs: {}\n\
          Roads: {:.1} km major, {:.1} km minor\n\n\
          N new seed   [ / ] previous / next seed\n\
-         Drag: orbit   Wheel: zoom   C: copy screenshot   Z: zones",
+         Drag: orbit   Wheel: zoom   C: copy screenshot   Z: zones   P: parameters",
         viewer.seed,
         low,
         high,

@@ -40,7 +40,7 @@ impl Default for GenParams {
             road_slope_scale: 1.0,
             road_water_scale: 1.0,
             field_max_slope: 2.0,
-            max_arable_slope: 0.14,
+            max_arable_slope: 0.5,
             max_pasture_slope: 0.55,
         }
     }
