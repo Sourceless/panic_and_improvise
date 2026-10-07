@@ -6,11 +6,12 @@ use bevy::prelude::*;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use crate::contour::{clip_to_terrain_triangle, triangulate, Contour, OPEN};
+use crate::contour::{clip_to_terrain_triangle, triangulate, Contour, Smoothing, OPEN};
+use crate::field_material::{FieldExtension, FieldMaterial};
 use crate::map::{fbm, grid_pos, TerrainMap, CELL};
 use crate::params::GenParams;
 use crate::roads::RoadNetwork;
-use crate::terrain::TerrainRoot;
+use crate::terrain::{TerrainRoot, TerrainTextures};
 use crate::zones::{Zone, ZoneMap};
 
 const TREE_SPACING: f32 = 16.0;
@@ -21,13 +22,15 @@ pub fn spawn_fill(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    field_materials: &mut Assets<FieldMaterial>,
+    textures: &TerrainTextures,
     map: &TerrainMap,
     zones: &ZoneMap,
     roads: &RoadNetwork,
     params: &GenParams,
 ) {
     spawn_trees(commands, meshes, materials, map, zones);
-    spawn_field_tiling(commands, meshes, materials, map, zones, roads, params);
+    spawn_field_tiling(commands, meshes, materials, field_materials, textures, map, zones, roads, params);
     spawn_sheds(commands, meshes, materials, map, zones);
 }
 
@@ -52,6 +55,8 @@ fn spawn_field_tiling(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    field_materials: &mut Assets<FieldMaterial>,
+    textures: &TerrainTextures,
     map: &TerrainMap,
     zones: &ZoneMap,
     roads: &RoadNetwork,
@@ -100,11 +105,11 @@ fn spawn_field_tiling(
     let mut owner = split_disconnected_regions(map, &is_farmland, &owner);
     merge_tiny_fields(map, &mut owner);
     fill_small_holes(map, &mut owner, &keep_clear);
-    let field_colour = build_field_colours(map, zones, &owner);
+    let styles = build_field_styles(map, zones, &owner);
 
     let labels: Vec<u32> = owner.iter().map(|o| o.unwrap_or(OPEN)).collect();
-    let contour = Contour::build(n, &labels, map.seed, None);
-    spawn_field_colour(commands, meshes, materials, map, &labels, &contour, &field_colour);
+    let contour = Contour::build(n, &labels, map.seed, None, Smoothing::FIELD);
+    spawn_field_colour(commands, meshes, field_materials, textures, map, &labels, &contour, &styles);
     spawn_field_boundaries(commands, meshes, materials, map, &contour);
 }
 
@@ -244,32 +249,130 @@ fn split_disconnected_regions(map: &TerrainMap, is_farmland: &[bool], owner: &[O
     relabeled
 }
 
-// Picks each field's colour from the first cell found for its id. Ids come from
-// split_disconnected_regions rather than directly from the seed list, so two pieces of a
-// road-split field get different ids and so different colours.
-fn build_field_colours(map: &TerrainMap, zones: &ZoneMap, owner: &[Option<u32>]) -> Vec<[f32; 3]> {
+// What a field is used for. The ids are shared with assets/shaders/field.wgsl.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FieldKind {
+    Ploughed = 0,
+    Wheat = 1,
+    Barley = 2,
+    Rapeseed = 3,
+    RowCrop = 4,
+    Maize = 5,
+    Stubble = 6,
+    Legume = 7,
+    Hay = 8,
+    Pasture = 9,
+    Rough = 10,
+}
+
+#[derive(Clone, Copy)]
+struct FieldStyle {
+    kind: FieldKind,
+    // For crop kinds an absolute canopy colour (linear); for textured kinds a multiplier on
+    // the texture.
+    tint: [f32; 3],
+    // Direction rows / stripes run along, in the world XZ plane.
+    row_dir: Vec2,
+}
+
+fn srgb(c: [f32; 3]) -> [f32; 3] {
+    c.map(|v| v.powf(2.2))
+}
+
+fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+}
+
+fn weighted_pick<T: Copy>(options: &[(T, f32)], roll: f32) -> T {
+    let total: f32 = options.iter().map(|o| o.1).sum();
+    let mut acc = 0.0;
+    for &(item, w) in options {
+        acc += w / total;
+        if roll < acc {
+            return item;
+        }
+    }
+    options[options.len() - 1].0
+}
+
+// Gives each field a kind, tint and row direction. A field's identity comes from the first
+// cell found for its id; ids come from split_disconnected_regions rather than directly from
+// the seed list, so two pieces of a road-split field are separate fields with their own look.
+// Rows follow the contours on sloped ground (as real farmers plough) and are random on the
+// flat.
+fn build_field_styles(map: &TerrainMap, zones: &ZoneMap, owner: &[Option<u32>]) -> Vec<FieldStyle> {
     let n = map.grid_size();
     let field_count = owner.iter().filter_map(|&o| o).max().map_or(0, |m| m + 1) as usize;
-    let mut colours: Vec<Option<[f32; 3]>> = vec![None; field_count];
+    let mut sums = vec![(Vec2::ZERO, 0u32, Zone::Arable); field_count];
     for (idx, &o) in owner.iter().enumerate() {
         let Some(id) = o else { continue };
-        let slot = &mut colours[id as usize];
-        if slot.is_some() {
-            continue;
-        }
         let (ix, iz) = (idx % n, idx / n);
-        let p = grid_pos(ix, iz);
-        let block = (
-            ((p.x + crate::map::HALF_SIZE) / 150.0) as usize,
-            ((p.y + crate::map::HALF_SIZE) / 150.0) as usize,
-        );
-        *slot = Some(if zones.zone_at(ix, iz) == Zone::Arable {
-            crop_colour(block.0, block.1)
-        } else {
-            pasture_colour(block.0, block.1)
-        });
+        let e = &mut sums[id as usize];
+        if e.1 == 0 {
+            e.2 = zones.zone_at(ix, iz);
+        }
+        e.0 += grid_pos(ix, iz);
+        e.1 += 1;
     }
-    colours.into_iter().map(|c| c.unwrap_or([1.0, 0.0, 1.0])).collect()
+    sums.iter()
+        .enumerate()
+        .map(|(id, &(sum, count, zone))| {
+            if count == 0 {
+                return FieldStyle { kind: FieldKind::Pasture, tint: [1.0; 3], row_dir: Vec2::X };
+            }
+            let centre = sum / count as f32;
+            let h = |salt: u64| {
+                hash01((centre.x as i32).rem_euclid(9973) as usize, (centre.y as i32).rem_euclid(9973) as usize, 100 + salt)
+            };
+            let kind = if zone == Zone::Arable {
+                weighted_pick(
+                    &[
+                        (FieldKind::Ploughed, 0.12),
+                        (FieldKind::Wheat, 0.26),
+                        (FieldKind::Barley, 0.16),
+                        (FieldKind::Rapeseed, 0.10),
+                        (FieldKind::RowCrop, 0.10),
+                        (FieldKind::Maize, 0.06),
+                        (FieldKind::Stubble, 0.12),
+                        (FieldKind::Legume, 0.08),
+                    ],
+                    h(1),
+                )
+            } else {
+                weighted_pick(&[(FieldKind::Hay, 0.30), (FieldKind::Pasture, 0.45), (FieldKind::Rough, 0.25)], h(1))
+            };
+            let ripeness = h(2);
+            let vary = 0.9 + 0.2 * h(3);
+            let tint = match kind {
+                FieldKind::Ploughed => [vary; 3],
+                FieldKind::Wheat => lerp3(srgb([0.40, 0.52, 0.20]), srgb([0.78, 0.64, 0.28]), ripeness),
+                FieldKind::Barley => lerp3(srgb([0.46, 0.56, 0.26]), srgb([0.80, 0.72, 0.36]), ripeness),
+                FieldKind::Rapeseed => {
+                    if ripeness < 0.8 { srgb([0.93, 0.80, 0.10]) } else { srgb([0.42, 0.52, 0.18]) }
+                }
+                FieldKind::RowCrop => srgb([0.26, 0.42, 0.14]),
+                FieldKind::Maize => srgb([0.28, 0.40, 0.12]),
+                FieldKind::Stubble => srgb([0.74, 0.66, 0.40]),
+                FieldKind::Legume => srgb([0.44, 0.58, 0.20]),
+                FieldKind::Hay => [vary * 1.05, vary * 1.1, vary * 0.85],
+                FieldKind::Pasture => [vary, vary * 1.05, vary * 0.9],
+                FieldKind::Rough => [vary * 1.1, vary * 1.0, vary * 0.75],
+            };
+            let step = 25.0;
+            let grad = Vec2::new(
+                map.height_at(centre + Vec2::X * step) - map.height_at(centre - Vec2::X * step),
+                map.height_at(centre + Vec2::Y * step) - map.height_at(centre - Vec2::Y * step),
+            ) / (2.0 * step);
+            let angle = if grad.length() > 0.04 && h(4) < 0.85 {
+                // Along the contour: perpendicular to the downhill direction.
+                Vec2::new(-grad.y, grad.x).to_angle() + (h(5) - 0.5) * 0.25
+            } else {
+                h(5) * std::f32::consts::PI
+            };
+            let _ = id;
+            FieldStyle { kind, tint, row_dir: Vec2::from_angle(angle) }
+        })
+        .collect()
 }
 
 fn field_neighbours(n: usize, idx: usize) -> impl Iterator<Item = usize> {
@@ -287,11 +390,12 @@ fn field_neighbours(n: usize, idx: usize) -> impl Iterator<Item = usize> {
 fn spawn_field_colour(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
+    materials: &mut Assets<FieldMaterial>,
+    textures: &TerrainTextures,
     map: &TerrainMap,
     labels: &[u32],
     contour: &Contour,
-    field_colour: &[[f32; 3]],
+    styles: &[FieldStyle],
 ) {
     // Each cell is clipped to the same smoothed contour the boundary walls follow
     // (see Contour::cell_regions), so the colour edge meets the wall exactly and a field's outline
@@ -301,6 +405,7 @@ fn spawn_field_colour(
     let n = map.grid_size();
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut colors: Vec<[f32; 4]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
     for iz in 0..n - 1 {
         for ix in 0..n - 1 {
@@ -310,8 +415,9 @@ fn spawn_field_colour(
                 continue;
             }
             for (id, poly) in contour.cell_regions(ix, iz, cell) {
-                let c = field_colour[id as usize];
-                let colour = [c[0], c[1], c[2], 1.0];
+                let style = styles[id as usize];
+                let colour = [style.tint[0], style.tint[1], style.tint[2], style.kind as u32 as f32 / 16.0];
+                let (along, across) = (style.row_dir, Vec2::new(-style.row_dir.y, style.row_dir.x));
                 for tri in triangulate(&poly) {
                     // Relaxed vertices can sit a few metres outside this cell, so each
                     // triangle is clipped against every terrain triangle it overlaps and
@@ -362,6 +468,7 @@ fn spawn_field_colour(
                                         let w = origin + p * CELL;
                                         positions.push([w.x, height(p), w.y]);
                                         colors.push(colour);
+                                        uvs.push([w.dot(across), w.dot(along)]);
                                     }
                                     indices.extend_from_slice(&[base, base + 1, base + 2]);
                                 }
@@ -380,14 +487,23 @@ fn spawn_field_colour(
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
         .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
         .with_inserted_indices(Indices::U32(indices));
     commands.spawn((
         TerrainRoot,
         Mesh3d(meshes.add(mesh)),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            perceptual_roughness: 1.0,
-            ..default()
+        MeshMaterial3d(materials.add(FieldMaterial {
+            base: StandardMaterial {
+                base_color: Color::WHITE,
+                perceptual_roughness: 1.0,
+                ..default()
+            },
+            extension: FieldExtension {
+                soil_plough: textures.soil_plough.clone(),
+                soil_loam: textures.soil_loam.clone(),
+                meadow: textures.meadow.clone(),
+                pasture: textures.pasture.clone(),
+            },
         })),
     ));
 }
@@ -603,12 +719,6 @@ fn push_wall_segment(
     quad([b_left_bot, b_left_top, b_right_top, b_right_bot], dir3);
 }
 
-fn pasture_colour(bx: usize, bz: usize) -> [f32; 3] {
-    let shades = [[0.52, 0.80, 0.40], [0.58, 0.84, 0.46], [0.47, 0.76, 0.38]];
-    let pick = (hash01(bx, bz, 15) * shades.len() as f32) as usize;
-    shades[pick.min(shades.len() - 1)]
-}
-
 fn spawn_trees(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -689,17 +799,6 @@ fn leaf_material(c: [f32; 3]) -> StandardMaterial {
         perceptual_roughness: 0.9,
         ..default()
     }
-}
-
-fn crop_colour(bx: usize, bz: usize) -> [f32; 3] {
-    let crops = [
-        [0.86, 0.72, 0.34],
-        [0.80, 0.76, 0.46],
-        [0.93, 0.86, 0.26],
-        [0.56, 0.46, 0.30],
-    ];
-    let pick = (hash01(bx, bz, 7) * crops.len() as f32) as usize;
-    crops[pick.min(crops.len() - 1)]
 }
 
 fn spawn_sheds(
@@ -815,7 +914,7 @@ mod tests {
         let owner = smooth_owners(&map, &is_farmland, claim_regions(&map, &is_farmland, &seeds, &params), SMOOTH_PASSES);
         let owner = split_disconnected_regions(&map, &is_farmland, &owner);
         let labels: Vec<u32> = owner.iter().map(|o| o.unwrap_or(OPEN)).collect();
-        let segs = Contour::build(map.grid_size(), &labels, map.seed, None).segs;
+        let segs = Contour::build(map.grid_size(), &labels, map.seed, None, Smoothing::FIELD).segs;
         // Marching squares at native (10m) resolution emits roughly one segment per grid
         // cell along a field's perimeter, several times more than the old coarse (30m),
         // merged-run tracing - bounded generously above the measured order of magnitude.

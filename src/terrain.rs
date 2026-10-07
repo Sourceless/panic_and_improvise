@@ -6,7 +6,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
 
-use crate::contour::{triangulate, Contour, OPEN};
+use crate::contour::{triangulate, Contour, Smoothing, OPEN};
 use crate::map::{grid_pos, TerrainMap, CELL};
 
 const WATER_LIFT: f32 = 0.05;
@@ -16,7 +16,11 @@ pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(MaterialPlugin::<TerrainMaterial>::default())
+        app.add_plugins((
+            crate::mipmaps::MipmapPlugin,
+            MaterialPlugin::<TerrainMaterial>::default(),
+            MaterialPlugin::<crate::field_material::FieldMaterial>::default(),
+        ))
             .add_systems(Startup, (load_textures, spawn_world).chain());
     }
 }
@@ -50,9 +54,13 @@ pub struct TerrainTextures {
     pub grass: Handle<Image>,
     pub dirt: Handle<Image>,
     pub stone: Handle<Image>,
+    pub soil_plough: Handle<Image>,
+    pub soil_loam: Handle<Image>,
+    pub meadow: Handle<Image>,
+    pub pasture: Handle<Image>,
 }
 
-fn load_textures(mut commands: Commands, asset_server: Res<AssetServer>) {
+fn load_textures(mut commands: Commands, asset_server: Res<AssetServer>, mut mips: ResMut<crate::mipmaps::MipQueue>) {
     let load = |path: &'static str| {
         asset_server
             .load_builder()
@@ -60,16 +68,31 @@ fn load_textures(mut commands: Commands, asset_server: Res<AssetServer>) {
                 settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
                     address_mode_u: ImageAddressMode::Repeat,
                     address_mode_v: ImageAddressMode::Repeat,
+                    anisotropy_clamp: 8,
                     ..ImageSamplerDescriptor::linear()
                 });
             })
             .load(path)
     };
-    commands.insert_resource(TerrainTextures {
+    let textures = TerrainTextures {
         grass: load("textures/grass_diffuse.jpg"),
         dirt: load("textures/dirt_diffuse.jpg"),
         stone: load("textures/stone_diffuse.jpg"),
-    });
+        soil_plough: load("textures/pbr/soil_plough.jpg"),
+        soil_loam: load("textures/pbr/soil_loam.jpg"),
+        meadow: load("textures/pbr/meadow.jpg"),
+        pasture: load("textures/pbr/pasture.jpg"),
+    };
+    mips.0.extend([
+        textures.grass.clone(),
+        textures.dirt.clone(),
+        textures.stone.clone(),
+        textures.soil_plough.clone(),
+        textures.soil_loam.clone(),
+        textures.meadow.clone(),
+        textures.pasture.clone(),
+    ]);
+    commands.insert_resource(textures);
 }
 
 fn spawn_world(
@@ -189,7 +212,7 @@ fn river_mesh(map: &TerrainMap) -> Mesh {
     let labels: Vec<u32> = (0..n * n)
         .map(|i| if map.water_level(i % n, i / n).is_some() { WATER } else { OPEN })
         .collect();
-    let contour = Contour::build(n, &labels, map.seed ^ 0x77A7, Some(WATER));
+    let contour = Contour::build(n, &labels, map.seed ^ 0x77A7, Some(WATER), Smoothing::WATER);
 
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();

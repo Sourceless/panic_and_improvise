@@ -10,6 +10,7 @@ use bevy::pbr::{MeshMaterial3d};
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use fps_prototype::map::TerrainMap;
 use fps_prototype::params::GenParams;
+use fps_prototype::field_material::FieldMaterial;
 use fps_prototype::fill::spawn_fill;
 use fps_prototype::roads::{road_mesh, RoadKind, RoadNetwork};
 use fps_prototype::zones::{overlay_mesh, ZoneMap};
@@ -293,6 +294,7 @@ fn regenerate(
     mut meshes: ResMut<Assets<Mesh>>,
     mut standard: ResMut<Assets<StandardMaterial>>,
     mut terrain: ResMut<Assets<TerrainMaterial>>,
+    mut fields: ResMut<Assets<FieldMaterial>>,
 ) {
     if !viewer.pending_regen {
         return;
@@ -306,7 +308,7 @@ fn regenerate(
     let roads = RoadNetwork::generate(&map, &params);
     spawn_terrain(&mut commands, &mut meshes, &mut standard, &mut terrain, &textures, &map);
     spawn_roads(&mut commands, &mut meshes, &mut standard, &map, &roads);
-    spawn_fill(&mut commands, &mut meshes, &mut standard, &map, &zones, &roads, &params);
+    spawn_fill(&mut commands, &mut meshes, &mut standard, &mut fields, &textures, &map, &zones, &roads, &params);
     commands.insert_resource(zones);
     commands.insert_resource(roads);
     commands.insert_resource(map);
@@ -324,8 +326,10 @@ fn build_fill(
     params: Res<GenParams>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut standard: ResMut<Assets<StandardMaterial>>,
+    mut fields: ResMut<Assets<FieldMaterial>>,
+    textures: Res<TerrainTextures>,
 ) {
-    spawn_fill(&mut commands, &mut meshes, &mut standard, &map, &zones, &roads, &params);
+    spawn_fill(&mut commands, &mut meshes, &mut standard, &mut fields, &textures, &map, &zones, &roads, &params);
 }
 
 fn build_roads(

@@ -16,13 +16,25 @@ use crate::map::{fbm, grid_pos, CELL};
 /// Label for cells that belong to no region (open ground, dry land, ...).
 pub const OPEN: u32 = u32::MAX;
 
-const SMOOTH_ITERATIONS: usize = 8;
 const SMOOTH_STRENGTH: f32 = 0.5;
-// Relaxation can't move a vertex further than this from where the grid put it, which keeps
-// every cell's polygons well-formed regardless of how many iterations run.
-const MAX_SMOOTH_DISPLACEMENT: f32 = CELL * 0.35;
-const WOBBLE: f32 = CELL * 0.2;
 const WOBBLE_SCALE: f32 = 45.0;
+
+/// How hard contour vertices are relaxed. Relaxation can't move a vertex further than
+/// `max_displacement` from where the grid put it, which keeps every cell's polygons
+/// well-formed regardless of how many iterations run.
+#[derive(Clone, Copy)]
+pub struct Smoothing {
+    pub iterations: usize,
+    pub max_displacement: f32,
+    pub wobble: f32,
+}
+
+impl Smoothing {
+    /// Field boundaries: gentle, with a little hand-drawn meander.
+    pub const FIELD: Smoothing = Smoothing { iterations: 8, max_displacement: CELL * 0.35, wobble: CELL * 0.2 };
+    /// Shorelines: relaxed much harder, since a stepped waterline is very noticeable.
+    pub const WATER: Smoothing = Smoothing { iterations: 24, max_displacement: CELL * 0.6, wobble: CELL * 0.1 };
+}
 
 pub struct Seg {
     pub a: Vec2,
@@ -96,7 +108,7 @@ fn cut_off_label(distinct: &[u32], joined: Option<u32>) -> u32 {
 impl Contour {
     /// `labels` is an n*n grid of region ids ([`OPEN`] for none); `seed` varies the wobble;
     /// `joined` is the label (if any) that wins saddle cases, see `cut_off_label`.
-    pub fn build(n: usize, labels: &[u32], seed: u64, joined: Option<u32>) -> Self {
+    pub fn build(n: usize, labels: &[u32], seed: u64, joined: Option<u32>, smoothing: Smoothing) -> Self {
         let get = |ix: usize, iz: usize| labels[iz * n + ix];
         let mut raw: Vec<(End, End, (u32, u32))> = Vec::new();
         let mut origin: HashMap<u64, Vec2> = HashMap::new();
@@ -159,7 +171,7 @@ impl Contour {
             }
         }
         let mut pos = orig.clone();
-        for _ in 0..SMOOTH_ITERATIONS {
+        for _ in 0..smoothing.iterations {
             let mut next = pos.clone();
             for i in 0..pos.len() {
                 // Only vertices with exactly two contour neighbours are interior to a
@@ -174,8 +186,8 @@ impl Contour {
                 let target = (at(nbrs[i][0]) + at(nbrs[i][1])) * 0.5;
                 let p = pos[i] + (target - pos[i]) * SMOOTH_STRENGTH;
                 let d = p - orig[i];
-                next[i] = if d.length() > MAX_SMOOTH_DISPLACEMENT {
-                    orig[i] + d.normalize() * MAX_SMOOTH_DISPLACEMENT
+                next[i] = if d.length() > smoothing.max_displacement {
+                    orig[i] + d.normalize() * smoothing.max_displacement
                 } else {
                     p
                 };
@@ -190,7 +202,7 @@ impl Contour {
                 fbm(p.x / WOBBLE_SCALE, p.y / WOBBLE_SCALE, seed ^ 0xC0_17_0A, 2),
                 fbm(p.x / WOBBLE_SCALE + 57.0, p.y / WOBBLE_SCALE + 91.0, seed ^ 0xC0_17_0B, 2),
             );
-            let moved = if nbrs[i].len() == 2 { p + (w - Vec2::splat(0.5)) * 2.0 * WOBBLE } else { p };
+            let moved = if nbrs[i].len() == 2 { p + (w - Vec2::splat(0.5)) * 2.0 * smoothing.wobble } else { p };
             mids.insert(k, moved);
         }
 
