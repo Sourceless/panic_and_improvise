@@ -3,13 +3,15 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use crate::map::{TerrainMap, CELL};
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
+use crate::map::{grid_pos, TerrainMap, CELL};
 use crate::terrain::TerrainRoot;
 use crate::zones::{Zone, ZoneMap};
 
 const TREE_SPACING: f32 = 16.0;
 const FIELD_LIFT: f32 = 0.15;
-const PLOT_MAX_RELIEF: f32 = 14.0;
 const SHED_SPACING: f32 = 60.0;
 
 pub fn spawn_fill(
@@ -24,37 +26,30 @@ pub fn spawn_fill(
     spawn_sheds(commands, meshes, materials, map, zones);
 }
 
-const PARCEL_SIZE: f32 = 320.0;
-const MIN_LEAF_AREA: f32 = 7000.0;
-const MAX_LEAF_AREA: f32 = 20000.0;
-const MAX_SPLIT_DEPTH: u32 = 5;
+const FIELD_SEED_SPACING: f32 = 95.0;
+const FIELD_SLOPE_WEIGHT: f32 = 6.0;
+const SMOOTH_PASSES: u32 = 2;
+const RENDER_STRIDE: usize = 3;
 const FARM_YARD_RADIUS: f32 = 42.0;
-const SUBCELL_TARGET: f32 = 22.0;
+const NONE_OWNER: u32 = u32::MAX;
 
-// A leaf rectangle from the field subdivision, in world space.
-#[derive(Clone, Copy)]
-struct Field {
-    min: Vec2,
-    max: Vec2,
+struct Segment {
+    centre: Vec2,
+    half_len: f32,
+    along_z: bool,
 }
 
-impl Field {
-    fn centre(self) -> Vec2 {
-        (self.min + self.max) * 0.5
-    }
-
-    fn size(self) -> Vec2 {
-        self.max - self.min
-    }
-}
-
-// Tiles the whole farmland zone (Arable and Pasture) into fields, each bordered by a
+// Tiles the farmland zone (Arable and Pasture) into organic fields, each bordered by a
 // hedge, stone wall or fence. Farmyards around each farm's buildings are left clear.
 //
-// Fields are not a uniform grid: each 320m parcel is recursively split in two along its
-// longer side, at a randomised ratio, until the pieces are field-sized. This gives the
-// varied rectangle shapes and sizes real field patterns have, rather than identical
-// squares.
+// Fields are grown, not cut: seeds are scattered across farmland, then every farmland cell
+// is claimed by whichever seed reaches it most cheaply in a cost-weighted search (the same
+// technique used for rivers and roads), where crossing a slope costs more than flowing
+// along it. That makes a region's boundary hug the land's contours rather than cutting
+// across them, and gives organic shapes instead of rectangles. A smoothing pass then rounds
+// off the grid-stepping. Both the fill colour and the boundaries are then rendered from a
+// coarser 30m sampling of the result, which bounds the geometry regardless of how many
+// fields the growth produces.
 fn spawn_field_tiling(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -62,6 +57,7 @@ fn spawn_field_tiling(
     map: &TerrainMap,
     zones: &ZoneMap,
 ) {
+    let n = map.grid_size();
     let farms: Vec<Vec2> = map
         .pois
         .iter()
@@ -69,63 +65,267 @@ fn spawn_field_tiling(
         .map(|p| p.position)
         .collect();
 
-    let mut positions = Vec::new();
-    let mut colors = Vec::new();
-    let mut indices = Vec::new();
-    let mut boundaries: [Vec<Field>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    let is_farmland: Vec<bool> = (0..n * n)
+        .map(|idx| {
+            let (ix, iz) = (idx % n, idx / n);
+            let zone = zones.zone_at(ix, iz);
+            if zone != Zone::Arable && zone != Zone::Pasture {
+                return false;
+            }
+            !farms.iter().any(|f| f.distance(grid_pos(ix, iz)) < FARM_YARD_RADIUS)
+        })
+        .collect();
 
+    let seeds = scatter_seeds(map, &is_farmland);
+    if seeds.is_empty() {
+        return;
+    }
+    let owner = smooth_owners(map, &is_farmland, claim_regions(map, &is_farmland, &seeds), SMOOTH_PASSES);
+
+    let field_colour: Vec<[f32; 3]> = seeds
+        .iter()
+        .map(|&seed_idx| {
+            let (ix, iz) = (seed_idx % n, seed_idx / n);
+            let p = grid_pos(ix, iz);
+            let block = (
+                ((p.x + crate::map::HALF_SIZE) / 150.0) as usize,
+                ((p.y + crate::map::HALF_SIZE) / 150.0) as usize,
+            );
+            if zones.zone_at(ix, iz) == Zone::Arable {
+                crop_colour(block.0, block.1)
+            } else {
+                pasture_colour(block.0, block.1)
+            }
+        })
+        .collect();
+
+    let cn = n.div_ceil(RENDER_STRIDE);
+    let coarse_owner: Vec<Option<u32>> = (0..cn * cn)
+        .map(|i| {
+            let (cx, cz) = (i % cn, i / cn);
+            let (fx, fz) = ((cx * RENDER_STRIDE).min(n - 1), (cz * RENDER_STRIDE).min(n - 1));
+            owner[fz * n + fx]
+        })
+        .collect();
+
+    spawn_field_colour(commands, meshes, materials, map, &coarse_owner, &field_colour, cn);
+    spawn_field_boundaries(commands, meshes, materials, map, &coarse_owner, cn);
+}
+
+fn scatter_seeds(map: &TerrainMap, is_farmland: &[bool]) -> Vec<usize> {
+    let n = map.grid_size();
     let half_map = crate::map::HALF_SIZE;
-    let cols = (crate::map::MAP_SIZE / PARCEL_SIZE).ceil() as i32;
-    let mut leaves = Vec::new();
-    for pz in 0..cols {
-        for px in 0..cols {
-            let min = Vec2::new(-half_map + px as f32 * PARCEL_SIZE, -half_map + pz as f32 * PARCEL_SIZE);
-            let max = (min + Vec2::splat(PARCEL_SIZE)).min(Vec2::splat(half_map));
-            leaves.clear();
-            subdivide(min, max, 0, &mut leaves);
-            for field in leaves.drain(..) {
-                let centre = field.centre();
-                let (cx, cz) = nearest_cell(map, centre);
-                let zone = zones.zone_at(cx, cz);
-                if zone != Zone::Arable && zone != Zone::Pasture {
-                    continue;
-                }
-                if farms.iter().any(|f| f.distance(centre) < FARM_YARD_RADIUS) {
-                    continue;
-                }
-                if !field_is_suitable(map, field) {
-                    continue;
-                }
-                let block = ((centre.x / 150.0) as i64, (centre.y / 150.0) as i64);
-                let colour = if zone == Zone::Arable {
-                    crop_colour(block.0 as usize, block.1 as usize)
-                } else {
-                    pasture_colour(block.0 as usize, block.1 as usize)
-                };
-                add_field_grid(map, field, colour, &mut positions, &mut colors, &mut indices);
-
-                let kind = (field_hash(centre, 21) * 3.0) as usize;
-                boundaries[kind.min(2)].push(field);
+    let cols = (crate::map::MAP_SIZE / FIELD_SEED_SPACING).ceil() as i32;
+    let mut seeds = Vec::new();
+    for sz in 0..cols {
+        for sx in 0..cols {
+            let base = Vec2::new(
+                -half_map + (sx as f32 + 0.5) * FIELD_SEED_SPACING,
+                -half_map + (sz as f32 + 0.5) * FIELD_SEED_SPACING,
+            );
+            let jitter = Vec2::new(
+                (field_hash(base, 40) - 0.5) * FIELD_SEED_SPACING * 0.7,
+                (field_hash(base, 41) - 0.5) * FIELD_SEED_SPACING * 0.7,
+            );
+            let (ix, iz) = nearest_cell(map, base + jitter);
+            let idx = iz * n + ix;
+            if is_farmland[idx] {
+                seeds.push(idx);
             }
         }
     }
+    seeds
+}
 
-    if !positions.is_empty() {
-        let normals = vec![[0.0, 1.0, 0.0]; positions.len()];
-        let mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
-            .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-            .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-            .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
-            .with_inserted_indices(Indices::U32(indices));
-        commands.spawn((
-            TerrainRoot,
-            Mesh3d(meshes.add(mesh)),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::WHITE,
-                perceptual_roughness: 1.0,
-                ..default()
-            })),
-        ));
+// A weighted multi-source search: every farmland cell is claimed by whichever seed reaches
+// it most cheaply, where the cost of a step rises with the slope it crosses. This is the
+// same shape of search used for river and road routing.
+fn claim_regions(map: &TerrainMap, is_farmland: &[bool], seeds: &[usize]) -> Vec<Option<u32>> {
+    let n = map.grid_size();
+    let mut cost = vec![f32::MAX; n * n];
+    let mut owner: Vec<Option<u32>> = vec![None; n * n];
+    let mut heap = BinaryHeap::new();
+    for (id, &s) in seeds.iter().enumerate() {
+        cost[s] = 0.0;
+        owner[s] = Some(id as u32);
+        heap.push(Reverse((0u32, id as u32, s as u32)));
+    }
+    while let Some(Reverse((_, id, idx))) = heap.pop() {
+        let c = idx as usize;
+        if owner[c] != Some(id) {
+            continue;
+        }
+        for nb in field_neighbours(n, c) {
+            if !is_farmland[nb] {
+                continue;
+            }
+            let diagonal = (nb % n != c % n) && (nb / n != c / n);
+            let step = if diagonal { CELL * std::f32::consts::SQRT_2 } else { CELL };
+            let climb = (map.vertex_height(nb % n, nb / n) - map.vertex_height(c % n, c / n)).abs() / CELL;
+            let next_cost = cost[c] + step * (1.0 + FIELD_SLOPE_WEIGHT * climb);
+            if next_cost < cost[nb] {
+                cost[nb] = next_cost;
+                owner[nb] = Some(id);
+                heap.push(Reverse((next_cost.to_bits(), id, nb as u32)));
+            }
+        }
+    }
+    owner
+}
+
+// Reassigns each farmland cell to the most common owner among itself and its neighbours,
+// which rounds off the single-cell jaggedness the weighted search leaves behind.
+fn smooth_owners(map: &TerrainMap, is_farmland: &[bool], mut owner: Vec<Option<u32>>, passes: u32) -> Vec<Option<u32>> {
+    let n = map.grid_size();
+    for _ in 0..passes {
+        let mut next = owner.clone();
+        for idx in 0..n * n {
+            if !is_farmland[idx] {
+                continue;
+            }
+            let mut counts: Vec<(u32, u32)> = Vec::with_capacity(9);
+            for sample in std::iter::once(idx).chain(field_neighbours(n, idx)) {
+                let Some(o) = owner[sample] else { continue };
+                match counts.iter_mut().find(|(id, _)| *id == o) {
+                    Some(entry) => entry.1 += 1,
+                    None => counts.push((o, 1)),
+                }
+            }
+            if let Some(&(best, _)) = counts.iter().max_by_key(|(_, c)| *c) {
+                next[idx] = Some(best);
+            }
+        }
+        owner = next;
+    }
+    owner
+}
+
+fn field_neighbours(n: usize, idx: usize) -> impl Iterator<Item = usize> {
+    let (ix, iz) = ((idx % n) as isize, (idx / n) as isize);
+    (-1..=1isize)
+        .flat_map(move |dz| (-1..=1isize).map(move |dx| (dx, dz)))
+        .filter(|&(dx, dz)| (dx, dz) != (0, 0))
+        .filter_map(move |(dx, dz)| {
+            let (x, z) = (ix + dx, iz + dz);
+            let inside = (0..n as isize).contains(&x) && (0..n as isize).contains(&z);
+            inside.then(|| z as usize * n + x as usize)
+        })
+}
+
+fn spawn_field_colour(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    map: &TerrainMap,
+    coarse_owner: &[Option<u32>],
+    field_colour: &[[f32; 3]],
+    cn: usize,
+) {
+    let n = map.grid_size();
+    let half = (RENDER_STRIDE as f32 * CELL) * 0.5;
+    let mut positions = Vec::new();
+    let mut colors = Vec::new();
+    let mut indices = Vec::new();
+    for cz in 0..cn {
+        for cx in 0..cn {
+            let Some(id) = coarse_owner[cz * cn + cx] else { continue };
+            let (fx, fz) = ((cx * RENDER_STRIDE).min(n - 1), (cz * RENDER_STRIDE).min(n - 1));
+            let p = grid_pos(fx, fz);
+            let c = field_colour[id as usize];
+            let colour = [c[0], c[1], c[2], 1.0];
+            let base = positions.len() as u32;
+            for (dx, dz) in [(-half, -half), (half, -half), (half, half), (-half, half)] {
+                let corner = p + Vec2::new(dx, dz);
+                positions.push([corner.x, map.height_at(corner) + FIELD_LIFT, corner.y]);
+                colors.push(colour);
+            }
+            indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+        }
+    }
+    if positions.is_empty() {
+        return;
+    }
+    let normals = vec![[0.0, 1.0, 0.0]; positions.len()];
+    let mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+        .with_inserted_indices(Indices::U32(indices));
+    commands.spawn((
+        TerrainRoot,
+        Mesh3d(meshes.add(mesh)),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 1.0,
+            ..default()
+        })),
+    ));
+}
+
+// Traces the boundary of the coarse ownership grid (between two different fields, or a
+// field and open ground) and merges consecutive same-kind cell-edges into single, longer
+// segments, rather than placing one box per cell-edge.
+fn spawn_field_boundaries(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    map: &TerrainMap,
+    coarse_owner: &[Option<u32>],
+    cn: usize,
+) {
+    let n = map.grid_size();
+    let tile = RENDER_STRIDE as f32 * CELL;
+    let get = |cx: usize, cz: usize| coarse_owner[cz * cn + cx].unwrap_or(NONE_OWNER);
+    let coarse_pos = |c: usize| {
+        let f = (c * RENDER_STRIDE).min(n - 1);
+        grid_pos(f, 0).x
+    };
+
+    let mut buckets: [Vec<Segment>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+
+    for cx in 0..cn.saturating_sub(1) {
+        let mut run: Option<(usize, u32)> = None;
+        for cz in 0..=cn {
+            let kind = (cz < cn && get(cx, cz) != get(cx + 1, cz)).then(|| pair_hash(get(cx, cz), get(cx + 1, cz)));
+            match (run, kind) {
+                (Some((_, k)), Some(k2)) if k == k2 => {}
+                _ => {
+                    if let Some((start, k)) = run {
+                        let x = coarse_pos(cx) + tile * 0.5;
+                        let z0 = coarse_pos(start) - tile * 0.5;
+                        let z1 = coarse_pos(cz - 1) + tile * 0.5;
+                        buckets[(k % 3) as usize].push(Segment {
+                            centre: Vec2::new(x, (z0 + z1) * 0.5),
+                            half_len: (z1 - z0) * 0.5,
+                            along_z: true,
+                        });
+                    }
+                    run = kind.map(|k| (cz, k));
+                }
+            }
+        }
+    }
+    for cz in 0..cn.saturating_sub(1) {
+        let mut run: Option<(usize, u32)> = None;
+        for cx in 0..=cn {
+            let kind = (cx < cn && get(cx, cz) != get(cx, cz + 1)).then(|| pair_hash(get(cx, cz), get(cx, cz + 1)));
+            match (run, kind) {
+                (Some((_, k)), Some(k2)) if k == k2 => {}
+                _ => {
+                    if let Some((start, k)) = run {
+                        let z = coarse_pos(cz) + tile * 0.5;
+                        let x0 = coarse_pos(start) - tile * 0.5;
+                        let x1 = coarse_pos(cx - 1) + tile * 0.5;
+                        buckets[(k % 3) as usize].push(Segment {
+                            centre: Vec2::new((x0 + x1) * 0.5, z),
+                            half_len: (x1 - x0) * 0.5,
+                            along_z: false,
+                        });
+                    }
+                    run = kind.map(|k| (cx, k));
+                }
+            }
+        }
     }
 
     let specs = [
@@ -147,28 +347,23 @@ fn spawn_field_tiling(
             1.2,
         ),
     ];
-    for (fields, (material, thickness, height)) in boundaries.into_iter().zip(specs) {
-        if fields.is_empty() {
+    for (segments, (material, thickness, height)) in buckets.into_iter().zip(specs) {
+        if segments.is_empty() {
             continue;
         }
         let mat = materials.add(material);
         let mut positions = Vec::new();
         let mut normals = Vec::new();
         let mut indices = Vec::new();
-        for field in fields {
-            let half = field.size() * 0.5;
-            let centre = field.centre();
-            for (offset, half_extent) in [
-                (Vec2::new(0.0, -half.y), Vec3::new(half.x, height / 2.0, thickness / 2.0)),
-                (Vec2::new(0.0, half.y), Vec3::new(half.x, height / 2.0, thickness / 2.0)),
-                (Vec2::new(-half.x, 0.0), Vec3::new(thickness / 2.0, height / 2.0, half.y)),
-                (Vec2::new(half.x, 0.0), Vec3::new(thickness / 2.0, height / 2.0, half.y)),
-            ] {
-                let mid = centre + offset;
-                let ground = map.height_at(mid);
-                let base = Vec3::new(mid.x, ground + height / 2.0, mid.y);
-                push_box(&mut positions, &mut normals, &mut indices, base, half_extent);
-            }
+        for seg in segments {
+            let ground = map.height_at(seg.centre);
+            let centre = Vec3::new(seg.centre.x, ground + height / 2.0, seg.centre.y);
+            let half_extent = if seg.along_z {
+                Vec3::new(thickness / 2.0, height / 2.0, seg.half_len)
+            } else {
+                Vec3::new(seg.half_len, height / 2.0, thickness / 2.0)
+            };
+            push_box(&mut positions, &mut normals, &mut indices, centre, half_extent);
         }
         let mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
             .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
@@ -178,32 +373,9 @@ fn spawn_field_tiling(
     }
 }
 
-// Splits a rectangle in two along its longer axis at a randomised ratio, recursing until
-// the pieces are field-sized. Larger pieces have a chance to stop early too, so fields end
-// up with varied sizes rather than all bottoming out at the same minimum.
-fn subdivide(min: Vec2, max: Vec2, depth: u32, out: &mut Vec<Field>) {
-    let size = max - min;
-    let area = size.x * size.y;
-    let centre = (min + max) * 0.5;
-    let stop_early = area <= MAX_LEAF_AREA && field_hash(centre, 30) < 0.3;
-    let ratio = 0.35 + field_hash(centre, 31) * 0.3;
-    // Don't split if either resulting child would fall below the minimum: an area just
-    // above the floor can still produce an undersized child from an uneven ratio.
-    let smallest_child = area * ratio.min(1.0 - ratio);
-    let would_undersize = smallest_child < MIN_LEAF_AREA;
-    if depth >= MAX_SPLIT_DEPTH || area <= MIN_LEAF_AREA || stop_early || would_undersize {
-        out.push(Field { min, max });
-        return;
-    }
-    if size.x >= size.y {
-        let cut = min.x + size.x * ratio;
-        subdivide(min, Vec2::new(cut, max.y), depth + 1, out);
-        subdivide(Vec2::new(cut, min.y), max, depth + 1, out);
-    } else {
-        let cut = min.y + size.y * ratio;
-        subdivide(min, Vec2::new(max.x, cut), depth + 1, out);
-        subdivide(Vec2::new(min.x, cut), max, depth + 1, out);
-    }
+fn pair_hash(a: u32, b: u32) -> u32 {
+    let (lo, hi) = (a.min(b), a.max(b));
+    (hash01(lo as usize, hi as usize, 50) * 997.0) as u32
 }
 
 fn field_hash(p: Vec2, salt: u64) -> f32 {
@@ -227,62 +399,6 @@ fn push_box(positions: &mut Vec<[f32; 3]>, normals: &mut Vec<[f32; 3]>, indices:
             normals.push(normal);
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    }
-}
-
-fn field_is_suitable(map: &TerrainMap, field: Field) -> bool {
-    let (sub_x, sub_z) = subdivisions(field);
-    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
-    for k in 0..=sub_x {
-        for m in 0..=sub_z {
-            let p = field.min + field.size() * Vec2::new(k as f32 / sub_x as f32, m as f32 / sub_z as f32);
-            let (ix, iz) = nearest_cell(map, p);
-            if map.water_level(ix, iz).is_some() {
-                return false;
-            }
-            let h = map.height_at(p);
-            lo = lo.min(h);
-            hi = hi.max(h);
-        }
-    }
-    hi - lo <= PLOT_MAX_RELIEF
-}
-
-fn subdivisions(field: Field) -> (usize, usize) {
-    let size = field.size();
-    (
-        ((size.x / SUBCELL_TARGET).round() as usize).clamp(2, 8),
-        ((size.y / SUBCELL_TARGET).round() as usize).clamp(2, 8),
-    )
-}
-
-fn add_field_grid(
-    map: &TerrainMap,
-    field: Field,
-    colour: [f32; 3],
-    positions: &mut Vec<[f32; 3]>,
-    colors: &mut Vec<[f32; 4]>,
-    indices: &mut Vec<u32>,
-) {
-    let (sub_x, sub_z) = subdivisions(field);
-    let c = [colour[0], colour[1], colour[2], 1.0];
-    let (nx, nz) = (sub_x + 1, sub_z + 1);
-    let base = positions.len() as u32;
-    for m in 0..nz {
-        for k in 0..nx {
-            let p = field.min + field.size() * Vec2::new(k as f32 / sub_x as f32, m as f32 / sub_z as f32);
-            positions.push([p.x, map.height_at(p) + FIELD_LIFT, p.y]);
-            colors.push(c);
-        }
-    }
-    for m in 0..sub_z {
-        for k in 0..sub_x {
-            let a = base + (m * nx + k) as u32;
-            let b = a + 1;
-            let d = a + nx as u32;
-            let e = d + 1;
-            indices.extend_from_slice(&[a, d, b, b, d, e]);
-        }
     }
 }
 
@@ -445,39 +561,90 @@ fn hash01(ix: usize, iz: usize, salt: u64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::map::TerrainMap;
+    use crate::zones::ZoneMap;
 
-    #[test]
-    fn subdivide_produces_varied_sizes() {
-        let mut leaves = Vec::new();
-        subdivide(Vec2::new(0.0, 0.0), Vec2::new(PARCEL_SIZE, PARCEL_SIZE), 0, &mut leaves);
-        assert!(leaves.len() > 1, "expected more than one field, got {}", leaves.len());
-        let areas: Vec<f32> = leaves.iter().map(|f| f.size().x * f.size().y).collect();
-        let min = areas.iter().cloned().fold(f32::MAX, f32::min);
-        let max = areas.iter().cloned().fold(f32::MIN, f32::max);
-        assert!(max > min * 1.2, "field sizes are too uniform: min {min} max {max}");
-        for a in &areas {
-            assert!(*a >= MIN_LEAF_AREA * 0.9, "field area {a} below minimum");
-        }
+    fn generate() -> (TerrainMap, ZoneMap) {
+        let map = TerrainMap::generate(crate::MAP_SEED);
+        let zones = ZoneMap::generate(&map);
+        (map, zones)
     }
 
     #[test]
-    fn total_field_count_stays_reasonable() {
-        let cols = (crate::map::MAP_SIZE / PARCEL_SIZE).ceil() as i32;
-        let half_map = crate::map::HALF_SIZE;
-        let mut total = 0;
-        for pz in 0..cols {
-            for px in 0..cols {
-                let min = Vec2::new(-half_map + px as f32 * PARCEL_SIZE, -half_map + pz as f32 * PARCEL_SIZE);
-                let max = (min + Vec2::splat(PARCEL_SIZE)).min(Vec2::splat(half_map));
-                let mut leaves = Vec::new();
-                subdivide(min, max, 0, &mut leaves);
-                total += leaves.len();
+    fn claims_most_of_the_farmland() {
+        let (map, zones) = generate();
+        let n = map.grid_size();
+        let farms: Vec<Vec2> = map
+            .pois
+            .iter()
+            .filter(|p| p.kind == crate::map::PoiKind::Farm)
+            .map(|p| p.position)
+            .collect();
+        let is_farmland: Vec<bool> = (0..n * n)
+            .map(|idx| {
+                let (ix, iz) = (idx % n, idx / n);
+                let zone = zones.zone_at(ix, iz);
+                if zone != Zone::Arable && zone != Zone::Pasture {
+                    return false;
+                }
+                !farms.iter().any(|f| f.distance(grid_pos(ix, iz)) < FARM_YARD_RADIUS)
+            })
+            .collect();
+        let farmland_count = is_farmland.iter().filter(|b| **b).count();
+        let seeds = scatter_seeds(&map, &is_farmland);
+        assert!(seeds.len() > 500, "only {} field seeds, too sparse", seeds.len());
+        let owner = claim_regions(&map, &is_farmland, &seeds);
+        let claimed = owner.iter().filter(|o| o.is_some()).count();
+        assert!(
+            claimed as f32 > farmland_count as f32 * 0.9,
+            "only claimed {claimed} of {farmland_count} farmland cells"
+        );
+    }
+
+    #[test]
+    fn boundary_segment_count_stays_bounded() {
+        let (map, zones) = generate();
+        let n = map.grid_size();
+        let farms: Vec<Vec2> = map
+            .pois
+            .iter()
+            .filter(|p| p.kind == crate::map::PoiKind::Farm)
+            .map(|p| p.position)
+            .collect();
+        let is_farmland: Vec<bool> = (0..n * n)
+            .map(|idx| {
+                let (ix, iz) = (idx % n, idx / n);
+                let zone = zones.zone_at(ix, iz);
+                if zone != Zone::Arable && zone != Zone::Pasture {
+                    return false;
+                }
+                !farms.iter().any(|f| f.distance(grid_pos(ix, iz)) < FARM_YARD_RADIUS)
+            })
+            .collect();
+        let seeds = scatter_seeds(&map, &is_farmland);
+        let owner = smooth_owners(&map, &is_farmland, claim_regions(&map, &is_farmland, &seeds), SMOOTH_PASSES);
+        let cn = n.div_ceil(RENDER_STRIDE);
+        let coarse_owner: Vec<Option<u32>> = (0..cn * cn)
+            .map(|i| {
+                let (cx, cz) = (i % cn, i / cn);
+                let (fx, fz) = ((cx * RENDER_STRIDE).min(n - 1), (cz * RENDER_STRIDE).min(n - 1));
+                owner[fz * n + fx]
+            })
+            .collect();
+        let mut transitions = 0;
+        for cz in 0..cn {
+            for cx in 0..cn {
+                if cx + 1 < cn && coarse_owner[cz * cn + cx] != coarse_owner[cz * cn + cx + 1] {
+                    transitions += 1;
+                }
+                if cz + 1 < cn && coarse_owner[cz * cn + cx] != coarse_owner[(cz + 1) * cn + cx] {
+                    transitions += 1;
+                }
             }
         }
-        // The old uniform 100m grid produced roughly 2000 fields; subdivision should land
-        // in a similar range rather than exploding into tens of thousands (which previously
-        // made the scene heavy enough to stall rendering).
-        assert!(total < 4000, "subdivision produced {total} fields, too many");
-        assert!(total > 500, "subdivision produced only {total} fields, too few");
+        // Each transition becomes at most one segment before merging; merging only reduces
+        // this. The old rectangle grid produced on the order of a few thousand segments.
+        assert!(transitions < 40000, "{transitions} raw boundary transitions, too many");
     }
 }
+
