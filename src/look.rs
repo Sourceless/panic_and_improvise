@@ -10,10 +10,12 @@ use bevy::camera::Exposure;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::light::atmosphere::ScatteringMedium;
 use bevy::light::light_consts::lux;
-use bevy::light::{Atmosphere, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder};
+use bevy::light::{Atmosphere, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder, FogVolume, VolumetricFog, VolumetricLight};
 use bevy::pbr::AtmosphereSettings;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
+
+use crate::cloud_material::{cloud_material, CloudMaterial, DOME_RADIUS};
 use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
 
 pub struct LookPlugin;
@@ -23,7 +25,7 @@ impl Plugin for LookPlugin {
         app.init_resource::<LookSettings>()
             .insert_resource(bevy::light::DirectionalLightShadowMap { size: env_or("LOOK_SHADOW_RES", 1024) })
             .add_systems(Startup, spawn_sun_and_sky)
-            .add_systems(Update, dress_new_cameras);
+            .add_systems(Update, (dress_new_cameras, follow_camera));
     }
 }
 
@@ -34,6 +36,12 @@ pub struct LookSettings {
     /// Render the physical sky and atmosphere. Off gives a flat, clear daylight look with no
     /// distance haze, for high overhead previews of the whole map.
     pub atmosphere: bool,
+    /// Volumetric clouds (they need the atmosphere's sky to sit in front of).
+    pub clouds: bool,
+    /// How much of the sky the clouds cover, 0 (clear) to 1 (overcast).
+    pub cloud_coverage: f32,
+    /// Light shafts (god rays) through the air, which need shadows to have anything to cast.
+    pub god_rays: bool,
     /// Camera exposure; higher is darker.
     pub ev100: f32,
     /// Sun height above the horizon, in degrees.
@@ -44,14 +52,28 @@ pub struct LookSettings {
 
 impl Default for LookSettings {
     fn default() -> Self {
-        LookSettings { shadows: true, atmosphere: true, ev100: 13.0, sun_elevation: 27.0, sun_azimuth: 130.0 }
+        LookSettings { shadows: true, atmosphere: true, clouds: true, cloud_coverage: 0.42, god_rays: true, ev100: 13.0, sun_elevation: 27.0, sun_azimuth: 130.0 }
     }
 }
 
 #[derive(Component)]
 pub struct Sun;
 
-fn spawn_sun_and_sky(mut commands: Commands, mut media: ResMut<Assets<ScatteringMedium>>, settings: Res<LookSettings>) {
+/// The dome the clouds are drawn on, kept centred on the camera.
+#[derive(Component)]
+struct CloudDome;
+
+/// The box of air that light shafts are rendered in, kept centred on the camera.
+#[derive(Component)]
+struct FogBox;
+
+fn spawn_sun_and_sky(
+    mut commands: Commands,
+    mut media: ResMut<Assets<ScatteringMedium>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut clouds: ResMut<Assets<CloudMaterial>>,
+    settings: Res<LookSettings>,
+) {
     if settings.atmosphere && !disabled("atmo") {
         commands.spawn(Atmosphere::earth(media.add(ScatteringMedium::default())));
     } else {
@@ -68,7 +90,8 @@ fn spawn_sun_and_sky(mut commands: Commands, mut media: ResMut<Assets<Scattering
         -settings.sun_elevation.to_radians(),
         0.0,
     );
-    commands.spawn((
+    let sun = commands
+        .spawn((
         Sun,
         DirectionalLight {
             illuminance: lux::RAW_SUNLIGHT,
@@ -87,7 +110,56 @@ fn spawn_sun_and_sky(mut commands: Commands, mut media: ResMut<Assets<Scattering
         }
         .build(),
         Transform::from_rotation(rotation),
-    ));
+    ))
+        .id();
+
+    let shadows = settings.shadows && !disabled("shadows");
+    let sky = settings.atmosphere && !disabled("atmo");
+    if shadows && settings.god_rays && !disabled("rays") {
+        // Light shafts: the sun lights a box of thin haze around the camera, and the shadow map
+        // decides which parts of that haze are lit.
+        commands.entity(sun).insert(VolumetricLight);
+        commands.spawn((
+            FogBox,
+            FogVolume {
+                density_factor: env_or("LOOK_RAY_DENSITY", 0.0028),
+                absorption: 0.2,
+                scattering: 0.5,
+                scattering_asymmetry: 0.82,
+                fog_color: Color::srgb(0.92, 0.95, 1.0),
+                light_intensity: env_or("LOOK_RAY_LIGHT", 2.2),
+                ..default()
+            },
+            Transform::from_scale(Vec3::new(650.0, 260.0, 650.0)),
+        ));
+    }
+    if sky && settings.clouds && !disabled("clouds") {
+        // The light travels along its own -Z, so the sun is in the opposite direction.
+        let to_sun = rotation * Vec3::Z;
+        commands.spawn((
+            CloudDome,
+            bevy::light::NotShadowCaster,
+            Mesh3d(meshes.add(Sphere::new(1.0).mesh().uv(48, 24))),
+            MeshMaterial3d(clouds.add(cloud_material(to_sun, lux::RAW_SUNLIGHT, settings.cloud_coverage))),
+            Transform::from_scale(Vec3::splat(DOME_RADIUS)),
+        ));
+    }
+}
+
+fn follow_camera(
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    mut dome: Query<&mut Transform, (With<CloudDome>, Without<FogBox>)>,
+    mut fog: Query<&mut Transform, (With<FogBox>, Without<CloudDome>)>,
+) {
+    let Some(camera) = cameras.iter().next() else { return };
+    let at = camera.translation();
+    for mut t in &mut dome {
+        t.translation = at;
+    }
+    for mut t in &mut fog {
+        // Mostly above the camera, since the ground below it is solid anyway.
+        t.translation = at + Vec3::new(0.0, 90.0, 0.0);
+    }
 }
 
 // Tunables can be overridden from the environment while experimenting.
@@ -122,6 +194,14 @@ fn dress_new_cameras(mut commands: Commands, new: Query<(Entity, Option<&Project
         }
         if !disabled("bloom") {
             entity.insert(Bloom { intensity: 0.06, ..Bloom::NATURAL });
+        }
+        if settings.shadows && settings.god_rays && !disabled("shadows") && !disabled("rays") {
+            entity.insert(VolumetricFog {
+                ambient_intensity: 0.0,
+                step_count: env_or("LOOK_RAY_STEPS", 64),
+                jitter: 0.5,
+                ..default()
+            });
         }
         if !disabled("grading") {
             entity.insert(ColorGrading {

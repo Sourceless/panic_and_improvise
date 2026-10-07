@@ -31,6 +31,7 @@ impl Plugin for TerrainPlugin {
             MaterialPlugin::<crate::field_material::FieldMaterial>::default(),
             MaterialPlugin::<crate::water_material::WaterMaterial>::default(),
             MaterialPlugin::<crate::wind_material::WindMaterial>::default(),
+            MaterialPlugin::<crate::cloud_material::CloudMaterial>::default(),
         ))
             .add_systems(Startup, (load_textures, spawn_world).chain());
     }

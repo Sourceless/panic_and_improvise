@@ -1,3 +1,4 @@
+pub mod cloud_material;
 pub mod contour;
 pub mod field_material;
 pub mod fill;
