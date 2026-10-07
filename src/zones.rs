@@ -3,6 +3,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::map::{fbm, grid_pos, PoiKind, TerrainMap, CELL};
+use crate::params::GenParams;
 
 const OVERLAY_LIFT: f32 = 0.6;
 const OVERLAY_ALPHA: f32 = 0.55;
@@ -70,45 +71,47 @@ struct Site {
 // Each zone's rule: physical limits, plus a noise threshold so zones form patches.
 struct Rule {
     zone: Zone,
-    matches: fn(&Site) -> bool,
+    matches: Box<dyn Fn(&Site) -> bool>,
     patch_scale: f32,
     min_noise: f32,
 }
 
-fn rule_for(zone: Zone) -> Rule {
-    let (matches, patch_scale, min_noise): (fn(&Site) -> bool, f32, f32) = match zone {
-        Zone::Urban => (|s| s.village_distance < 140.0 && s.slope < 0.15, 1.0, 0.0),
+fn rule_for(zone: Zone, params: &GenParams) -> Rule {
+    let max_arable_slope = params.max_arable_slope;
+    let max_pasture_slope = params.max_pasture_slope;
+    let (matches, patch_scale, min_noise): (Box<dyn Fn(&Site) -> bool>, f32, f32) = match zone {
+        Zone::Urban => (Box::new(|s| s.village_distance < 140.0 && s.slope < 0.15), 1.0, 0.0),
         Zone::Industrial => (
-            |s| (250.0..1200.0).contains(&s.village_distance) && s.slope < 0.06 && s.elevation < 110.0 && s.river_distance > 80.0,
+            Box::new(|s| (250.0..1200.0).contains(&s.village_distance) && s.slope < 0.06 && s.elevation < 110.0 && s.river_distance > 80.0),
             400.0,
             0.68,
         ),
         Zone::Military => (
-            |s| s.village_distance > 1500.0 && s.slope < 0.10 && s.elevation < 150.0,
+            Box::new(|s| s.village_distance > 1500.0 && s.slope < 0.10 && s.elevation < 150.0),
             900.0,
             0.74,
         ),
         Zone::Orchard => (
-            |s| s.farm_distance < 300.0 && s.elevation < 70.0 && s.slope < 0.12,
+            Box::new(|s| s.farm_distance < 300.0 && s.elevation < 70.0 && s.slope < 0.12),
             200.0,
             0.50,
         ),
         Zone::Wetland => (
-            |s| s.river_distance < 120.0 && s.elevation < 25.0 && s.slope < 0.05,
+            Box::new(|s| s.river_distance < 120.0 && s.elevation < 25.0 && s.slope < 0.05),
             150.0,
             0.45,
         ),
-        Zone::Quarry => (|s| s.slope > 0.5 && s.elevation > 100.0, 120.0, 0.62),
-        Zone::Conifer => (|s| s.elevation > 140.0 && s.slope < 0.7, 250.0, 0.62),
-        Zone::Woodland => (|s| s.elevation < 170.0 && s.slope < 0.5, 300.0, 0.70),
+        Zone::Quarry => (Box::new(|s| s.slope > 0.5 && s.elevation > 100.0), 120.0, 0.62),
+        Zone::Conifer => (Box::new(|s| s.elevation > 140.0 && s.slope < 0.7), 250.0, 0.62),
+        Zone::Woodland => (Box::new(|s| s.elevation < 170.0 && s.slope < 0.5), 300.0, 0.70),
         Zone::Arable => (
-            |s| s.elevation < 130.0 && s.slope < 0.14 && s.river_distance > 30.0,
+            Box::new(move |s| s.elevation < 130.0 && s.slope < max_arable_slope && s.river_distance > 30.0),
             350.0,
             0.38,
         ),
-        Zone::Moorland => (|s| s.elevation > 150.0 && s.slope < 0.5, 500.0, 0.60),
-        Zone::Pasture => (|s| s.elevation < 230.0 && s.slope < 0.55, 1.0, 0.0),
-        Zone::Water | Zone::Open => (|_| false, 1.0, 0.0),
+        Zone::Moorland => (Box::new(|s| s.elevation > 150.0 && s.slope < 0.5), 500.0, 0.60),
+        Zone::Pasture => (Box::new(move |s| s.elevation < 230.0 && s.slope < max_pasture_slope), 1.0, 0.0),
+        Zone::Water | Zone::Open => (Box::new(|_| false), 1.0, 0.0),
     };
     Rule {
         zone,
@@ -125,7 +128,7 @@ pub struct ZoneMap {
 }
 
 impl ZoneMap {
-    pub fn generate(map: &TerrainMap) -> Self {
+    pub fn generate(map: &TerrainMap, params: &GenParams) -> Self {
         let n = map.grid_size();
         let mut zones = Vec::with_capacity(n * n);
         let villages: Vec<Vec2> = map
@@ -140,7 +143,7 @@ impl ZoneMap {
             .filter(|p| p.kind == PoiKind::Farm)
             .map(|p| p.position)
             .collect();
-        let rules: Vec<Rule> = PRIORITY.iter().map(|&z| rule_for(z)).collect();
+        let rules: Vec<Rule> = PRIORITY.iter().map(|&z| rule_for(z, params)).collect();
         let seed = map.seed;
 
         for iz in 0..n {

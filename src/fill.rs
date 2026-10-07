@@ -173,6 +173,9 @@ fn claim_regions(map: &TerrainMap, is_farmland: &[bool], seeds: &[usize], params
             let diagonal = (nb % n != c % n) && (nb / n != c / n);
             let step = if diagonal { CELL * std::f32::consts::SQRT_2 } else { CELL };
             let climb = (map.vertex_height(nb % n, nb / n) - map.vertex_height(c % n, c / n)).abs() / CELL;
+            if climb > params.field_max_slope {
+                continue;
+            }
             let next_cost = cost[c] + step * (1.0 + params.field_contour_weight * climb);
             if next_cost < cost[nb] {
                 cost[nb] = next_cost;
@@ -578,7 +581,7 @@ mod tests {
     fn generate() -> (TerrainMap, ZoneMap, crate::params::GenParams) {
         let params = crate::params::GenParams::default();
         let map = TerrainMap::generate(crate::MAP_SEED, &params);
-        let zones = ZoneMap::generate(&map);
+        let zones = ZoneMap::generate(&map, &params);
         (map, zones, params)
     }
 

@@ -236,8 +236,11 @@ fn ui_panel(mut contexts: EguiContexts, mut params: ResMut<GenParams>, mut viewe
         ui.add(egui::Slider::new(&mut params.erosion_droplets, 0..=800_000).text("Erosion droplets"));
         ui.add(egui::Slider::new(&mut params.river_slope_weight, 1.0..=15.0).text("River slope weight"));
         ui.separator();
-        ui.add(egui::Slider::new(&mut params.field_spacing, 40.0..=200.0).text("Field spacing"));
+        ui.add(egui::Slider::new(&mut params.field_spacing, 40.0..=200.0).text("Field size"));
         ui.add(egui::Slider::new(&mut params.field_contour_weight, 0.5..=15.0).text("Field contour weight"));
+        ui.add(egui::Slider::new(&mut params.field_max_slope, 0.1..=2.0).text("Field max slope change"));
+        ui.add(egui::Slider::new(&mut params.max_arable_slope, 0.02..=0.5).text("Max arable slope"));
+        ui.add(egui::Slider::new(&mut params.max_pasture_slope, 0.1..=1.0).text("Max pasture slope"));
         ui.separator();
         ui.add(egui::Slider::new(&mut params.road_slope_scale, 0.2..=3.0).text("Road slope cost"));
         ui.add(egui::Slider::new(&mut params.road_water_scale, 0.2..=3.0).text("Road water cost"));
@@ -279,7 +282,7 @@ fn regenerate(
         commands.entity(entity).despawn();
     }
     let map = TerrainMap::generate(viewer.seed, &params);
-    let zones = ZoneMap::generate(&map);
+    let zones = ZoneMap::generate(&map, &params);
     let roads = RoadNetwork::generate(&map, &params);
     spawn_terrain(&mut commands, &mut meshes, &mut standard, &mut terrain, &textures, &map);
     spawn_roads(&mut commands, &mut meshes, &mut standard, &map, &roads);
@@ -289,8 +292,8 @@ fn regenerate(
     commands.insert_resource(map);
 }
 
-fn build_zones(mut commands: Commands, map: Res<TerrainMap>) {
-    commands.insert_resource(ZoneMap::generate(&map));
+fn build_zones(mut commands: Commands, map: Res<TerrainMap>, params: Res<GenParams>) {
+    commands.insert_resource(ZoneMap::generate(&map, &params));
 }
 
 fn build_fill(

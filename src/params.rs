@@ -18,6 +18,15 @@ pub struct GenParams {
     pub road_slope_scale: f32,
     /// Multiplies both road kinds' water-crossing cost: higher means fewer, narrower bridges.
     pub road_water_scale: f32,
+    /// Hard slope-change limit a single field may grow across in one step: steeper than
+    /// this acts as a barrier, like a road or water, forcing a boundary there regardless of
+    /// cost. Left near the top of its slider range this stays unconstrained beyond what the
+    /// zone slope limits below already prevent.
+    pub field_max_slope: f32,
+    /// Steepest ground farmland can form on when it's ploughed (the Arable zone).
+    pub max_arable_slope: f32,
+    /// Steepest ground farmland can form on when it's grazed (the Pasture zone).
+    pub max_pasture_slope: f32,
 }
 
 impl Default for GenParams {
@@ -30,6 +39,9 @@ impl Default for GenParams {
             field_contour_weight: 6.0,
             road_slope_scale: 1.0,
             road_water_scale: 1.0,
+            field_max_slope: 2.0,
+            max_arable_slope: 0.14,
+            max_pasture_slope: 0.55,
         }
     }
 }

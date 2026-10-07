@@ -4,7 +4,7 @@ use fps_prototype::MAP_SEED;
 
 fn setup() -> (TerrainMap, ZoneMap) {
     let map = TerrainMap::generate(MAP_SEED, &fps_prototype::params::GenParams::default());
-    let zones = ZoneMap::generate(&map);
+    let zones = ZoneMap::generate(&map, &fps_prototype::params::GenParams::default());
     (map, zones)
 }
 
