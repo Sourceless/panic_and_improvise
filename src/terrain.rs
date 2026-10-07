@@ -26,6 +26,8 @@ impl Plugin for TerrainPlugin {
             crate::vegetation::VegetationPlugin,
             crate::perf::PerfPlugin,
             crate::look::LookPlugin,
+            crate::wind::WindPlugin,
+            crate::cloud_shadows::CloudShadowPlugin,
             crate::grass::GrassPlugin,
             MaterialPlugin::<TerrainMaterial>::default(),
             MaterialPlugin::<crate::field_material::FieldMaterial>::default(),

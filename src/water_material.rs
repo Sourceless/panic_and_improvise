@@ -22,6 +22,9 @@ pub struct WaterExtension {
     /// x: half the map size, y: cell size, z: vertices per side.
     #[uniform(101)]
     pub map_info: Vec4,
+    /// x: how far to turn the waves from their authored direction (radians), y: sea roughness.
+    #[uniform(102)]
+    pub wind: Vec4,
 }
 
 impl MaterialExtension for WaterExtension {
@@ -63,6 +66,7 @@ pub fn water_material(map: &TerrainMap, images: &mut Assets<Image>) -> WaterMate
         extension: WaterExtension {
             bed: images.add(bed_texture(map)),
             map_info: Vec4::new(HALF_SIZE, CELL, n as f32, 0.0),
+            wind: Vec4::new(0.0, 1.0, 0.0, 0.0),
         },
     }
 }

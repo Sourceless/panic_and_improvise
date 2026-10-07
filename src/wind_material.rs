@@ -16,6 +16,10 @@ pub struct WindExtension {
     /// that full sway is reached; z: leaf flutter, in metres.
     #[uniform(100)]
     pub params: Vec4,
+    /// The world's wind (see wind.rs): x, y the direction it blows along, z its strength
+    /// relative to the breeze the sway was tuned at. Kept up to date by the wind plugin.
+    #[uniform(101)]
+    pub wind: Vec4,
 }
 
 impl MaterialExtension for WindExtension {
@@ -26,6 +30,6 @@ impl MaterialExtension for WindExtension {
 
 impl WindExtension {
     pub fn new(sway: f32, height: f32, flutter: f32) -> Self {
-        WindExtension { params: Vec4::new(sway, height, flutter, 0.0) }
+        WindExtension { params: Vec4::new(sway, height, flutter, 0.0), wind: Vec4::new(0.94, 0.34, 1.0, 0.0) }
     }
 }

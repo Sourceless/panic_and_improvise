@@ -30,6 +30,9 @@ fn bed_height(p: vec2<f32>) -> f32 {
     return mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
 }
 
+// x: how far to turn the waves from their authored direction (radians), y: roughness
+@group(#{MATERIAL_BIND_GROUP}) @binding(102) var<uniform> sea: vec4<f32>;
+
 fn hash21(p: vec2<f32>) -> f32 {
     var q = fract(p * vec2<f32>(123.34, 456.21));
     q += dot(q, q + 45.32);
@@ -77,7 +80,8 @@ fn wave_slope(p_in: vec2<f32>, t: f32, pixel: f32) -> vec2<f32> {
     var g = vec2<f32>(0.0);
     for (var i = 0; i < 10; i++) {
         let w = waves[i];
-        let d = vec2<f32>(cos(w.x), sin(w.x));
+        // Turned with the wind: the whole wave field rotates to run along it.
+        let d = vec2<f32>(cos(w.x + sea.x), sin(w.x + sea.x));
         let k = 6.2831853 / w.y;
         let omega = sqrt(9.81 * k);
         // A wave needs several pixels per wavelength to be sampled cleanly, or it aliases:
@@ -107,7 +111,7 @@ fn fragment(
     // longer, and nearly flat right at the shore.
     let dist = length(view.world_position - in.world_position.xyz);
     // Calmer with distance too, so the horizon reads as a smooth sheet of sky reflection.
-    let steep = mix(0.5, 1.5, smoothstep(0.0, 4.0, depth)) * mix(1.0, 0.15, smoothstep(80.0, 2500.0, dist));
+    let steep = mix(0.5, 1.5, smoothstep(0.0, 4.0, depth)) * mix(1.0, 0.15, smoothstep(80.0, 2500.0, dist)) * sea.y;
     // World metres per screen pixel, from how fast the position changes across the screen.
     let pixel = max(length(dpdx(p)), length(dpdy(p)));
     let g = wave_slope(p, t, pixel);

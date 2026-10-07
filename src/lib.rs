@@ -1,4 +1,5 @@
 pub mod cloud_material;
+pub mod cloud_shadows;
 pub mod contour;
 pub mod field_material;
 pub mod fill;
@@ -16,6 +17,7 @@ pub mod target;
 pub mod vegetation;
 pub mod terrain;
 pub mod water_material;
+pub mod wind;
 pub mod weapon;
 pub mod wind_material;
 pub mod world;

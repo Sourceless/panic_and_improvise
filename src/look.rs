@@ -72,6 +72,7 @@ fn spawn_sun_and_sky(
     mut media: ResMut<Assets<ScatteringMedium>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut clouds: ResMut<Assets<CloudMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     settings: Res<LookSettings>,
 ) {
     if settings.atmosphere && !disabled("atmo") {
@@ -98,14 +99,15 @@ fn spawn_sun_and_sky(
             shadow_maps_enabled: settings.shadows && !disabled("shadows"),
             ..default()
         },
-        // Two cascades out to 120 m: sharp shadows around the player, and nothing farther away is
-        // big enough on screen to be worth the cost of rendering them (shadows were by far the
-        // most expensive part of the look when measured).
+        // Three cascades out to 420 m: sharp shadows around the player, softer ones to the
+        // middle distance, and enough reach for light shafts to run a good way into the haze.
+        // (Shadows were by far the most expensive part of the look when measured; this is as
+        // far as seemed worth paying for.)
         CascadeShadowConfigBuilder {
-            num_cascades: env_or("LOOK_CASCADES", 2),
+            num_cascades: env_or("LOOK_CASCADES", 3),
             minimum_distance: 0.5,
-            maximum_distance: env_or("LOOK_SHADOW_DIST", 120.0),
-            first_cascade_far_bound: env_or("LOOK_SHADOW_FIRST", 25.0),
+            maximum_distance: env_or("LOOK_SHADOW_DIST", 420.0),
+            first_cascade_far_bound: env_or("LOOK_SHADOW_FIRST", 22.0),
             overlap_proportion: 0.25,
         }
         .build(),
@@ -122,7 +124,7 @@ fn spawn_sun_and_sky(
         commands.spawn((
             FogBox,
             FogVolume {
-                density_factor: env_or("LOOK_RAY_DENSITY", 0.0028),
+                density_factor: env_or("LOOK_RAY_DENSITY", 0.0019),
                 absorption: 0.2,
                 scattering: 0.5,
                 scattering_asymmetry: 0.82,
@@ -130,12 +132,23 @@ fn spawn_sun_and_sky(
                 light_intensity: env_or("LOOK_RAY_LIGHT", 2.2),
                 ..default()
             },
-            Transform::from_scale(Vec3::new(650.0, 260.0, 650.0)),
+            Transform::from_scale(Vec3::new(1000.0, 240.0, 1000.0)),
         ));
     }
     if sky && settings.clouds && !disabled("clouds") {
         // The light travels along its own -Z, so the sun is in the opposite direction.
         let to_sun = rotation * Vec3::Z;
+        if !disabled("cloudshadows") {
+            // The clouds' shadows: a texture the sun shines through (see cloud_shadows.rs).
+            let shadow_map = crate::cloud_shadows::CloudShadowMap::new(&mut images, rotation);
+            commands.entity(sun).insert((
+                shadow_map.light_texture(),
+                Transform::from_translation(shadow_map.anchor())
+                    .with_rotation(rotation)
+                    .with_scale(Vec3::splat(crate::cloud_shadows::HALF_SIZE)),
+            ));
+            commands.insert_resource(shadow_map);
+        }
         commands.spawn((
             CloudDome,
             bevy::light::NotShadowCaster,
@@ -198,8 +211,10 @@ fn dress_new_cameras(mut commands: Commands, new: Query<(Entity, Option<&Project
         if settings.shadows && settings.god_rays && !disabled("shadows") && !disabled("rays") {
             entity.insert(VolumetricFog {
                 ambient_intensity: 0.0,
-                step_count: env_or("LOOK_RAY_STEPS", 64),
-                jitter: 0.5,
+                step_count: env_or("LOOK_RAY_STEPS", 40),
+                // Fewer steps over a longer reach would band, so the start of each ray is
+                // jittered (and the grain is hidden by the haze's softness).
+                jitter: 1.5,
                 ..default()
             });
         }

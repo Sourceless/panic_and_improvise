@@ -7,8 +7,8 @@
 
 // x: sway at full height (m), y: height at which full sway is reached, z: leaf flutter (m)
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> wind: vec4<f32>;
-
-const WIND_DIR: vec2<f32> = vec2<f32>(0.94, 0.34);
+// xy: the direction the world's wind blows along, z: its strength relative to the tuned breeze
+@group(#{MATERIAL_BIND_GROUP}) @binding(101) var<uniform> world_wind: vec4<f32>;
 
 @vertex
 fn vertex(vertex_no_morph: Vertex) -> VertexOutput {
@@ -31,12 +31,17 @@ fn vertex(vertex_no_morph: Vertex) -> VertexOutput {
     let gust = 0.55 + 0.45 * sin(t * 0.4 + origin.x * 0.0045 + origin.z * 0.0031);
     // Bend grows faster than linearly with height, so the base stays planted.
     let h = clamp(vertex.position.y / max(wind.y, 0.01), 0.0, 1.4);
-    let bend = pow(h, 1.5) * wind.x * gust;
-    let sway = vec2<f32>(sin(t * 1.25 + phase), cos(t * 0.95 + phase * 1.3)) * 0.45 + WIND_DIR * 0.75;
+    let bend = pow(h, 1.5) * wind.x * gust * world_wind.z;
+    // Mostly a lean downwind, plus a smaller back-and-forth along and across the wind.
+    let along = world_wind.xy;
+    let across = vec2<f32>(-along.y, along.x);
+    let lean = 0.75 + 0.45 * sin(t * 1.25 + phase);
+    let side = 0.35 * cos(t * 0.95 + phase * 1.3);
+    let sway = along * lean + across * side;
     world_position.x += sway.x * bend;
     world_position.z += sway.y * bend;
     // Quick, small flutter of individual leaves, out of phase from vertex to vertex.
-    let flutter = sin(t * 5.5 + dot(vertex.position, vec3<f32>(1.7, 2.3, 1.1)) + phase) * wind.z * smoothstep(0.2, 0.8, h) * gust;
+    let flutter = sin(t * 5.5 + dot(vertex.position, vec3<f32>(1.7, 2.3, 1.1)) + phase) * wind.z * smoothstep(0.2, 0.8, h) * gust * world_wind.z;
     world_position.x += flutter;
     world_position.y += flutter * 0.5;
 
