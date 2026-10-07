@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -7,7 +9,7 @@ use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
 
 use crate::contour::{triangulate, Contour, Smoothing, OPEN};
-use crate::map::{grid_pos, PoiKind, TerrainMap, CELL};
+use crate::map::{grid_pos, PoiKind, TerrainMap, CELL, TILE_CELLS};
 use crate::params::GenParams;
 use crate::zones::{Zone, ZoneMap};
 
@@ -21,6 +23,8 @@ impl Plugin for TerrainPlugin {
         app.init_resource::<GenParams>().add_plugins((
             crate::mipmaps::MipmapPlugin,
             crate::vegetation::VegetationPlugin,
+            crate::perf::PerfPlugin,
+            crate::look::LookPlugin,
             MaterialPlugin::<TerrainMaterial>::default(),
             MaterialPlugin::<crate::field_material::FieldMaterial>::default(),
         ))
@@ -179,62 +183,74 @@ pub fn spawn_terrain(
             mud: textures.soil_plough.clone(),
         },
     });
-    commands.spawn((
-        TerrainRoot,
-        Mesh3d(meshes.add(terrain_mesh(map, zones))),
-        MeshMaterial3d(ground),
-    ));
-
-    commands.spawn((
-        TerrainRoot,
-        bevy::light::NotShadowCaster,
-        Mesh3d(meshes.add(river_mesh(map))),
-        MeshMaterial3d(standard.add(StandardMaterial {
-            base_color: Color::srgb(0.18, 0.38, 0.62),
-            perceptual_roughness: 0.2,
-            ..default()
-        })),
-    ));
-
-    crate::settlement::spawn_settlements(commands, meshes, standard, map);
-}
-
-fn terrain_mesh(map: &TerrainMap, zones: &ZoneMap) -> Mesh {
-    let n = map.grid_size();
-    let mut positions = Vec::with_capacity(n * n);
-    let mut weights_a = Vec::with_capacity(n * n);
-    let mut weights_b = Vec::with_capacity(n * n);
-    let mut weights_c = Vec::with_capacity(n * n);
-    for iz in 0..n {
-        for ix in 0..n {
-            let p = grid_pos(ix, iz);
-            let h = map.vertex_height(ix, iz);
-            positions.push([p.x, h, p.y]);
-            // Eight blend weights spread over the vertex colour and two UV sets.
-            let w = surface_weights(map, zones, ix, iz, p);
-            weights_a.push([w[0], w[1], w[2], w[3]]);
-            weights_b.push([w[4], w[5]]);
-            weights_c.push([w[6], w[7]]);
+    let tiles = (map.grid_size() - 1).div_ceil(TILE_CELLS);
+    for tz in 0..tiles {
+        for tx in 0..tiles {
+            commands.spawn((
+                TerrainRoot,
+                Mesh3d(meshes.add(terrain_tile_mesh(map, zones, tx, tz))),
+                MeshMaterial3d(ground.clone()),
+            ));
         }
     }
 
-    let mut indices = Vec::with_capacity((n - 1) * (n - 1) * 6);
-    let row = n as u32;
-    for iz in 0..n - 1 {
-        for ix in 0..n - 1 {
+    let water = standard.add(StandardMaterial {
+        base_color: Color::srgb(0.18, 0.38, 0.62),
+        perceptual_roughness: 0.2,
+        ..default()
+    });
+    for mesh in river_meshes(map) {
+        commands.spawn((TerrainRoot, bevy::light::NotShadowCaster, Mesh3d(meshes.add(mesh)), MeshMaterial3d(water.clone())));
+    }
+
+    if !crate::world::skip("settlements") {
+        crate::settlement::spawn_settlements(commands, meshes, standard, map);
+    }
+}
+
+// One tile of the terrain: the vertices from (tx, tz) * TILE_CELLS through the shared border
+// with the next tile. Normals come from the heights of the whole map (not just the tile), so
+// there is no lighting seam where two tiles meet.
+fn terrain_tile_mesh(map: &TerrainMap, zones: &ZoneMap, tx: usize, tz: usize) -> Mesh {
+    let n = map.grid_size();
+    let (x0, z0) = (tx * TILE_CELLS, tz * TILE_CELLS);
+    let (x1, z1) = ((x0 + TILE_CELLS).min(n - 1), (z0 + TILE_CELLS).min(n - 1));
+    let (w, h) = (x1 - x0 + 1, z1 - z0 + 1);
+    let mut positions = Vec::with_capacity(w * h);
+    let mut normals = Vec::with_capacity(w * h);
+    let mut weights_a = Vec::with_capacity(w * h);
+    let mut weights_b = Vec::with_capacity(w * h);
+    let mut weights_c = Vec::with_capacity(w * h);
+    let height = |x: usize, z: usize| map.vertex_height(x.min(n - 1), z.min(n - 1));
+    for iz in z0..=z1 {
+        for ix in x0..=x1 {
+            let p = grid_pos(ix, iz);
+            positions.push([p.x, map.vertex_height(ix, iz), p.y]);
+            let dx = (height(ix + 1, iz) - height(ix.saturating_sub(1), iz)) / (2.0 * CELL);
+            let dz = (height(ix, iz + 1) - height(ix, iz.saturating_sub(1))) / (2.0 * CELL);
+            normals.push(Vec3::new(-dx, 1.0, -dz).normalize().to_array());
+            // Eight blend weights spread over the vertex colour and two UV sets.
+            let wgt = surface_weights(map, zones, ix, iz, p);
+            weights_a.push([wgt[0], wgt[1], wgt[2], wgt[3]]);
+            weights_b.push([wgt[4], wgt[5]]);
+            weights_c.push([wgt[6], wgt[7]]);
+        }
+    }
+    let mut indices = Vec::with_capacity((w - 1) * (h - 1) * 6);
+    let row = w as u32;
+    for iz in 0..h - 1 {
+        for ix in 0..w - 1 {
             let i = iz as u32 * row + ix as u32;
             indices.extend_from_slice(&[i, i + row, i + 1, i + 1, i + row, i + row + 1]);
         }
     }
-
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
         .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, weights_a)
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, weights_b)
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_1, weights_c)
-        .with_inserted_indices(Indices::U32(indices));
-    mesh.compute_smooth_normals();
-    mesh
+        .with_inserted_indices(Indices::U32(indices))
 }
 
 // Settlement ground: worn bare earth and gravel in the built-up core, fading to gardens and
@@ -315,7 +331,7 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 // cell, so the river and lake shores curve instead of stair-stepping. Each cell's wet
 // polygon takes its height from bilinear interpolation of the cell's water levels, with any
 // dry corner borrowing the average of the wet ones.
-fn river_mesh(map: &TerrainMap) -> Mesh {
+fn river_meshes(map: &TerrainMap) -> Vec<Mesh> {
     const WATER: u32 = 0;
     let n = map.grid_size();
     // The surface is built on the wet vertices grown by one cell. The terrain crosses the water
@@ -350,8 +366,8 @@ fn river_mesh(map: &TerrainMap) -> Mesh {
     let labels: Vec<u32> = levels_grid.iter().map(|l| if l.is_some() { WATER } else { OPEN }).collect();
     let contour = Contour::build(n, &labels, map.seed ^ 0x77A7, Some(WATER), Smoothing::WATER);
 
-    let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
+    // One mesh per tile, so frustum culling can skip the water that isn't in view.
+    let mut tiles: HashMap<(usize, usize), (Vec<[f32; 3]>, Vec<u32>)> = HashMap::new();
     for iz in 0..n - 1 {
         for ix in 0..n - 1 {
             let corners = [(ix, iz), (ix + 1, iz), (ix + 1, iz + 1), (ix, iz + 1)];
@@ -369,6 +385,7 @@ fn river_mesh(map: &TerrainMap) -> Mesh {
                 let bottom = l_bl + (l_br - l_bl) * p.x;
                 top + (bottom - top) * p.y + WATER_LIFT
             };
+            let (positions, indices) = tiles.entry((ix / TILE_CELLS, iz / TILE_CELLS)).or_default();
             for (_, poly) in contour.cell_regions(ix, iz, cell) {
                 for mut tri in triangulate(&poly) {
                     // Wind upward; (u, v) maps to (x, z).
@@ -389,9 +406,14 @@ fn river_mesh(map: &TerrainMap) -> Mesh {
             }
         }
     }
-    let normals = vec![[0.0, 1.0, 0.0]; positions.len()];
-    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-        .with_inserted_indices(Indices::U32(indices))
+    tiles
+        .into_values()
+        .map(|(positions, indices)| {
+            let normals = vec![[0.0, 1.0, 0.0]; positions.len()];
+            Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+                .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+                .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+                .with_inserted_indices(Indices::U32(indices))
+        })
+        .collect()
 }

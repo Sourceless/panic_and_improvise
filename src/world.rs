@@ -32,3 +32,9 @@ pub fn build_world(
     commands.insert_resource(zones);
     commands.insert_resource(roads);
 }
+
+/// WORLD_SKIP=trees,fields,boundaries,settlements leaves those categories out, to measure what
+/// each costs. Development only.
+pub fn skip(category: &str) -> bool {
+    std::env::var("WORLD_SKIP").is_ok_and(|v| v.split(',').any(|c| c == category))
+}

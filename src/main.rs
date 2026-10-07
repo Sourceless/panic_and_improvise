@@ -12,25 +12,8 @@ fn main() {
             ..default()
         }))
         .add_plugins((GamePlugin, TerrainPlugin))
-        .add_systems(Startup, (setup_scene, setup_hud))
+        .add_systems(Startup, setup_hud)
         .run();
-}
-
-fn setup_scene(mut commands: Commands) {
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 10_000.0,
-            shadow_maps_enabled: true,
-            ..default()
-        },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -1.0, 0.5, 0.0)),
-    ));
-
-    commands.insert_resource(GlobalAmbientLight {
-        color: Color::WHITE,
-        brightness: 300.0,
-        ..default()
-    });
 }
 
 fn setup_hud(mut commands: Commands) {

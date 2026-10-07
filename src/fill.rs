@@ -4,11 +4,12 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use std::cmp::Reverse;
+use std::collections::HashMap;
 use std::collections::BinaryHeap;
 
 use crate::contour::{clip_to_terrain_triangle, triangulate, Contour, Smoothing, OPEN};
 use crate::field_material::{FieldExtension, FieldMaterial};
-use crate::map::{fbm, grid_pos, TerrainMap, CELL};
+use crate::map::{fbm, grid_pos, TerrainMap, CELL, TILE_CELLS};
 use crate::params::GenParams;
 use crate::roads::RoadNetwork;
 use crate::terrain::{TerrainRoot, TerrainTextures};
@@ -29,7 +30,9 @@ pub fn spawn_fill(
     params: &GenParams,
 ) {
     let hedge_points = spawn_field_tiling(commands, meshes, materials, field_materials, textures, map, zones, roads, params);
-    crate::vegetation::spawn_vegetation(commands, meshes, materials, map, zones, &hedge_points);
+    if !crate::world::skip("trees") {
+        crate::vegetation::spawn_vegetation(commands, meshes, materials, map, zones, &hedge_points);
+    }
     spawn_sheds(commands, meshes, materials, map, zones);
 }
 
@@ -108,8 +111,12 @@ fn spawn_field_tiling(
 
     let labels: Vec<u32> = owner.iter().map(|o| o.unwrap_or(OPEN)).collect();
     let contour = Contour::build(n, &labels, map.seed, None, Smoothing::FIELD);
-    spawn_field_colour(commands, meshes, field_materials, textures, map, &labels, &contour, &styles);
-    spawn_field_boundaries(commands, meshes, materials, textures, map, &contour);
+    if !crate::world::skip("fields") {
+        spawn_field_colour(commands, meshes, field_materials, textures, map, &labels, &contour, &styles);
+    }
+    if !crate::world::skip("boundaries") {
+        spawn_field_boundaries(commands, meshes, materials, textures, map, &contour);
+    }
     hedge_tree_points(&contour)
 }
 
@@ -403,10 +410,8 @@ fn spawn_field_colour(
     // then split along the terrain's own diagonal and heighted per triangle, so it stays
     // coplanar with the real terrain.
     let n = map.grid_size();
-    let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut colors: Vec<[f32; 4]> = Vec::new();
-    let mut uvs: Vec<[f32; 2]> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
+    // One mesh per tile, so frustum culling can skip fields that aren't in view.
+    let mut tiles: HashMap<(usize, usize), FillBuf> = HashMap::new();
     for iz in 0..n - 1 {
         for ix in 0..n - 1 {
             let get = |x: usize, z: usize| labels[z * n + x];
@@ -414,6 +419,7 @@ fn spawn_field_colour(
             if cell.iter().all(|&o| o == OPEN) {
                 continue;
             }
+            let buf = tiles.entry((ix / TILE_CELLS, iz / TILE_CELLS)).or_default();
             for (id, poly) in contour.cell_regions(ix, iz, cell) {
                 let style = styles[id as usize];
                 let colour = [style.tint[0], style.tint[1], style.tint[2], style.kind as u32 as f32 / 16.0];
@@ -463,14 +469,14 @@ fn spawn_field_colour(
                                     if area < 0.0 {
                                         t.swap(1, 2);
                                     }
-                                    let base = positions.len() as u32;
+                                    let base = buf.positions.len() as u32;
                                     for p in t {
                                         let w = origin + p * CELL;
-                                        positions.push([w.x, height(p), w.y]);
-                                        colors.push(colour);
-                                        uvs.push([w.dot(across), w.dot(along)]);
+                                        buf.positions.push([w.x, height(p), w.y]);
+                                        buf.colors.push(colour);
+                                        buf.uvs.push([w.dot(across), w.dot(along)]);
                                     }
-                                    indices.extend_from_slice(&[base, base + 1, base + 2]);
+                                    buf.indices.extend_from_slice(&[base, base + 1, base + 2]);
                                 }
                             }
                         }
@@ -479,34 +485,40 @@ fn spawn_field_colour(
             }
         }
     }
-    if positions.is_empty() {
+    if tiles.is_empty() {
         return;
     }
-    let normals = vec![[0.0, 1.0, 0.0]; positions.len()];
-    let mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-        .with_inserted_indices(Indices::U32(indices));
-    commands.spawn((
-        TerrainRoot,
-        bevy::light::NotShadowCaster,
-        Mesh3d(meshes.add(mesh)),
-        MeshMaterial3d(materials.add(FieldMaterial {
-            base: StandardMaterial {
-                base_color: Color::WHITE,
-                perceptual_roughness: 1.0,
-                ..default()
-            },
-            extension: FieldExtension {
-                soil_plough: textures.soil_plough.clone(),
-                soil_loam: textures.soil_loam.clone(),
-                meadow: textures.meadow.clone(),
-                pasture: textures.pasture.clone(),
-            },
-        })),
-    ));
+    let material = materials.add(FieldMaterial {
+        base: StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 1.0,
+            ..default()
+        },
+        extension: FieldExtension {
+            soil_plough: textures.soil_plough.clone(),
+            soil_loam: textures.soil_loam.clone(),
+            meadow: textures.meadow.clone(),
+            pasture: textures.pasture.clone(),
+        },
+    });
+    for buf in tiles.into_values() {
+        let normals = vec![[0.0, 1.0, 0.0]; buf.positions.len()];
+        let mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+            .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, buf.positions)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, buf.colors)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, buf.uvs)
+            .with_inserted_indices(Indices::U32(buf.indices));
+        commands.spawn((TerrainRoot, bevy::light::NotShadowCaster, Mesh3d(meshes.add(mesh)), MeshMaterial3d(material.clone())));
+    }
+}
+
+#[derive(Default)]
+struct FillBuf {
+    positions: Vec<[f32; 3]>,
+    colors: Vec<[f32; 4]>,
+    uvs: Vec<[f32; 2]>,
+    indices: Vec<u32>,
 }
 
 // Small pockets of open ground wholly enclosed by a single field (a few cells of odd zone
@@ -659,15 +671,22 @@ fn spawn_field_boundaries(
     // Each segment is already short (at most one grid cell across), and pins to the true
     // ground height at both of its own endpoints - the same trick road_mesh uses for its
     // ribbons - so it follows the terrain tightly without needing any further subdivision.
-    let mut hedges = WallBuf::default();
-    let mut walls = WallBuf::default();
-    let mut fences = WallBuf::default();
+    // Split by tile, so frustum culling (including for shadows) can skip distant boundaries.
+    let mut tiles: HashMap<(usize, usize, u32), WallBuf> = HashMap::new();
     for seg in &contour.segs {
         let (ga, gb) = (map.height_at(seg.a), map.height_at(seg.b));
-        match pair_hash(seg.pair.0, seg.pair.1) % 3 {
-            0 => push_hedge_segment(&mut hedges, map, seg.a, ga, seg.b, gb),
-            1 => push_box_segment(&mut walls, seg.a, ga, seg.b, gb, 0.6, 0.0, 1.1, 1.6),
-            _ => push_fence_segment(&mut fences, seg.a, ga, seg.b, gb),
+        let kind = pair_hash(seg.pair.0, seg.pair.1) % 3;
+        let mid = (seg.a + seg.b) * 0.5;
+        let tile = (
+            (((mid.x + crate::map::HALF_SIZE) / CELL).max(0.0) as usize) / TILE_CELLS,
+            (((mid.y + crate::map::HALF_SIZE) / CELL).max(0.0) as usize) / TILE_CELLS,
+            kind,
+        );
+        let buf = tiles.entry(tile).or_default();
+        match kind {
+            0 => push_hedge_segment(buf, map, seg.a, ga, seg.b, gb),
+            1 => push_box_segment(buf, seg.a, ga, seg.b, gb, 0.6, 0.0, 1.1, 1.6),
+            _ => push_fence_segment(buf, seg.a, ga, seg.b, gb),
         }
     }
     let textured = |tex: &Handle<Image>, tint: Color, roughness: f32| StandardMaterial {
@@ -676,15 +695,20 @@ fn spawn_field_boundaries(
         perceptual_roughness: roughness,
         ..default()
     };
-    for (buf, material) in [
-        (hedges, textured(&textures.hedge, Color::srgb(0.55, 0.62, 0.45), 0.95)),
-        (walls, textured(&textures.stone, Color::srgb(0.95, 0.93, 0.88), 0.95)),
-        (fences, textured(&textures.wood, Color::srgb(0.85, 0.78, 0.7), 0.9)),
-    ] {
+    let materials_by_kind = [
+        materials.add(textured(&textures.hedge, Color::srgb(0.55, 0.62, 0.45), 0.95)),
+        materials.add(textured(&textures.stone, Color::srgb(0.95, 0.93, 0.88), 0.95)),
+        materials.add(textured(&textures.wood, Color::srgb(0.85, 0.78, 0.7), 0.9)),
+    ];
+    for ((_, _, kind), buf) in tiles {
         if buf.positions.is_empty() {
             continue;
         }
-        commands.spawn((TerrainRoot, Mesh3d(meshes.add(buf.into_mesh())), MeshMaterial3d(materials.add(material))));
+        commands.spawn((
+            TerrainRoot,
+            Mesh3d(meshes.add(buf.into_mesh())),
+            MeshMaterial3d(materials_by_kind[kind as usize].clone()),
+        ));
     }
 }
 

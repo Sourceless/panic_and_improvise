@@ -31,8 +31,8 @@ pub struct CursorIntent {
 
 #[derive(Component)]
 pub struct FpsCamera {
-    yaw: f32,
-    pitch: f32,
+    pub(crate) yaw: f32,
+    pub(crate) pitch: f32,
 }
 
 pub fn spawn_player(mut commands: Commands, map: Res<TerrainMap>) {

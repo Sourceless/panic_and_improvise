@@ -9,6 +9,9 @@ use crate::params::GenParams;
 pub const MAP_SIZE: f32 = 5000.0;
 pub const HALF_SIZE: f32 = MAP_SIZE / 2.0;
 pub const CELL: f32 = 10.0;
+/// World meshes (terrain, fields, boundaries, water) are split into tiles this many cells wide,
+/// so frustum culling can skip what is off-screen instead of drawing the whole map each pass.
+pub const TILE_CELLS: usize = 32;
 pub const CELLS: usize = (MAP_SIZE / CELL) as usize;
 const VERTS: usize = CELLS + 1;
 const COUNT: usize = VERTS * VERTS;

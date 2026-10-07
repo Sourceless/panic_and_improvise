@@ -1,9 +1,11 @@
 pub mod contour;
 pub mod field_material;
 pub mod fill;
+pub mod look;
 pub mod map;
 pub mod mipmaps;
 pub mod params;
+pub mod perf;
 pub mod player;
 pub mod roads;
 pub mod settlement;

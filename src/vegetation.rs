@@ -745,6 +745,14 @@ pub struct VegetationPlan {
 }
 
 impl VegetationPlan {
+    /// Centre of the chunk holding the most trees, for benchmarks and diagnostics.
+    pub fn densest_chunk_centre(&self) -> Option<Vec2> {
+        self.chunks
+            .iter()
+            .max_by_key(|(_, trees)| trees.len())
+            .map(|(k, _)| Vec2::new((k.0 as f32 + 0.5) * CHUNK, (k.1 as f32 + 0.5) * CHUNK))
+    }
+
     /// World-space positions and species of every planned tree, for diagnostics and tests.
     pub fn instances(&self) -> Vec<(Species, Vec3)> {
         self.chunks.values().flatten().map(|i| (i.species, i.pos)).collect()

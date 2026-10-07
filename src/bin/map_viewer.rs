@@ -5,9 +5,9 @@ use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 use bevy::render::view::window::screenshot::{save_to_disk, Screenshot, ScreenshotCaptured};
-use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::pbr::{MeshMaterial3d};
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
+use fps_prototype::look::LookSettings;
 use fps_prototype::map::TerrainMap;
 use fps_prototype::params::GenParams;
 use fps_prototype::field_material::FieldMaterial;
@@ -90,11 +90,7 @@ fn main() {
         .insert_resource(TerrainMap::generate(seed, &GenParams::default()))
         .insert_resource(GenParams::default())
         .insert_non_send(ClipboardHandle(arboard::Clipboard::new().ok()))
-        .insert_resource(GlobalAmbientLight {
-            color: Color::WHITE,
-            brightness: 300.0,
-            ..default()
-        })
+        .insert_resource(LookSettings { shadows: false, ..default() })
         .add_systems(Startup, (setup_scene, setup_hud))
         .add_systems(
             Update,
@@ -123,26 +119,11 @@ fn auto_screenshot(
 
 fn setup_scene(mut commands: Commands) {
     commands.spawn((
-        DirectionalLight {
-            illuminance: 12_000.0,
-            ..default()
-        },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -1.0, 0.6, 0.0)),
-    ));
-    commands.spawn((
         Camera3d::default(),
         Projection::Perspective(PerspectiveProjection {
             far: 30_000.0,
             ..default()
         }),
-        DistanceFog {
-            color: Color::srgb(0.74, 0.82, 0.88),
-            falloff: FogFalloff::Linear {
-                start: 6000.0,
-                end: 30000.0,
-            },
-            ..default()
-        },
         Transform::default(),
     ));
 }
