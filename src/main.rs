@@ -1,11 +1,6 @@
 use bevy::prelude::*;
-use fps_prototype::target::TargetDummy;
 use fps_prototype::terrain::TerrainPlugin;
-use fps_prototype::map::TerrainMap;
 use fps_prototype::GamePlugin;
-
-#[derive(Component)]
-struct HudText;
 
 fn main() {
     App::new()
@@ -18,39 +13,10 @@ fn main() {
         }))
         .add_plugins((GamePlugin, TerrainPlugin))
         .add_systems(Startup, (setup_scene, setup_hud))
-        .add_systems(Update, update_hud)
         .run();
 }
 
-fn setup_scene(
-    mut commands: Commands,
-    map: Res<TerrainMap>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    let box_mesh = meshes.add(Cuboid::new(2.0, 2.0, 2.0));
-    let box_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.6, 0.6, 0.65),
-        ..default()
-    });
-    let positions = [
-        Vec3::new(5.0, 1.0, -5.0),
-        Vec3::new(-8.0, 1.0, 4.0),
-        Vec3::new(10.0, 1.0, 10.0),
-        Vec3::new(-4.0, 1.0, -12.0),
-        Vec3::new(0.0, 1.0, -20.0),
-    ];
-    let start = map.spawn_point();
-    for pos in positions {
-        let (x, z) = (start.x + pos.x, start.y + pos.z);
-        let ground = map.height_at(Vec2::new(x, z));
-        commands.spawn((
-            Mesh3d(box_mesh.clone()),
-            MeshMaterial3d(box_material.clone()),
-            Transform::from_xyz(x, ground + pos.y, z),
-        ));
-    }
-
+fn setup_scene(mut commands: Commands) {
     commands.spawn((
         DirectionalLight {
             illuminance: 10_000.0,
@@ -69,20 +35,6 @@ fn setup_scene(
 
 fn setup_hud(mut commands: Commands) {
     commands.spawn((
-        Text::new(""),
-        TextFont {
-            font_size: bevy::text::FontSize::Px(20.0),
-            ..default()
-        },
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(12.0),
-            top: Val::Px(12.0),
-            ..default()
-        },
-        HudText,
-    ));
-    commands.spawn((
         Node {
             position_type: PositionType::Absolute,
             left: Val::Percent(50.0),
@@ -94,18 +46,4 @@ fn setup_hud(mut commands: Commands) {
         },
         BackgroundColor(Color::WHITE),
     ));
-}
-
-fn update_hud(dummies: Query<&TargetDummy>, mut texts: Query<&mut Text, With<HudText>>) {
-    let Ok(mut text) = texts.single_mut() else {
-        return;
-    };
-    let Ok(dummy) = dummies.single() else {
-        return;
-    };
-    text.0 = if dummy.health <= 0.0 {
-        format!("Target down! Hits: {}", dummy.hits)
-    } else {
-        format!("Target HP: {:.0}   Hits: {}", dummy.health, dummy.hits)
-    };
 }

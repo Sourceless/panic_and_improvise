@@ -11,8 +11,8 @@ pub struct TargetPlugin;
 
 impl Plugin for TargetPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_dummy)
-            .add_systems(Update, update_dummy);
+        // The dummy isn't placed automatically; call `spawn_dummy` where one is wanted.
+        app.add_systems(Update, update_dummy);
     }
 }
 
