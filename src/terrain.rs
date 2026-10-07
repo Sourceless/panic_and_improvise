@@ -7,7 +7,9 @@ use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
 
 use crate::contour::{triangulate, Contour, Smoothing, OPEN};
-use crate::map::{grid_pos, TerrainMap, CELL};
+use crate::map::{grid_pos, PoiKind, TerrainMap, CELL};
+use crate::params::GenParams;
+use crate::zones::{Zone, ZoneMap};
 
 const WATER_LIFT: f32 = 0.05;
 const YARD_RADIUS: f32 = 10.0;
@@ -42,6 +44,21 @@ pub struct TerrainExtension {
     #[texture(104)]
     #[sampler(105)]
     pub stone: Handle<Image>,
+    #[texture(106)]
+    #[sampler(107)]
+    pub sand: Handle<Image>,
+    #[texture(108)]
+    #[sampler(109)]
+    pub gravel: Handle<Image>,
+    #[texture(110)]
+    #[sampler(111)]
+    pub litter: Handle<Image>,
+    #[texture(112)]
+    #[sampler(113)]
+    pub needles: Handle<Image>,
+    #[texture(114)]
+    #[sampler(115)]
+    pub mud: Handle<Image>,
 }
 
 impl MaterialExtension for TerrainExtension {
@@ -61,6 +78,10 @@ pub struct TerrainTextures {
     pub pasture: Handle<Image>,
     pub hedge: Handle<Image>,
     pub wood: Handle<Image>,
+    pub sand: Handle<Image>,
+    pub gravel: Handle<Image>,
+    pub litter: Handle<Image>,
+    pub needles: Handle<Image>,
 }
 
 pub fn load_textures(mut commands: Commands, asset_server: Res<AssetServer>, mut mips: ResMut<crate::mipmaps::MipQueue>) {
@@ -87,6 +108,10 @@ pub fn load_textures(mut commands: Commands, asset_server: Res<AssetServer>, mut
         pasture: load("textures/pbr/pasture.jpg"),
         hedge: load("textures/veg/hedge.jpg"),
         wood: load("textures/pbr/bark_conifer.jpg"),
+        sand: load("textures/pbr/sand.jpg"),
+        gravel: load("textures/pbr/gravel.jpg"),
+        litter: load("textures/pbr/forest_broadleaf.jpg"),
+        needles: load("textures/pbr/forest_conifer.jpg"),
     };
     mips.0.extend([
         textures.grass.clone(),
@@ -98,6 +123,10 @@ pub fn load_textures(mut commands: Commands, asset_server: Res<AssetServer>, mut
         textures.pasture.clone(),
         textures.hedge.clone(),
         textures.wood.clone(),
+        textures.sand.clone(),
+        textures.gravel.clone(),
+        textures.litter.clone(),
+        textures.needles.clone(),
     ]);
     commands.insert_resource(textures);
 }
@@ -109,7 +138,14 @@ fn spawn_world(
     mut meshes: ResMut<Assets<Mesh>>,
     mut standard: ResMut<Assets<StandardMaterial>>,
     mut terrain: ResMut<Assets<TerrainMaterial>>,
+    zones: Option<Res<ZoneMap>>,
 ) {
+    // Ground texture depends on land use, so the zone map is needed; apps that haven't built
+    // one (the game) get the default one.
+    let zones = match zones {
+        Some(z) => ZoneMapRef::Shared(z),
+        None => ZoneMapRef::Owned(ZoneMap::generate(&map, &GenParams::default())),
+    };
     spawn_terrain(
         &mut commands,
         &mut meshes,
@@ -117,7 +153,22 @@ fn spawn_world(
         &mut terrain,
         &textures,
         &map,
+        zones.get(),
     );
+}
+
+enum ZoneMapRef<'a> {
+    Shared(Res<'a, ZoneMap>),
+    Owned(ZoneMap),
+}
+
+impl ZoneMapRef<'_> {
+    fn get(&self) -> &ZoneMap {
+        match self {
+            ZoneMapRef::Shared(z) => z,
+            ZoneMapRef::Owned(z) => z,
+        }
+    }
 }
 
 pub fn spawn_terrain(
@@ -127,6 +178,7 @@ pub fn spawn_terrain(
     terrain: &mut Assets<TerrainMaterial>,
     textures: &TerrainTextures,
     map: &TerrainMap,
+    zones: &ZoneMap,
 ) {
     let ground = terrain.add(ExtendedMaterial {
         base: StandardMaterial {
@@ -138,11 +190,16 @@ pub fn spawn_terrain(
             grass: textures.grass.clone(),
             dirt: textures.dirt.clone(),
             stone: textures.stone.clone(),
+            sand: textures.sand.clone(),
+            gravel: textures.gravel.clone(),
+            litter: textures.litter.clone(),
+            needles: textures.needles.clone(),
+            mud: textures.soil_plough.clone(),
         },
     });
     commands.spawn((
         TerrainRoot,
-        Mesh3d(meshes.add(terrain_mesh(map))),
+        Mesh3d(meshes.add(terrain_mesh(map, zones))),
         MeshMaterial3d(ground),
     ));
 
@@ -159,16 +216,22 @@ pub fn spawn_terrain(
     crate::settlement::spawn_settlements(commands, meshes, standard, map);
 }
 
-fn terrain_mesh(map: &TerrainMap) -> Mesh {
+fn terrain_mesh(map: &TerrainMap, zones: &ZoneMap) -> Mesh {
     let n = map.grid_size();
     let mut positions = Vec::with_capacity(n * n);
-    let mut weights = Vec::with_capacity(n * n);
+    let mut weights_a = Vec::with_capacity(n * n);
+    let mut weights_b = Vec::with_capacity(n * n);
+    let mut weights_c = Vec::with_capacity(n * n);
     for iz in 0..n {
         for ix in 0..n {
             let p = grid_pos(ix, iz);
             let h = map.vertex_height(ix, iz);
             positions.push([p.x, h, p.y]);
-            weights.push(surface_weights(map, ix, iz, p));
+            // Eight blend weights spread over the vertex colour and two UV sets.
+            let w = surface_weights(map, zones, ix, iz, p);
+            weights_a.push([w[0], w[1], w[2], w[3]]);
+            weights_b.push([w[4], w[5]]);
+            weights_c.push([w[6], w[7]]);
         }
     }
 
@@ -183,25 +246,81 @@ fn terrain_mesh(map: &TerrainMap) -> Mesh {
 
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, weights)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, weights_a)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, weights_b)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_1, weights_c)
         .with_inserted_indices(Indices::U32(indices));
     mesh.compute_smooth_normals();
     mesh
 }
 
-// Blend weights for the terrain shader: r = grass, g = dirt, b = stone.
-fn surface_weights(map: &TerrainMap, ix: usize, iz: usize, p: Vec2) -> [f32; 4] {
+// Settlement ground: worn bare earth and gravel in the built-up core, fading to gardens and
+// grass toward the edge, relative to the size of the nearest settlement.
+fn urban_ground(map: &TerrainMap, p: Vec2) -> [f32; 8] {
+    let t = map
+        .pois
+        .iter()
+        .filter(|poi| poi.kind == PoiKind::Village)
+        .map(|poi| poi.position.distance(p) / poi.radius)
+        .fold(f32::MAX, f32::min);
+    let core = 1.0 - smoothstep(0.35, 1.1, t);
+    let (edge, centre) = ([0.85, 0.15, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.1, 0.4, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0]);
+    std::array::from_fn(|i| edge[i] + (centre[i] - edge[i]) * core)
+}
+
+// Blend weights for the terrain shader, normalised to sum to 1, in this order:
+// grass, dirt, stone, sand, gravel, leaf litter, needle litter, mud.
+fn surface_weights(map: &TerrainMap, zones: &ZoneMap, ix: usize, iz: usize, p: Vec2) -> [f32; 8] {
     let n = map.grid_size();
     let dx = map.vertex_height((ix + 1).min(n - 1), iz) - map.vertex_height(ix.saturating_sub(1), iz);
     let dz = map.vertex_height(ix, (iz + 1).min(n - 1)) - map.vertex_height(ix, iz.saturating_sub(1));
     let slope = ((dx * dx + dz * dz).sqrt() / (2.0 * CELL)).min(1.0);
 
+    // What the ground is like where nothing else overrides it, by land use.
+    let mut w = match zones.zone_at(ix, iz) {
+        Zone::Woodland => [0.15, 0.0, 0.0, 0.0, 0.0, 0.85, 0.0, 0.0],
+        Zone::Conifer => [0.10, 0.0, 0.0, 0.0, 0.0, 0.0, 0.90, 0.0],
+        Zone::Wetland => [0.55, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.45],
+        Zone::Urban => urban_ground(map, p),
+        Zone::Industrial => [0.0, 0.2, 0.0, 0.0, 0.8, 0.0, 0.0, 0.0],
+        Zone::Quarry => [0.0, 0.0, 0.5, 0.0, 0.5, 0.0, 0.0, 0.0],
+        Zone::Military => [0.75, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        Zone::Moorland => [0.6, 0.4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        _ => [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    };
+
+    // Steep ground sheds soil: bare rock on cliffs, loose scree on the slopes below.
     let stone = smoothstep(0.35, 0.7, slope);
-    let bank = 1.0 - smoothstep(CELL, CELL * 3.0, map.river_distance(p));
-    let yard = map.pois.iter().any(|poi| poi.position.distance(p) < YARD_RADIUS);
-    let dirt = (bank.max(if yard { 1.0 } else { 0.0 }) * (1.0 - stone)).clamp(0.0, 1.0);
-    let grass = (1.0 - dirt - stone).clamp(0.0, 1.0);
-    [grass, dirt, stone, 1.0]
+    let scree = smoothstep(0.2, 0.38, slope) * (1.0 - stone);
+    let soil = 1.0 - stone - scree;
+    for v in &mut w {
+        *v *= soil;
+    }
+    w[2] += stone;
+    w[4] += scree;
+
+    // Shores: sand on gentle banks, and wet mud right at the water's edge.
+    let water_d = map.water_distance(p);
+    let sand = (1.0 - smoothstep(3.0, 22.0, water_d)) * (1.0 - slope * 3.0).clamp(0.0, 1.0) * 0.9;
+    let mud = (1.0 - smoothstep(1.0, 9.0, water_d)) * 0.7;
+    // River banks (as before) turn to dirt rather than sand close to the channel.
+    let bank = (1.0 - smoothstep(CELL, CELL * 3.0, map.river_distance(p))) * (1.0 - stone);
+    for v in &mut w {
+        *v *= 1.0 - sand.max(mud);
+    }
+    w[3] += sand * (1.0 - mud);
+    w[7] += mud;
+    w[1] += bank * 0.5;
+
+    // Farmyards and settlement centres are bare earth.
+    if map.pois.iter().any(|poi| poi.position.distance(p) < YARD_RADIUS) {
+        w = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    }
+    let total: f32 = w.iter().sum();
+    if total <= 0.0 {
+        return [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    }
+    w.map(|v| v / total)
 }
 
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {

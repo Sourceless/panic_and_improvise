@@ -306,7 +306,7 @@ fn regenerate(
     let map = TerrainMap::generate(viewer.seed, &params);
     let zones = ZoneMap::generate(&map, &params);
     let roads = RoadNetwork::generate(&map, &params);
-    spawn_terrain(&mut commands, &mut meshes, &mut standard, &mut terrain, &textures, &map);
+    spawn_terrain(&mut commands, &mut meshes, &mut standard, &mut terrain, &textures, &map, &zones);
     spawn_roads(&mut commands, &mut meshes, &mut standard, &map, &roads);
     spawn_fill(&mut commands, &mut meshes, &mut standard, &mut fields, &textures, &map, &zones, &roads, &params);
     commands.insert_resource(zones);
