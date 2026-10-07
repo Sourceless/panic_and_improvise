@@ -901,7 +901,7 @@ pub fn spawn_vegetation(
             continue;
         }
         let entity = commands
-            .spawn((TerrainRoot, Mesh3d(meshes.add(buf.into_mesh(false))), MeshMaterial3d(material.clone())))
+            .spawn((TerrainRoot, bevy::light::NotShadowCaster, Mesh3d(meshes.add(buf.into_mesh(false))), MeshMaterial3d(material.clone())))
             .id();
         blob_entities.insert(*key, entity);
     }

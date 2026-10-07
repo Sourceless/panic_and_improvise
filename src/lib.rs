@@ -11,6 +11,7 @@ pub mod target;
 pub mod vegetation;
 pub mod terrain;
 pub mod weapon;
+pub mod world;
 pub mod zones;
 
 use bevy::prelude::*;

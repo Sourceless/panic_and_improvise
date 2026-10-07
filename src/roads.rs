@@ -330,3 +330,31 @@ fn idx_to_pos(map: &TerrainMap, idx: usize) -> Vec2 {
     let n = map.grid_size();
     grid_pos(idx % n, idx / n)
 }
+
+/// Spawns the road ribbons (major roads grey, farm tracks tan).
+pub fn spawn_roads(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    standard: &mut Assets<StandardMaterial>,
+    map: &TerrainMap,
+    roads: &RoadNetwork,
+) {
+    let major = standard.add(StandardMaterial {
+        base_color: Color::srgb(0.30, 0.29, 0.28),
+        perceptual_roughness: 0.95,
+        ..default()
+    });
+    let minor = standard.add(StandardMaterial {
+        base_color: Color::srgb(0.52, 0.42, 0.30),
+        perceptual_roughness: 1.0,
+        ..default()
+    });
+    for (kind, material) in [(RoadKind::Major, major), (RoadKind::Minor, minor)] {
+        commands.spawn((
+            crate::terrain::TerrainRoot,
+            bevy::light::NotShadowCaster,
+            Mesh3d(meshes.add(road_mesh(map, roads, kind))),
+            MeshMaterial3d(material),
+        ));
+    }
+}

@@ -11,11 +11,11 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use fps_prototype::map::TerrainMap;
 use fps_prototype::params::GenParams;
 use fps_prototype::field_material::FieldMaterial;
-use fps_prototype::fill::spawn_fill;
-use fps_prototype::roads::{road_mesh, RoadKind, RoadNetwork};
+use fps_prototype::world::build_world;
+use fps_prototype::roads::{RoadKind, RoadNetwork};
 use fps_prototype::zones::{overlay_mesh, ZoneMap};
 use fps_prototype::settlement::SettlementRoot;
-use fps_prototype::terrain::{spawn_terrain, TerrainMaterial, TerrainPlugin, TerrainRoot, TerrainTextures};
+use fps_prototype::terrain::{TerrainMaterial, TerrainPlugin, TerrainRoot, TerrainTextures};
 use fps_prototype::MAP_SEED;
 
 const MIN_DISTANCE: f32 = 300.0;
@@ -95,7 +95,7 @@ fn main() {
             brightness: 300.0,
             ..default()
         })
-        .add_systems(Startup, (setup_scene, setup_hud, build_zones, build_roads, build_fill).chain())
+        .add_systems(Startup, (setup_scene, setup_hud))
         .add_systems(
             Update,
             (handle_keys, copy_screenshot_key, orbit_input, regenerate, zone_overlay, update_camera, update_hud).chain(),
@@ -304,70 +304,8 @@ fn regenerate(
         commands.entity(entity).despawn();
     }
     let map = TerrainMap::generate(viewer.seed, &params);
-    let zones = ZoneMap::generate(&map, &params);
-    let roads = RoadNetwork::generate(&map, &params);
-    spawn_terrain(&mut commands, &mut meshes, &mut standard, &mut terrain, &textures, &map, &zones);
-    spawn_roads(&mut commands, &mut meshes, &mut standard, &map, &roads);
-    spawn_fill(&mut commands, &mut meshes, &mut standard, &mut fields, &textures, &map, &zones, &roads, &params);
-    commands.insert_resource(zones);
-    commands.insert_resource(roads);
+    build_world(&mut commands, &mut meshes, &mut standard, &mut terrain, &mut fields, &textures, &map, &params);
     commands.insert_resource(map);
-}
-
-fn build_zones(mut commands: Commands, map: Res<TerrainMap>, params: Res<GenParams>) {
-    commands.insert_resource(ZoneMap::generate(&map, &params));
-}
-
-fn build_fill(
-    mut commands: Commands,
-    map: Res<TerrainMap>,
-    zones: Res<ZoneMap>,
-    roads: Res<RoadNetwork>,
-    params: Res<GenParams>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut standard: ResMut<Assets<StandardMaterial>>,
-    mut fields: ResMut<Assets<FieldMaterial>>,
-    textures: Res<TerrainTextures>,
-) {
-    spawn_fill(&mut commands, &mut meshes, &mut standard, &mut fields, &textures, &map, &zones, &roads, &params);
-}
-
-fn build_roads(
-    mut commands: Commands,
-    map: Res<TerrainMap>,
-    params: Res<GenParams>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut standard: ResMut<Assets<StandardMaterial>>,
-) {
-    let roads = RoadNetwork::generate(&map, &params);
-    spawn_roads(&mut commands, &mut meshes, &mut standard, &map, &roads);
-    commands.insert_resource(roads);
-}
-
-fn spawn_roads(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    standard: &mut Assets<StandardMaterial>,
-    map: &TerrainMap,
-    roads: &RoadNetwork,
-) {
-    let major = standard.add(StandardMaterial {
-        base_color: Color::srgb(0.30, 0.29, 0.28),
-        perceptual_roughness: 0.95,
-        ..default()
-    });
-    let minor = standard.add(StandardMaterial {
-        base_color: Color::srgb(0.52, 0.42, 0.30),
-        perceptual_roughness: 1.0,
-        ..default()
-    });
-    for (kind, material) in [(RoadKind::Major, major), (RoadKind::Minor, minor)] {
-        commands.spawn((
-            TerrainRoot,
-            Mesh3d(meshes.add(road_mesh(map, roads, kind))),
-            MeshMaterial3d(material),
-        ));
-    }
 }
 
 fn zone_overlay(

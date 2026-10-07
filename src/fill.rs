@@ -491,6 +491,7 @@ fn spawn_field_colour(
         .with_inserted_indices(Indices::U32(indices));
     commands.spawn((
         TerrainRoot,
+        bevy::light::NotShadowCaster,
         Mesh3d(meshes.add(mesh)),
         MeshMaterial3d(materials.add(FieldMaterial {
             base: StandardMaterial {

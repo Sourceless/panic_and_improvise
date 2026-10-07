@@ -18,7 +18,7 @@ pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((
+        app.init_resource::<GenParams>().add_plugins((
             crate::mipmaps::MipmapPlugin,
             crate::vegetation::VegetationPlugin,
             MaterialPlugin::<TerrainMaterial>::default(),
@@ -134,41 +134,23 @@ pub fn load_textures(mut commands: Commands, asset_server: Res<AssetServer>, mut
 fn spawn_world(
     mut commands: Commands,
     map: Res<TerrainMap>,
+    params: Res<GenParams>,
     textures: Res<TerrainTextures>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut standard: ResMut<Assets<StandardMaterial>>,
     mut terrain: ResMut<Assets<TerrainMaterial>>,
-    zones: Option<Res<ZoneMap>>,
+    mut fields: ResMut<Assets<crate::field_material::FieldMaterial>>,
 ) {
-    // Ground texture depends on land use, so the zone map is needed; apps that haven't built
-    // one (the game) get the default one.
-    let zones = match zones {
-        Some(z) => ZoneMapRef::Shared(z),
-        None => ZoneMapRef::Owned(ZoneMap::generate(&map, &GenParams::default())),
-    };
-    spawn_terrain(
+    crate::world::build_world(
         &mut commands,
         &mut meshes,
         &mut standard,
         &mut terrain,
+        &mut fields,
         &textures,
         &map,
-        zones.get(),
+        &params,
     );
-}
-
-enum ZoneMapRef<'a> {
-    Shared(Res<'a, ZoneMap>),
-    Owned(ZoneMap),
-}
-
-impl ZoneMapRef<'_> {
-    fn get(&self) -> &ZoneMap {
-        match self {
-            ZoneMapRef::Shared(z) => z,
-            ZoneMapRef::Owned(z) => z,
-        }
-    }
 }
 
 pub fn spawn_terrain(
@@ -205,6 +187,7 @@ pub fn spawn_terrain(
 
     commands.spawn((
         TerrainRoot,
+        bevy::light::NotShadowCaster,
         Mesh3d(meshes.add(river_mesh(map))),
         MeshMaterial3d(standard.add(StandardMaterial {
             base_color: Color::srgb(0.18, 0.38, 0.62),
