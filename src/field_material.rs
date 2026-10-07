@@ -13,18 +13,13 @@ pub type FieldMaterial = ExtendedMaterial<StandardMaterial, FieldExtension>;
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 pub struct FieldExtension {
-    #[texture(100)]
+    /// The shared ground texture arrays (see ground_textures), colour and normal maps.
+    #[texture(100, dimension = "2d_array")]
     #[sampler(101)]
-    pub soil_plough: Handle<Image>,
-    #[texture(102)]
+    pub diffuse: Handle<Image>,
+    #[texture(102, dimension = "2d_array")]
     #[sampler(103)]
-    pub soil_loam: Handle<Image>,
-    #[texture(104)]
-    #[sampler(105)]
-    pub meadow: Handle<Image>,
-    #[texture(106)]
-    #[sampler(107)]
-    pub pasture: Handle<Image>,
+    pub normal: Handle<Image>,
 }
 
 impl MaterialExtension for FieldExtension {

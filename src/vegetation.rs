@@ -108,6 +108,14 @@ impl Species {
         }
     }
 
+    fn bark_normal(self) -> &'static str {
+        match self {
+            Species::Oak | Species::Beech | Species::Maple | Species::Apple => "textures/pbr/bark_oak_n.jpg",
+            Species::Birch => "textures/pbr/bark_birch_n.jpg",
+            _ => "textures/pbr/bark_conifer_n.jpg",
+        }
+    }
+
     fn leaves(self) -> &'static str {
         match self {
             Species::Oak => "textures/veg/cluster_beech.png",
@@ -695,10 +703,11 @@ fn build_vegetation_assets(
     mut materials: ResMut<Assets<WindMaterial>>,
     mut mips: ResMut<MipQueue>,
 ) {
-    let mut load = |path: &'static str, repeat: bool| {
+    let mut load = |path: &'static str, repeat: bool, srgb: bool| {
         let handle: Handle<Image> = asset_server
             .load_builder()
             .with_settings(move |settings: &mut ImageLoaderSettings| {
+                settings.is_srgb = srgb;
                 let mode = if repeat { ImageAddressMode::Repeat } else { ImageAddressMode::ClampToEdge };
                 settings.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
                     address_mode_u: mode,
@@ -719,10 +728,12 @@ fn build_vegetation_assets(
         let bark = barks
             .entry(sp.bark())
             .or_insert_with(|| {
-                let tex = load(sp.bark(), true);
+                let tex = load(sp.bark(), true, true);
+                let normal = load(sp.bark_normal(), true, false);
                 materials.add(WindMaterial {
                     base: StandardMaterial {
                         base_color_texture: Some(tex),
+                        normal_map_texture: Some(normal),
                         base_color: Color::srgb(0.75, 0.72, 0.68),
                         perceptual_roughness: 0.95,
                         ..default()
@@ -731,7 +742,7 @@ fn build_vegetation_assets(
                 })
             })
             .clone();
-        let leaf_tex = leaf_textures.entry(sp.leaves()).or_insert_with(|| load(sp.leaves(), false)).clone();
+        let leaf_tex = leaf_textures.entry(sp.leaves()).or_insert_with(|| load(sp.leaves(), false, true)).clone();
         let t = sp.leaf_tint();
         let leaves = [0.88_f32, 1.0, 1.12]
             .iter()
@@ -754,7 +765,11 @@ fn build_vegetation_assets(
         let variants = (0..VARIANTS)
             .map(|v| {
                 let g = grow(sp, v as u64 * 7919 + 13);
-                let trunk = (!g.trunk.pos.is_empty()).then(|| meshes.add(g.trunk.into_mesh(true)));
+                let trunk = (!g.trunk.pos.is_empty()).then(|| {
+                    // Tangents are what let the bark's normal map light correctly.
+                    let mesh = g.trunk.into_mesh(true);
+                    meshes.add(mesh.clone().with_generated_tangents().unwrap_or(mesh))
+                });
                 Variant { trunk, foliage: meshes.add(g.foliage.into_mesh(true)) }
             })
             .collect();

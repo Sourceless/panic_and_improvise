@@ -6,6 +6,8 @@ CC0 1.0 (public domain). They are 1K colour maps, converted to JPG; the foliage 
 
 | File | ambientCG asset |
 | --- | --- |
+| dirt.jpg | Ground106 |
+| stone.jpg | Rock062 |
 | soil_plough.jpg | Ground048 |
 | soil_loam.jpg | Ground103 |
 | meadow.jpg | Grass004 |
@@ -23,6 +25,11 @@ CC0 1.0 (public domain). They are 1K colour maps, converted to JPG; the foliage 
 | leaf_conifer.png | LeafSet019 |
 | leaf_lime.png | LeafSet023 |
 | blades.png | Foliage001 |
+
+## Normal maps
+
+Every ground layer and bark texture has a matching `<name>_n.jpg`: the OpenGL-convention
+normal map (the `NormalGL` map) from the same ambientCG asset as its colour map above.
 
 ## Derived textures
 

@@ -47,27 +47,48 @@ fn vnoise(p: vec2<f32>) -> f32 {
     );
 }
 
-// The slope of the water surface at a point: six travelling waves from different directions
-// and of different lengths, each with the speed deep-water physics gives it. Unlike a noise
-// field there is no lattice to show through as straight lines, and the slopes are exact. The
-// short waves fade out with distance, where they would be sub-pixel and sparkle as noise.
-fn wave_slope(p: vec2<f32>, t: f32, dist: f32) -> vec2<f32> {
-    // (direction x, direction z, wavelength in metres, slope amplitude)
+// The slope of the water surface at a point: a sum of ten travelling waves.
+//
+// A handful of sine waves of similar size line their crests up into a visible lattice, so these
+// are spread over a wide range of wavelengths (each about 1.45x the last, an irrational-ish
+// ratio), fan out around the wind direction, swell and fade slowly along their crests, and the
+// whole field is gently warped, so no regular pattern can form. Each wave has the speed deep-
+// water physics gives it. Unlike a noise field there is no lattice to show through either.
+//
+// `pixel` is how many metres of water one screen pixel covers here, which is huge at glancing
+// angles and near the horizon. A wave shorter than a few pixels can't be resolved and would
+// alias into moire stripes, so each wave fades out as its wavelength approaches the pixel size.
+fn wave_slope(p_in: vec2<f32>, t: f32, pixel: f32) -> vec2<f32> {
+    // (direction angle in radians, wavelength in metres, slope amplitude)
+    var waves = array<vec3<f32>, 10>(
+        vec3<f32>(0.30, 14.0, 0.15),
+        vec3<f32>(0.85, 9.7, 0.14),
+        vec3<f32>(-0.32, 6.7, 0.13),
+        vec3<f32>(1.45, 4.6, 0.11),
+        vec3<f32>(-0.75, 3.2, 0.10),
+        vec3<f32>(0.55, 2.2, 0.085),
+        vec3<f32>(-0.05, 1.5, 0.07),
+        vec3<f32>(1.15, 1.05, 0.06),
+        vec3<f32>(-0.50, 0.72, 0.05),
+        vec3<f32>(0.40, 0.50, 0.04),
+    );
+    // Warp the sampling position by a slow, large-scale swirl.
+    let p = p_in + 1.6 * vec2<f32>(sin(0.11 * p_in.y + 0.31 * t), sin(0.09 * p_in.x - 0.27 * t));
     var g = vec2<f32>(0.0);
-    g += wave(p, t, vec2<f32>(0.97, 0.26), 9.0, 0.17);
-    g += wave(p, t, vec2<f32>(-0.40, 0.92), 5.3, 0.14);
-    g += wave(p, t, vec2<f32>(0.60, -0.80), 3.1, 0.12) * (1.0 - smoothstep(120.0, 450.0, dist));
-    g += wave(p, t, vec2<f32>(-0.90, -0.43), 1.9, 0.10) * (1.0 - smoothstep(55.0, 190.0, dist));
-    g += wave(p, t, vec2<f32>(0.20, 0.98), 1.1, 0.08) * (1.0 - smoothstep(25.0, 95.0, dist));
-    g += wave(p, t, vec2<f32>(-0.75, 0.66), 0.65, 0.06) * (1.0 - smoothstep(12.0, 45.0, dist));
+    for (var i = 0; i < 10; i++) {
+        let w = waves[i];
+        let d = vec2<f32>(cos(w.x), sin(w.x));
+        let k = 6.2831853 / w.y;
+        let omega = sqrt(9.81 * k);
+        // A wave needs several pixels per wavelength to be sampled cleanly, or it aliases:
+        // full strength at 16+ pixels per wavelength, gone entirely by 5.
+        let resolved = smoothstep(0.0625, 0.2, pixel / w.y);
+        // Swells and fades slowly along its own crest.
+        let across = dot(vec2<f32>(-d.y, d.x), p);
+        let swell = 0.65 + 0.35 * sin(across * 0.05 * (1.0 + 0.3 * f32(i)) + f32(i) * 1.7 + t * 0.07);
+        g += d * w.z * swell * (1.0 - resolved) * cos(k * dot(d, p) - omega * t * 0.6 + f32(i) * 2.1);
+    }
     return g;
-}
-
-fn wave(p: vec2<f32>, t: f32, dir: vec2<f32>, wavelength: f32, slope: f32) -> vec2<f32> {
-    let d = normalize(dir);
-    let k = 6.2831853 / wavelength;
-    let omega = sqrt(9.81 * k);
-    return d * slope * cos(k * dot(d, p) - omega * t * 0.6);
 }
 
 @fragment
@@ -87,7 +108,9 @@ fn fragment(
     let dist = length(view.world_position - in.world_position.xyz);
     // Calmer with distance too, so the horizon reads as a smooth sheet of sky reflection.
     let steep = mix(0.5, 1.5, smoothstep(0.0, 4.0, depth)) * mix(1.0, 0.15, smoothstep(80.0, 2500.0, dist));
-    let g = wave_slope(p, t, dist);
+    // World metres per screen pixel, from how fast the position changes across the screen.
+    let pixel = max(length(dpdx(p)), length(dpdy(p)));
+    let g = wave_slope(p, t, pixel);
     let n = normalize(vec3<f32>(-g.x * steep, 1.0, -g.y * steep));
     pbr_input.N = n;
     pbr_input.world_normal = n;

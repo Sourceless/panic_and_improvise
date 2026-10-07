@@ -5,14 +5,16 @@
     mesh_view_bindings::view,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var soil_plough_tex: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(101) var soil_plough_smp: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(102) var soil_loam_tex: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(103) var soil_loam_smp: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(104) var meadow_tex: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(105) var meadow_smp: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(106) var pasture_tex: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(107) var pasture_smp: sampler;
+// The shared ground texture arrays; layer numbers must match ground_textures::layer.
+@group(#{MATERIAL_BIND_GROUP}) @binding(100) var ground_diffuse: texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(101) var ground_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(102) var ground_normal: texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(103) var normal_sampler: sampler;
+
+const GRASS: i32 = 0;
+const MUD: i32 = 7;
+const LOAM: i32 = 8;
+const MEADOW: i32 = 9;
 
 // Field kinds; must match fill::FieldKind.
 const PLOUGHED: i32 = 0;
@@ -80,10 +82,10 @@ fn fragment(
     // are replaced by their average appearance.
     let fine = 1.0 - smoothstep(35.0, 180.0, dist);
 
-    let soil_p = textureSample(soil_plough_tex, soil_plough_smp, wp / 3.0).rgb;
-    let soil_l = textureSample(soil_loam_tex, soil_loam_smp, wp / 3.0).rgb;
-    let meadow = textureSample(meadow_tex, meadow_smp, wp / 2.5).rgb;
-    let lush = textureSample(pasture_tex, pasture_smp, wp / 2.5).rgb;
+    let soil_p = textureSample(ground_diffuse, ground_sampler, wp / 3.0, MUD).rgb;
+    let soil_l = textureSample(ground_diffuse, ground_sampler, wp / 3.0, LOAM).rgb;
+    let meadow = textureSample(ground_diffuse, ground_sampler, wp / 2.5, MEADOW).rgb;
+    let lush = textureSample(ground_diffuse, ground_sampler, wp / 2.5, GRASS).rgb;
     let n_lo = fbm2(wp / 60.0);
     let n_mid = fbm2(wp / 11.0);
     let n_hi = vnoise(wp / 1.7);
@@ -92,11 +94,17 @@ fn fragment(
     let detail = clamp(luma(lush) / 0.22, 0.55, 1.7);
 
     var col = tint;
+    // Which layer's normal map to use for this kind of field, and how strongly.
+    var nlayer = GRASS;
+    var nstrength = 0.35;
     if kind == PLOUGHED {
+        nlayer = MUD;
+        nstrength = 1.0;
         let ridge = 0.5 + 0.5 * cos(TAU * rows.x / 0.8);
         let shade = mix(0.82, 0.55 + 0.7 * ridge, fine);
         col = soil_p * tint * shade * (0.85 + 0.3 * n_lo);
     } else if kind == WHEAT || kind == BARLEY {
+        nstrength = 0.3;
         // Tramlines: unsown tracks every 24 m, plus faint drill lines up close.
         let tram_mask = 1.0 - (1.0 - smoothstep(0.0, 0.03, abs(fract(rows.x / 24.0 + 0.5) - 0.5))) * 0.22;
         let drill = 1.0 - 0.10 * fine * smoothstep(0.4, 0.5, abs(fract(rows.x / 0.18) - 0.5));
@@ -105,6 +113,7 @@ fn fragment(
         let flowers = smoothstep(0.45, 0.75, n_mid + 0.25 * n_hi);
         col = mix(tint * 0.78, tint * 1.08, flowers) * (0.92 + 0.16 * n_lo);
     } else if kind == ROW_CROP || kind == MAIZE {
+        nlayer = LOAM;
         let spacing = select(0.9, 0.75, kind == MAIZE);
         let ridge = 0.5 + 0.5 * cos(TAU * rows.x / spacing);
         let cover_rows = smoothstep(0.15, 0.7, ridge);
@@ -112,22 +121,39 @@ fn fragment(
         let cover = mix(avg_cover, cover_rows, fine);
         let soil = soil_l * 0.55;
         col = mix(soil, tint * detail * (0.85 + 0.3 * n_mid), cover);
+        nstrength = 0.9 * (1.0 - 0.6 * cover);
     } else if kind == STUBBLE {
+        nlayer = LOAM;
+        nstrength = 0.7;
         let lines = 1.0 - 0.15 * fine * smoothstep(0.35, 0.5, abs(fract(rows.x / 0.25) - 0.5));
         col = mix(soil_l * 0.9, tint * detail, 0.62) * lines * (0.88 + 0.24 * n_lo);
     } else if kind == LEGUME {
         col = tint * detail * (0.85 + 0.3 * n_mid) * (0.94 + 0.12 * n_lo);
     } else if kind == HAY {
+        nlayer = MEADOW;
+        nstrength = 0.7;
         // Mown stripes: alternating bands across the field.
         let band = select(0.92, 1.08, fract(rows.x / 9.0) > 0.5);
         col = meadow * tint * band * (0.9 + 0.2 * n_lo) * 1.9;
     } else if kind == PASTURE {
+        nstrength = 0.8;
         col = lush * tint * (0.88 + 0.24 * n_mid) * (0.92 + 0.16 * n_lo) * 1.7;
     } else {
+        nlayer = MEADOW;
+        nstrength = 0.9;
         // Rough grazing: dry tussocky grass with patches of bare ground.
         let bare = smoothstep(0.62, 0.8, n_mid + 0.2 * n_hi);
         col = mix(meadow * tint * 2.0, soil_l * 0.8, bare * 0.5) * (0.85 + 0.3 * n_lo);
     }
+
+    // The normal map, tilting the smooth surface normal; faded out with distance, where it would
+    // only shimmer.
+    let tilt = textureSample(ground_normal, normal_sampler, wp / 3.0, nlayer).xy * 2.0 - 1.0;
+    let n0 = normalize(pbr_input.N);
+    let tangent = normalize(vec3<f32>(1.0, 0.0, 0.0) - n0 * n0.x);
+    let bitangent = normalize(vec3<f32>(0.0, 0.0, -1.0) + n0 * n0.z);
+    let n_fade = 1.0 - smoothstep(35.0, 180.0, dist);
+    pbr_input.N = normalize(n0 + (tangent * tilt.x + bitangent * tilt.y) * nstrength * n_fade);
 
     pbr_input.material.base_color = vec4<f32>(col, 1.0);
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);

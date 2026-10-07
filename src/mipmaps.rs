@@ -51,7 +51,7 @@ fn from_linear(f: f32, srgb: bool) -> u8 {
 }
 
 // Returns all mip levels concatenated (largest first) and how many there are.
-fn build_chain(base: &[u8], width: usize, height: usize, srgb: bool) -> (Vec<u8>, u32) {
+pub(crate) fn build_chain(base: &[u8], width: usize, height: usize, srgb: bool) -> (Vec<u8>, u32) {
     let mut data = base.to_vec();
     let mut levels = 1;
     let (mut w, mut h) = (width, height);

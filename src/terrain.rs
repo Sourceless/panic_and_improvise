@@ -22,6 +22,7 @@ impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GenParams>().add_plugins((
             crate::mipmaps::MipmapPlugin,
+            crate::ground_textures::GroundTexturesPlugin,
             crate::vegetation::VegetationPlugin,
             crate::perf::PerfPlugin,
             crate::look::LookPlugin,
@@ -42,30 +43,14 @@ pub type TerrainMaterial = ExtendedMaterial<StandardMaterial, TerrainExtension>;
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 pub struct TerrainExtension {
-    #[texture(100)]
+    /// Colour of every kind of ground, one array layer each (see ground_textures::LAYERS).
+    #[texture(100, dimension = "2d_array")]
     #[sampler(101)]
-    pub grass: Handle<Image>,
-    #[texture(102)]
+    pub diffuse: Handle<Image>,
+    /// Matching normal maps.
+    #[texture(102, dimension = "2d_array")]
     #[sampler(103)]
-    pub dirt: Handle<Image>,
-    #[texture(104)]
-    #[sampler(105)]
-    pub stone: Handle<Image>,
-    #[texture(106)]
-    #[sampler(107)]
-    pub sand: Handle<Image>,
-    #[texture(108)]
-    #[sampler(109)]
-    pub gravel: Handle<Image>,
-    #[texture(110)]
-    #[sampler(111)]
-    pub litter: Handle<Image>,
-    #[texture(112)]
-    #[sampler(113)]
-    pub needles: Handle<Image>,
-    #[texture(114)]
-    #[sampler(115)]
-    pub mud: Handle<Image>,
+    pub normal: Handle<Image>,
 }
 
 impl MaterialExtension for TerrainExtension {
@@ -76,22 +61,20 @@ impl MaterialExtension for TerrainExtension {
 
 #[derive(Resource, Clone)]
 pub struct TerrainTextures {
-    pub grass: Handle<Image>,
-    pub dirt: Handle<Image>,
-    pub stone: Handle<Image>,
-    pub soil_plough: Handle<Image>,
-    pub soil_loam: Handle<Image>,
-    pub meadow: Handle<Image>,
-    pub pasture: Handle<Image>,
+    /// The ground layers, shared by the terrain and field shaders.
+    pub ground: crate::ground_textures::GroundArrays,
     pub hedge: Handle<Image>,
     pub wood: Handle<Image>,
-    pub sand: Handle<Image>,
-    pub gravel: Handle<Image>,
-    pub litter: Handle<Image>,
-    pub needles: Handle<Image>,
+    /// Weathered stone for field walls.
+    pub wall_stone: Handle<Image>,
 }
 
-pub fn load_textures(mut commands: Commands, asset_server: Res<AssetServer>, mut mips: ResMut<crate::mipmaps::MipQueue>) {
+pub fn load_textures(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut mips: ResMut<crate::mipmaps::MipQueue>,
+    mut images: ResMut<Assets<Image>>,
+) {
     let load = |path: &'static str| {
         asset_server
             .load_builder()
@@ -105,36 +88,14 @@ pub fn load_textures(mut commands: Commands, asset_server: Res<AssetServer>, mut
             })
             .load(path)
     };
+    let ground = crate::ground_textures::start_loading(&mut commands, &asset_server, &mut images);
     let textures = TerrainTextures {
-        grass: load("textures/grass_diffuse.jpg"),
-        dirt: load("textures/dirt_diffuse.jpg"),
-        stone: load("textures/stone_diffuse.jpg"),
-        soil_plough: load("textures/pbr/soil_plough.jpg"),
-        soil_loam: load("textures/pbr/soil_loam.jpg"),
-        meadow: load("textures/pbr/meadow.jpg"),
-        pasture: load("textures/pbr/pasture.jpg"),
+        ground,
         hedge: load("textures/veg/hedge.jpg"),
         wood: load("textures/pbr/bark_conifer.jpg"),
-        sand: load("textures/pbr/sand.jpg"),
-        gravel: load("textures/pbr/gravel.jpg"),
-        litter: load("textures/pbr/forest_broadleaf.jpg"),
-        needles: load("textures/pbr/forest_conifer.jpg"),
+        wall_stone: load("textures/stone_diffuse.jpg"),
     };
-    mips.0.extend([
-        textures.grass.clone(),
-        textures.dirt.clone(),
-        textures.stone.clone(),
-        textures.soil_plough.clone(),
-        textures.soil_loam.clone(),
-        textures.meadow.clone(),
-        textures.pasture.clone(),
-        textures.hedge.clone(),
-        textures.wood.clone(),
-        textures.sand.clone(),
-        textures.gravel.clone(),
-        textures.litter.clone(),
-        textures.needles.clone(),
-    ]);
+    mips.0.extend([textures.hedge.clone(), textures.wood.clone(), textures.wall_stone.clone()]);
     commands.insert_resource(textures);
 }
 
@@ -182,14 +143,8 @@ pub fn spawn_terrain(
             ..default()
         },
         extension: TerrainExtension {
-            grass: textures.grass.clone(),
-            dirt: textures.dirt.clone(),
-            stone: textures.stone.clone(),
-            sand: textures.sand.clone(),
-            gravel: textures.gravel.clone(),
-            litter: textures.litter.clone(),
-            needles: textures.needles.clone(),
-            mud: textures.soil_plough.clone(),
+            diffuse: textures.ground.diffuse.clone(),
+            normal: textures.ground.normal.clone(),
         },
     });
     let tiles = (map.grid_size() - 1).div_ceil(TILE_CELLS);

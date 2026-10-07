@@ -2,6 +2,7 @@ pub mod contour;
 pub mod field_material;
 pub mod fill;
 pub mod grass;
+pub mod ground_textures;
 pub mod look;
 pub mod map;
 pub mod mipmaps;

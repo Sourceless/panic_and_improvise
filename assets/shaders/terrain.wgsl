@@ -2,29 +2,23 @@
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
     forward_io::{VertexOutput, FragmentOutput},
+    mesh_view_bindings::view,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var grass_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(101) var grass_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(102) var dirt_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(103) var dirt_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(104) var stone_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(105) var stone_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(106) var sand_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(107) var sand_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(108) var gravel_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(109) var gravel_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(110) var litter_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(111) var litter_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(112) var needles_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(113) var needles_sampler: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(114) var mud_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(115) var mud_sampler: sampler;
+// Every kind of ground is one layer of these two arrays (colour, normal map). The layer
+// numbers must match ground_textures::layer, and the weights arriving per vertex are in the
+// same order: grass, dirt, stone, sand, gravel, leaf litter, needle litter, mud.
+@group(#{MATERIAL_BIND_GROUP}) @binding(100) var ground_diffuse: texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(101) var ground_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(102) var ground_normal: texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(103) var normal_sampler: sampler;
 
 const TILE_METRES: f32 = 6.0;
 const GRASS_TINT: vec3<f32> = vec3<f32>(0.75, 1.2, 0.55);
 const CONTOUR_SPACING: f32 = 5.0;
 const CONTOUR_HALF_WIDTH: f32 = 0.12;
+// How strongly each layer's normal map tilts the surface, relative to the map as authored.
+const NORMAL_STRENGTH: f32 = 0.9;
 
 fn hash21(p: vec2<f32>) -> f32 {
     var q = fract(p * vec2<f32>(123.34, 456.21));
@@ -43,12 +37,18 @@ fn vnoise(p: vec2<f32>) -> f32 {
     );
 }
 
-// A texture sampled twice at unrelated scales and blended by noise, which hides the repeat
+// A layer sampled twice at unrelated scales and blended by noise, which hides the repeat
 // that a single tiling would show across a large area.
-fn untiled(tex: texture_2d<f32>, smp: sampler, wp: vec2<f32>, mixer: f32) -> vec3<f32> {
-    let a = textureSample(tex, smp, wp / TILE_METRES).rgb;
-    let b = textureSample(tex, smp, wp / (TILE_METRES * 2.37) + vec2<f32>(0.37, 0.71)).rgb;
+fn untiled(layer: i32, wp: vec2<f32>, mixer: f32) -> vec3<f32> {
+    let a = textureSample(ground_diffuse, ground_sampler, wp / TILE_METRES, layer).rgb;
+    let b = textureSample(ground_diffuse, ground_sampler, wp / (TILE_METRES * 2.37) + vec2<f32>(0.37, 0.71), layer).rgb;
     return mix(a, b, mixer);
+}
+
+// The tilt (x, y) a layer's normal map gives the surface. Green is "up" in the image, which
+// for ground texture coordinates (u = world x, v = world z) is toward -z.
+fn tilt(layer: i32, wp: vec2<f32>) -> vec2<f32> {
+    return textureSample(ground_normal, normal_sampler, wp / TILE_METRES, layer).xy * 2.0 - 1.0;
 }
 
 @fragment
@@ -60,15 +60,6 @@ fn fragment(
 
     let wp = in.world_position.xz;
     let mixer = 0.25 + 0.5 * vnoise(wp / 37.0);
-
-    let grass = untiled(grass_texture, grass_sampler, wp, mixer) * GRASS_TINT;
-    let dirt = untiled(dirt_texture, dirt_sampler, wp, mixer);
-    let stone = untiled(stone_texture, stone_sampler, wp, mixer);
-    let sand = untiled(sand_texture, sand_sampler, wp, mixer);
-    let gravel = untiled(gravel_texture, gravel_sampler, wp, mixer);
-    let litter = untiled(litter_texture, litter_sampler, wp, mixer);
-    let needles = untiled(needles_texture, needles_sampler, wp, mixer);
-    let mud = untiled(mud_texture, mud_sampler, wp, mixer) * 0.75;
 
 #ifdef VERTEX_COLORS
     let wa = in.color;
@@ -85,8 +76,36 @@ fn fragment(
 #else
     let wc = vec2<f32>(0.0);
 #endif
-    var color = grass * wa.r + dirt * wa.g + stone * wa.b + sand * wa.a
-        + gravel * wb.x + litter * wb.y + needles * wc.x + mud * wc.y;
+    // Weights in layer order.
+    let w = array<f32, 8>(wa.r, wa.g, wa.b, wa.a, wb.x, wb.y, wc.x, wc.y);
+
+    var color = untiled(0, wp, mixer) * GRASS_TINT * w[0]
+        + untiled(1, wp, mixer) * w[1]
+        + untiled(2, wp, mixer) * w[2]
+        + untiled(3, wp, mixer) * w[3]
+        + untiled(4, wp, mixer) * w[4]
+        + untiled(5, wp, mixer) * w[5]
+        + untiled(6, wp, mixer) * w[6]
+        + untiled(7, wp, mixer) * 0.75 * w[7];
+
+    // Normal maps, blended by the same weights, tilting the (smooth) terrain normal. Gentler on
+    // grass and sand, stronger on rock and gravel, and faded out with distance, where it would
+    // only shimmer.
+    var t = tilt(0, wp) * (0.5 * w[0])
+        + tilt(1, wp) * (1.0 * w[1])
+        + tilt(2, wp) * (1.2 * w[2])
+        + tilt(3, wp) * (0.7 * w[3])
+        + tilt(4, wp) * (1.2 * w[4])
+        + tilt(5, wp) * (1.0 * w[5])
+        + tilt(6, wp) * (1.0 * w[6])
+        + tilt(7, wp) * (1.0 * w[7]);
+    let dist = length(view.world_position - in.world_position.xyz);
+    let fade = 1.0 - smoothstep(40.0, 220.0, dist);
+    let n0 = normalize(pbr_input.N);
+    let tangent = normalize(vec3<f32>(1.0, 0.0, 0.0) - n0 * n0.x);
+    let bitangent = normalize(vec3<f32>(0.0, 0.0, -1.0) + n0 * n0.z);
+    let n = normalize(n0 + (tangent * t.x + bitangent * t.y) * fade * NORMAL_STRENGTH);
+    pbr_input.N = n;
 
     // Broad patchiness so no large area is a uniform tone.
     let macro_tone = 0.84 + 0.32 * (0.6 * vnoise(wp / 95.0) + 0.4 * vnoise(wp / 23.0));

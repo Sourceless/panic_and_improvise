@@ -496,10 +496,8 @@ fn spawn_field_colour(
             ..default()
         },
         extension: FieldExtension {
-            soil_plough: textures.soil_plough.clone(),
-            soil_loam: textures.soil_loam.clone(),
-            meadow: textures.meadow.clone(),
-            pasture: textures.pasture.clone(),
+            diffuse: textures.ground.diffuse.clone(),
+            normal: textures.ground.normal.clone(),
         },
     });
     for buf in tiles.into_values() {
@@ -728,7 +726,7 @@ fn spawn_field_boundaries(
     };
     let materials_by_kind = [
         materials.add(textured(&textures.hedge, Color::srgb(0.55, 0.62, 0.45), 0.95)),
-        materials.add(textured(&textures.stone, Color::srgb(0.95, 0.93, 0.88), 0.95)),
+        materials.add(textured(&textures.wall_stone, Color::srgb(0.95, 0.93, 0.88), 0.95)),
         materials.add(textured(&textures.wood, Color::srgb(0.85, 0.78, 0.7), 0.9)),
     ];
     for ((_, _, kind), buf) in tiles {
