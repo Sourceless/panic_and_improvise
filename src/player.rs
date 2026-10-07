@@ -35,10 +35,12 @@ pub struct FpsCamera {
     pitch: f32,
 }
 
-pub fn spawn_player(mut commands: Commands) {
+pub fn spawn_player(mut commands: Commands, map: Res<TerrainMap>) {
+    let start = map.spawn_point();
+    let eye = Vec3::new(start.x, map.height_at(start) + EYE_HEIGHT, start.y);
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(0.0, 1.8, 0.0).looking_at(Vec3::new(0.0, 1.8, -1.0), Vec3::Y),
+        Transform::from_translation(eye).looking_at(eye - Vec3::Z, Vec3::Y),
         FpsCamera { yaw: 0.0, pitch: 0.0 },
     ));
 }

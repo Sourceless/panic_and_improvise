@@ -47,16 +47,18 @@ pub fn spawn_dummy(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let eye_ground = map.height_at(Vec2::ZERO);
+    // Placed ahead of the player's starting point, on ground at a similar height.
+    let start = map.spawn_point();
+    let eye_ground = map.height_at(start);
     let z = (-10..=-40)
         .map(|z| -(z as f32))
         .min_by(|&a, &b| {
-            (map.height_at(Vec2::new(0.0, a)) - eye_ground)
+            (map.height_at(start + Vec2::new(0.0, a)) - eye_ground)
                 .abs()
-                .total_cmp(&(map.height_at(Vec2::new(0.0, b)) - eye_ground).abs())
+                .total_cmp(&(map.height_at(start + Vec2::new(0.0, b)) - eye_ground).abs())
         })
         .unwrap_or(-15.0);
-    let position = Vec3::new(0.0, map.height_at(Vec2::new(0.0, z)), z);
+    let position = Vec3::new(start.x, map.height_at(start + Vec2::new(0.0, z)), start.y + z);
     let material = materials.add(StandardMaterial {
         base_color: Color::srgb(0.85, 0.75, 0.6),
         ..default()

@@ -206,6 +206,16 @@ impl TerrainMap {
             .fold((f32::MAX, f32::MIN), |(lo, hi), &h| (lo.min(h), hi.max(h)))
     }
 
+    /// Where the player starts: the top of the tallest peak, or the origin on a flat map.
+    pub fn spawn_point(&self) -> Vec2 {
+        let (lo, hi) = self.height_range();
+        if hi - lo < 1e-3 {
+            return Vec2::ZERO;
+        }
+        let top = self.heights.iter().enumerate().fold((0, f32::MIN), |best, (i, &h)| if h > best.1 { (i, h) } else { best });
+        grid_pos(top.0 % VERTS, top.0 / VERTS)
+    }
+
     pub fn grid_size(&self) -> usize {
         VERTS
     }

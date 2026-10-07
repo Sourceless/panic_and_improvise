@@ -335,9 +335,36 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 fn river_mesh(map: &TerrainMap) -> Mesh {
     const WATER: u32 = 0;
     let n = map.grid_size();
-    let labels: Vec<u32> = (0..n * n)
-        .map(|i| if map.water_level(i % n, i / n).is_some() { WATER } else { OPEN })
+    // The surface is built on the wet vertices grown by one cell. The terrain crosses the water
+    // level somewhere between the last wet vertex and the first dry one, which on a gentle
+    // shore is often well past the midpoint a plain contour would stop at, leaving a strip of
+    // submerged bed showing. Water that overshoots into the bank is simply hidden by the
+    // terrain; dilated vertices take the average level of the wet cells around them.
+    let wet = |x: usize, z: usize| map.water_level(x, z);
+    let levels_grid: Vec<Option<f32>> = (0..n * n)
+        .map(|i| {
+            let (x, z) = (i % n, i / n);
+            if let Some(level) = wet(x, z) {
+                return Some(level);
+            }
+            let mut sum = 0.0;
+            let mut count = 0;
+            for dz in -1..=1isize {
+                for dx in -1..=1isize {
+                    let (nx, nz) = (x as isize + dx, z as isize + dz);
+                    if nx < 0 || nz < 0 || nx >= n as isize || nz >= n as isize {
+                        continue;
+                    }
+                    if let Some(level) = wet(nx as usize, nz as usize) {
+                        sum += level;
+                        count += 1;
+                    }
+                }
+            }
+            (count > 0).then(|| sum / count as f32)
+        })
         .collect();
+    let labels: Vec<u32> = levels_grid.iter().map(|l| if l.is_some() { WATER } else { OPEN }).collect();
     let contour = Contour::build(n, &labels, map.seed ^ 0x77A7, Some(WATER), Smoothing::WATER);
 
     let mut positions: Vec<[f32; 3]> = Vec::new();
@@ -345,7 +372,7 @@ fn river_mesh(map: &TerrainMap) -> Mesh {
     for iz in 0..n - 1 {
         for ix in 0..n - 1 {
             let corners = [(ix, iz), (ix + 1, iz), (ix + 1, iz + 1), (ix, iz + 1)];
-            let levels = corners.map(|(x, z)| map.water_level(x, z));
+            let levels = corners.map(|(x, z)| levels_grid[z * n + x]);
             let wet: Vec<f32> = levels.iter().flatten().copied().collect();
             if wet.is_empty() {
                 continue;

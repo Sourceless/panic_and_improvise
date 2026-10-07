@@ -40,12 +40,14 @@ fn setup_scene(
         Vec3::new(-4.0, 1.0, -12.0),
         Vec3::new(0.0, 1.0, -20.0),
     ];
+    let start = map.spawn_point();
     for pos in positions {
-        let ground = map.height_at(Vec2::new(pos.x, pos.z));
+        let (x, z) = (start.x + pos.x, start.y + pos.z);
+        let ground = map.height_at(Vec2::new(x, z));
         commands.spawn((
             Mesh3d(box_mesh.clone()),
             MeshMaterial3d(box_material.clone()),
-            Transform::from_xyz(pos.x, ground + pos.y, pos.z),
+            Transform::from_xyz(x, ground + pos.y, z),
         ));
     }
 
