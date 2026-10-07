@@ -419,8 +419,9 @@ fn orbit_input(
     }
 }
 
-fn update_camera(viewer: Res<Viewer>, mut cameras: Query<&mut Transform, With<Camera3d>>) {
-    let orbit_target = Vec3::new(viewer.target.x, 0.0, viewer.target.y);
+fn update_camera(viewer: Res<Viewer>, map: Res<TerrainMap>, mut cameras: Query<&mut Transform, With<Camera3d>>) {
+    // Orbit around the ground at the target, so close-up views don't end up underground.
+    let orbit_target = Vec3::new(viewer.target.x, map.height_at(viewer.target).max(0.0), viewer.target.y);
     let Ok(mut transform) = cameras.single_mut() else {
         return;
     };

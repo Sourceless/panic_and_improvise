@@ -14,7 +14,6 @@ use crate::roads::RoadNetwork;
 use crate::terrain::{TerrainRoot, TerrainTextures};
 use crate::zones::{Zone, ZoneMap};
 
-const TREE_SPACING: f32 = 16.0;
 const FIELD_LIFT: f32 = 0.15;
 const SHED_SPACING: f32 = 60.0;
 
@@ -29,8 +28,8 @@ pub fn spawn_fill(
     roads: &RoadNetwork,
     params: &GenParams,
 ) {
-    spawn_trees(commands, meshes, materials, map, zones);
-    spawn_field_tiling(commands, meshes, materials, field_materials, textures, map, zones, roads, params);
+    let hedge_points = spawn_field_tiling(commands, meshes, materials, field_materials, textures, map, zones, roads, params);
+    crate::vegetation::spawn_vegetation(commands, meshes, materials, map, zones, &hedge_points);
     spawn_sheds(commands, meshes, materials, map, zones);
 }
 
@@ -61,7 +60,7 @@ fn spawn_field_tiling(
     zones: &ZoneMap,
     roads: &RoadNetwork,
     params: &GenParams,
-) {
+) -> Vec<Vec2> {
     let n = map.grid_size();
     let farms: Vec<Vec2> = map
         .pois
@@ -95,7 +94,7 @@ fn spawn_field_tiling(
 
     let seeds = scatter_seeds(map, &is_farmland, params);
     if seeds.is_empty() {
-        return;
+        return Vec::new();
     }
     let owner = smooth_owners(map, &is_farmland, claim_regions(map, &is_farmland, &seeds, params), SMOOTH_PASSES);
     // A field can end up split into pieces that aren't actually touching - most often
@@ -110,7 +109,8 @@ fn spawn_field_tiling(
     let labels: Vec<u32> = owner.iter().map(|o| o.unwrap_or(OPEN)).collect();
     let contour = Contour::build(n, &labels, map.seed, None, Smoothing::FIELD);
     spawn_field_colour(commands, meshes, field_materials, textures, map, &labels, &contour, &styles);
-    spawn_field_boundaries(commands, meshes, materials, map, &contour);
+    spawn_field_boundaries(commands, meshes, materials, textures, map, &contour);
+    hedge_tree_points(&contour)
 }
 
 fn scatter_seeds(map: &TerrainMap, is_farmland: &[bool], params: &GenParams) -> Vec<usize> {
@@ -603,60 +603,87 @@ fn merge_tiny_fields(map: &TerrainMap, owner: &mut [Option<u32>]) {
     }
 }
 
+// Spots along hedgerows (the first of the three boundary kinds) where an occasional full-size
+// tree stands, roughly one per 40 m of hedge.
+fn hedge_tree_points(contour: &Contour) -> Vec<Vec2> {
+    contour
+        .segs
+        .iter()
+        .filter(|s| pair_hash(s.pair.0, s.pair.1) % 3 == 0)
+        .filter(|s| {
+            let m = (s.a + s.b) * 0.5;
+            field_hash(m, 60) < 0.16
+        })
+        .map(|s| (s.a + s.b) * 0.5)
+        .collect()
+}
+
+// Boundary geometry accumulates into one of these per kind, with UVs for the wall textures.
+#[derive(Default)]
+struct WallBuf {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+}
+
+impl WallBuf {
+    fn quad(&mut self, corners: [Vec3; 4], normal: Vec3, uvs: [[f32; 2]; 4]) {
+        let base = self.positions.len() as u32;
+        for (c, uv) in corners.iter().zip(uvs) {
+            self.positions.push(c.to_array());
+            self.normals.push(normal.to_array());
+            self.uvs.push(uv);
+        }
+        self.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    fn into_mesh(self) -> Mesh {
+        Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+            .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs)
+            .with_inserted_indices(Indices::U32(self.indices))
+    }
+}
+
 fn spawn_field_boundaries(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    textures: &TerrainTextures,
     map: &TerrainMap,
     contour: &Contour,
 ) {
-    let segs = &contour.segs;
-
-    let specs = [
-        (leaf_material([0.18, 0.38, 0.16]), 1.6, 1.9),
-        (
-            StandardMaterial {
-                base_color: Color::srgb(0.66, 0.64, 0.6),
-                ..default()
-            },
-            0.6,
-            1.1,
-        ),
-        (
-            StandardMaterial {
-                base_color: Color::srgb(0.42, 0.30, 0.18),
-                ..default()
-            },
-            0.18,
-            1.2,
-        ),
-    ];
-    let mut buckets: [Vec<&crate::contour::Seg>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-    for seg in segs {
-        buckets[pair_hash(seg.pair.0, seg.pair.1) as usize % 3].push(seg);
+    // Each segment is already short (at most one grid cell across), and pins to the true
+    // ground height at both of its own endpoints - the same trick road_mesh uses for its
+    // ribbons - so it follows the terrain tightly without needing any further subdivision.
+    let mut hedges = WallBuf::default();
+    let mut walls = WallBuf::default();
+    let mut fences = WallBuf::default();
+    for seg in &contour.segs {
+        let (ga, gb) = (map.height_at(seg.a), map.height_at(seg.b));
+        match pair_hash(seg.pair.0, seg.pair.1) % 3 {
+            0 => push_hedge_segment(&mut hedges, map, seg.a, ga, seg.b, gb),
+            1 => push_box_segment(&mut walls, seg.a, ga, seg.b, gb, 0.6, 0.0, 1.1, 1.6),
+            _ => push_fence_segment(&mut fences, seg.a, ga, seg.b, gb),
+        }
     }
-    for (bucket, (material, thickness, height)) in buckets.into_iter().zip(specs) {
-        if bucket.is_empty() {
+    let textured = |tex: &Handle<Image>, tint: Color, roughness: f32| StandardMaterial {
+        base_color_texture: Some(tex.clone()),
+        base_color: tint,
+        perceptual_roughness: roughness,
+        ..default()
+    };
+    for (buf, material) in [
+        (hedges, textured(&textures.hedge, Color::srgb(0.55, 0.62, 0.45), 0.95)),
+        (walls, textured(&textures.stone, Color::srgb(0.95, 0.93, 0.88), 0.95)),
+        (fences, textured(&textures.wood, Color::srgb(0.85, 0.78, 0.7), 0.9)),
+    ] {
+        if buf.positions.is_empty() {
             continue;
         }
-        let mat = materials.add(material);
-        let mut positions = Vec::new();
-        let mut normals = Vec::new();
-        let mut indices = Vec::new();
-        for seg in bucket {
-            // Each segment is already short (at most one grid cell across), and pins to the
-            // true ground height at both of its own endpoints - the same trick road_mesh
-            // uses for its ribbons - so it follows the terrain tightly without needing any
-            // further subdivision.
-            let ground_a = map.height_at(seg.a);
-            let ground_b = map.height_at(seg.b);
-            push_wall_segment(&mut positions, &mut normals, &mut indices, seg.a, ground_a, seg.b, ground_b, thickness, height);
-        }
-        let mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
-            .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-            .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-            .with_inserted_indices(Indices::U32(indices));
-        commands.spawn((TerrainRoot, Mesh3d(meshes.add(mesh)), MeshMaterial3d(mat)));
+        commands.spawn((TerrainRoot, Mesh3d(meshes.add(buf.into_mesh())), MeshMaterial3d(materials.add(material))));
     }
 }
 
@@ -669,135 +696,92 @@ fn field_hash(p: Vec2, salt: u64) -> f32 {
     hash01((p.x + crate::map::HALF_SIZE).max(0.0) as usize, (p.y + crate::map::HALF_SIZE).max(0.0) as usize, salt)
 }
 
-// A short prism between two points, each pinned to its own ground height, rather than a
+// A short box between two points, each end pinned to its own ground height, rather than a
 // box translated to one flat height - so a chain of these follows the ground rising and
-// falling along its length exactly at each sample point, the same technique road_mesh uses
-// for its ribbons, extended with a top, two sides and end caps for real thickness/height.
-fn push_wall_segment(
-    positions: &mut Vec<[f32; 3]>,
-    normals: &mut Vec<[f32; 3]>,
-    indices: &mut Vec<u32>,
-    a: Vec2,
-    ground_a: f32,
-    b: Vec2,
-    ground_b: f32,
-    thickness: f32,
-    height: f32,
-) {
+// falling along its length exactly at each sample point. `y0..y1` is the vertical extent
+// above the ground, and `tile` the metres per texture repeat.
+fn push_box_segment(buf: &mut WallBuf, a: Vec2, ga: f32, b: Vec2, gb: f32, thickness: f32, y0: f32, y1: f32, tile: f32) {
     let dir = (b - a).normalize_or_zero();
     let perp = Vec2::new(-dir.y, dir.x) * (thickness * 0.5);
     let dir3 = Vec3::new(dir.x, 0.0, dir.y);
     let perp3 = Vec3::new(perp.x, 0.0, perp.y).normalize_or_zero();
-
     let corner = |p: Vec2, sign: f32, y: f32| {
         let c = p + perp * sign;
         Vec3::new(c.x, y, c.y)
     };
-    let a_left_bot = corner(a, -1.0, ground_a);
-    let a_left_top = corner(a, -1.0, ground_a + height);
-    let a_right_bot = corner(a, 1.0, ground_a);
-    let a_right_top = corner(a, 1.0, ground_a + height);
-    let b_left_bot = corner(b, -1.0, ground_b);
-    let b_left_top = corner(b, -1.0, ground_b + height);
-    let b_right_bot = corner(b, 1.0, ground_b);
-    let b_right_top = corner(b, 1.0, ground_b + height);
-
-    let mut quad = |corners: [Vec3; 4], normal: Vec3| {
-        let base = positions.len() as u32;
-        for c in corners {
-            positions.push([c.x, c.y, c.z]);
-            normals.push([normal.x, normal.y, normal.z]);
-        }
-        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    };
-
-    // The underside sits exactly on the ground and is never seen, so it's skipped.
-    quad([a_left_top, a_right_top, b_right_top, b_left_top], Vec3::Y);
-    quad([a_left_bot, a_left_top, b_left_top, b_left_bot], -perp3);
-    quad([a_right_top, a_right_bot, b_right_bot, b_right_top], perp3);
-    quad([a_left_top, a_left_bot, a_right_bot, a_right_top], -dir3);
-    quad([b_left_bot, b_left_top, b_right_top, b_right_bot], dir3);
+    let (u0, u1) = (a.dot(dir) / tile, b.dot(dir) / tile);
+    let (v0, v1) = (y0 / tile, y1 / tile);
+    let (al_b, al_t) = (corner(a, -1.0, ga + y0), corner(a, -1.0, ga + y1));
+    let (ar_b, ar_t) = (corner(a, 1.0, ga + y0), corner(a, 1.0, ga + y1));
+    let (bl_b, bl_t) = (corner(b, -1.0, gb + y0), corner(b, -1.0, gb + y1));
+    let (br_b, br_t) = (corner(b, 1.0, gb + y0), corner(b, 1.0, gb + y1));
+    // The underside is never seen, so it's skipped.
+    buf.quad([al_t, ar_t, br_t, bl_t], Vec3::Y, [[u0, 0.0], [u0, thickness / tile], [u1, thickness / tile], [u1, 0.0]]);
+    buf.quad([al_b, al_t, bl_t, bl_b], -perp3, [[u0, v0], [u0, v1], [u1, v1], [u1, v0]]);
+    buf.quad([ar_t, ar_b, br_b, br_t], perp3, [[u0, v1], [u0, v0], [u1, v0], [u1, v1]]);
+    buf.quad([al_t, al_b, ar_b, ar_t], -dir3, [[0.0, v1], [0.0, v0], [thickness / tile, v0], [thickness / tile, v1]]);
+    buf.quad([bl_b, bl_t, br_t, br_b], dir3, [[0.0, v0], [0.0, v1], [thickness / tile, v1], [thickness / tile, v0]]);
 }
 
-fn spawn_trees(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    map: &TerrainMap,
-    zones: &ZoneMap,
-) {
-    let broadleaf = meshes.add(Sphere::new(1.0));
-    let conifer = meshes.add(Cone::new(1.0, 1.0));
-    let broadleaf_mats: Vec<Handle<StandardMaterial>> = [
-        [0.20, 0.44, 0.18],
-        [0.26, 0.50, 0.20],
-        [0.16, 0.36, 0.16],
-    ]
-    .iter()
-    .map(|c| materials.add(leaf_material(*c)))
-    .collect();
-    let conifer_mats: Vec<Handle<StandardMaterial>> = [[0.10, 0.27, 0.22], [0.13, 0.32, 0.25]]
-        .iter()
-        .map(|c| materials.add(leaf_material(*c)))
-        .collect();
-    let orchard_mat = materials.add(leaf_material([0.46, 0.66, 0.26]));
-
-    let steps = (crate::map::MAP_SIZE / TREE_SPACING) as usize;
-    for iz in 0..steps {
-        for ix in 0..steps {
-            let jitter_x = hash01(ix, iz, 1) * 2.0 - 1.0;
-            let jitter_z = hash01(ix, iz, 2) * 2.0 - 1.0;
-            let p = Vec2::new(
-                -crate::map::HALF_SIZE + (ix as f32 + 0.5) * TREE_SPACING + jitter_x * TREE_SPACING * 0.4,
-                -crate::map::HALF_SIZE + (iz as f32 + 0.5) * TREE_SPACING + jitter_z * TREE_SPACING * 0.4,
-            );
-            let (vx, vz) = nearest_cell(map, p);
-            let zone = zones.zone_at(vx, vz);
-            let roll = hash01(ix, iz, 3);
-            let ground = map.height_at(p);
-            let size = 0.8 + hash01(ix, iz, 4) * 0.6;
-            let pick = (hash01(ix, iz, 5) * 2.0) as usize;
-            match zone {
-                Zone::Woodland if roll < 0.55 => {
-                    let r = 3.2 * size;
-                    spawn_tree(commands, broadleaf.clone(), broadleaf_mats[pick % 3].clone(), p, ground, Vec3::new(r, r, r), ground + r + 1.5);
-                }
-                Zone::Conifer if roll < 0.65 => {
-                    let h = 9.0 * size;
-                    spawn_tree(commands, conifer.clone(), conifer_mats[pick % 2].clone(), p, ground, Vec3::new(2.6 * size, h, 2.6 * size), ground + h / 2.0);
-                }
-                Zone::Orchard if roll < 0.35 => {
-                    let r = 2.2 * size;
-                    spawn_tree(commands, broadleaf.clone(), orchard_mat.clone(), p, ground, Vec3::new(r, r, r), ground + r + 1.0);
-                }
-                _ => {}
-            }
-        }
+// Two thin rails along the segment, and a post at its start (the next segment's start is
+// this one's end, so a post every segment length, about 7 m).
+fn push_fence_segment(buf: &mut WallBuf, a: Vec2, ga: f32, b: Vec2, gb: f32) {
+    for (y0, y1) in [(0.32, 0.42), (0.8, 0.9)] {
+        push_box_segment(buf, a, ga, b, gb, 0.06, y0, y1, 1.0);
+    }
+    let dir = (b - a).normalize_or_zero();
+    for t in [0.0, 0.5] {
+        let p = a.lerp(b, t);
+        let g = ga + (gb - ga) * t;
+        push_box_segment(buf, p - dir * 0.07, g, p + dir * 0.07, g, 0.14, -0.1, 1.15, 1.0);
     }
 }
 
-fn spawn_tree(
-    commands: &mut Commands,
-    mesh: Handle<Mesh>,
-    material: Handle<StandardMaterial>,
-    p: Vec2,
-    _ground: f32,
-    scale: Vec3,
-    y: f32,
-) {
-    commands.spawn((
-        TerrainRoot,
-        Mesh3d(mesh),
-        MeshMaterial3d(material),
-        Transform::from_xyz(p.x, y, p.y).with_scale(scale),
-    ));
-}
-
-fn leaf_material(c: [f32; 3]) -> StandardMaterial {
-    StandardMaterial {
-        base_color: Color::srgb(c[0], c[1], c[2]),
-        perceptual_roughness: 0.9,
-        ..default()
+// A hedge: a rounded, slightly irregular profile extruded between two points, textured with
+// real leaves (the texture repeats every 2 m).
+fn push_hedge_segment(buf: &mut WallBuf, map: &TerrainMap, a: Vec2, ga: f32, b: Vec2, gb: f32) {
+    // (distance from the centreline, height) of the cross-section, left foot to right foot.
+    const PROFILE: [(f32, f32); 9] = [
+        (-0.6, 0.0), (-0.88, 0.55), (-0.78, 1.3), (-0.42, 1.78), (0.0, 1.92),
+        (0.42, 1.78), (0.78, 1.3), (0.88, 0.55), (0.6, 0.0),
+    ];
+    let dir = (b - a).normalize_or_zero();
+    let perp = Vec2::new(-dir.y, dir.x);
+    // Smooth per-vertex normals from the profile's neighbouring edges.
+    let normal_at = |i: usize| {
+        let prev = PROFILE[i.saturating_sub(1)];
+        let next = PROFILE[(i + 1).min(PROFILE.len() - 1)];
+        let t = Vec2::new(next.0 - prev.0, next.1 - prev.1).normalize_or_zero();
+        let n2 = Vec2::new(-t.y, t.x); // outward for a profile listed left to right
+        Vec3::new(perp.x * n2.x, n2.y, perp.y * n2.x).normalize_or_zero()
+    };
+    // The same position always gets the same height wobble, so neighbouring segments agree.
+    let wobble = |p: Vec2| 0.82 + 0.4 * fbm(p.x / 7.0, p.y / 7.0, 0x4ED6E, 2);
+    let _ = map;
+    let (wa, wb) = (wobble(a), wobble(b));
+    let (u0, u1) = (a.dot(dir) / 2.0, b.dot(dir) / 2.0);
+    let mut arc = 0.0;
+    let mut rings: Vec<([Vec3; 2], Vec3, f32)> = Vec::new();
+    for (i, &(x, y)) in PROFILE.iter().enumerate() {
+        if i > 0 {
+            let p = PROFILE[i - 1];
+            arc += ((x - p.0).powi(2) + (y - p.1).powi(2)).sqrt();
+        }
+        let pa = a + perp * x;
+        let pb = b + perp * x;
+        rings.push(([Vec3::new(pa.x, ga + y * wa, pa.y), Vec3::new(pb.x, gb + y * wb, pb.y)], normal_at(i), arc / 2.0));
+    }
+    let base = buf.positions.len() as u32;
+    for (ends, n, v) in &rings {
+        for (k, end) in ends.iter().enumerate() {
+            buf.positions.push(end.to_array());
+            buf.normals.push(n.to_array());
+            buf.uvs.push([if k == 0 { u0 } else { u1 }, *v]);
+        }
+    }
+    for i in 0..PROFILE.len() as u32 - 1 {
+        let (a0, b0, a1, b1) = (base + i * 2, base + i * 2 + 1, base + i * 2 + 2, base + i * 2 + 3);
+        buf.indices.extend_from_slice(&[a0, a1, b0, b0, a1, b1]);
     }
 }
 

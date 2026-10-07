@@ -18,6 +18,7 @@ impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
             crate::mipmaps::MipmapPlugin,
+            crate::vegetation::VegetationPlugin,
             MaterialPlugin::<TerrainMaterial>::default(),
             MaterialPlugin::<crate::field_material::FieldMaterial>::default(),
         ))
@@ -58,9 +59,11 @@ pub struct TerrainTextures {
     pub soil_loam: Handle<Image>,
     pub meadow: Handle<Image>,
     pub pasture: Handle<Image>,
+    pub hedge: Handle<Image>,
+    pub wood: Handle<Image>,
 }
 
-fn load_textures(mut commands: Commands, asset_server: Res<AssetServer>, mut mips: ResMut<crate::mipmaps::MipQueue>) {
+pub fn load_textures(mut commands: Commands, asset_server: Res<AssetServer>, mut mips: ResMut<crate::mipmaps::MipQueue>) {
     let load = |path: &'static str| {
         asset_server
             .load_builder()
@@ -82,6 +85,8 @@ fn load_textures(mut commands: Commands, asset_server: Res<AssetServer>, mut mip
         soil_loam: load("textures/pbr/soil_loam.jpg"),
         meadow: load("textures/pbr/meadow.jpg"),
         pasture: load("textures/pbr/pasture.jpg"),
+        hedge: load("textures/veg/hedge.jpg"),
+        wood: load("textures/pbr/bark_conifer.jpg"),
     };
     mips.0.extend([
         textures.grass.clone(),
@@ -91,6 +96,8 @@ fn load_textures(mut commands: Commands, asset_server: Res<AssetServer>, mut mip
         textures.soil_loam.clone(),
         textures.meadow.clone(),
         textures.pasture.clone(),
+        textures.hedge.clone(),
+        textures.wood.clone(),
     ]);
     commands.insert_resource(textures);
 }

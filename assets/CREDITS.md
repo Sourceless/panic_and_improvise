@@ -23,3 +23,9 @@ CC0 1.0 (public domain). They are 1K colour maps, converted to JPG; the foliage 
 | leaf_conifer.png | LeafSet019 |
 | leaf_lime.png | LeafSet023 |
 | blades.png | Foliage001 |
+
+## Derived textures
+
+`textures/veg/` holds foliage cluster cards and a hedge tile baked from the leaf atlases
+above by `tools/bake_foliage.py` (so they are CC0 derivatives of the ambientCG sets
+LeafSet019/022/023/024/027). Rerun the script to regenerate them.
