@@ -6,6 +6,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::map::{grid_pos, PoiKind, TerrainMap, CELL, HALF_SIZE};
+use crate::params::GenParams;
 
 const ROAD_LIFT: f32 = 0.25;
 const MAJOR_HALF_WIDTH: f32 = 4.0;
@@ -33,7 +34,7 @@ pub struct RoadNetwork {
 }
 
 impl RoadNetwork {
-    pub fn generate(map: &TerrainMap) -> Self {
+    pub fn generate(map: &TerrainMap, params: &GenParams) -> Self {
         let n = map.grid_size();
         let mut cells: Vec<Option<RoadKind>> = vec![None; n * n];
         let mut edges: Vec<(usize, usize, RoadKind)> = Vec::new();
@@ -52,7 +53,7 @@ impl RoadNetwork {
             .collect();
 
         if let Some((&first, rest)) = hubs.split_first() {
-            grow_network(map, vec![first], rest.to_vec(), RoadKind::Major, &mut cells, &mut edges);
+            grow_network(map, vec![first], rest.to_vec(), RoadKind::Major, params, &mut cells, &mut edges);
         }
 
         let seeds: Vec<usize> = hubs
@@ -60,7 +61,7 @@ impl RoadNetwork {
             .copied()
             .chain((0..n * n).filter(|&i| cells[i].is_some()))
             .collect();
-        grow_network(map, seeds, farms, RoadKind::Minor, &mut cells, &mut edges);
+        grow_network(map, seeds, farms, RoadKind::Minor, params, &mut cells, &mut edges);
 
         RoadNetwork { cells, edges, verts: n }
     }
@@ -83,6 +84,7 @@ fn grow_network(
     seeds: Vec<usize>,
     targets: Vec<usize>,
     kind: RoadKind,
+    params: &GenParams,
     cells: &mut [Option<RoadKind>],
     edges: &mut Vec<(usize, usize, RoadKind)>,
 ) {
@@ -90,7 +92,7 @@ fn grow_network(
     let mut remaining: HashSet<usize> = targets.into_iter().collect();
 
     while !remaining.is_empty() {
-        let Some((reached, previous)) = dijkstra_to_any(map, &connected, &remaining, kind, cells) else {
+        let Some((reached, previous)) = dijkstra_to_any(map, &connected, &remaining, kind, params, cells) else {
             break;
         };
         // Walk back from the newly reached settlement toward the network, recording each
@@ -122,6 +124,7 @@ fn dijkstra_to_any(
     sources: &[usize],
     targets: &HashSet<usize>,
     kind: RoadKind,
+    params: &GenParams,
     cells: &[Option<RoadKind>],
 ) -> Option<(usize, Vec<Option<usize>>)> {
     let n = map.grid_size();
@@ -142,7 +145,7 @@ fn dijkstra_to_any(
             return Some((c, previous));
         }
         for neighbour in neighbours(n, c) {
-            let step_cost = step_cost(map, cells, c, neighbour, kind);
+            let step_cost = step_cost(map, cells, c, neighbour, kind, params);
             let next = cost[c] + step_cost;
             if next < cost[neighbour] {
                 cost[neighbour] = next;
@@ -154,7 +157,7 @@ fn dijkstra_to_any(
     None
 }
 
-fn step_cost(map: &TerrainMap, cells: &[Option<RoadKind>], from: usize, to: usize, kind: RoadKind) -> f32 {
+fn step_cost(map: &TerrainMap, cells: &[Option<RoadKind>], from: usize, to: usize, kind: RoadKind, params: &GenParams) -> f32 {
     let n = map.grid_size();
     let diagonal = (to % n != from % n) && (to / n != from / n);
     let step = if diagonal { CELL * std::f32::consts::SQRT_2 } else { CELL };
@@ -165,6 +168,8 @@ fn step_cost(map: &TerrainMap, cells: &[Option<RoadKind>], from: usize, to: usiz
         RoadKind::Major => (MAJOR_SLOPE_PENALTY, MAJOR_WATER_COST),
         RoadKind::Minor => (MINOR_SLOPE_PENALTY, MINOR_WATER_COST),
     };
+    let slope_penalty = slope_penalty * params.road_slope_scale;
+    let water_cost = water_cost * params.road_water_scale;
     let mut c = step * (1.0 + slope_penalty * climb);
     if map.water_level(tx, tz).is_some() {
         c += step * water_cost;

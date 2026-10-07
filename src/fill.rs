@@ -7,6 +7,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 use crate::map::{grid_pos, TerrainMap, CELL};
+use crate::params::GenParams;
 use crate::roads::RoadNetwork;
 use crate::terrain::TerrainRoot;
 use crate::zones::{Zone, ZoneMap};
@@ -22,14 +23,13 @@ pub fn spawn_fill(
     map: &TerrainMap,
     zones: &ZoneMap,
     roads: &RoadNetwork,
+    params: &GenParams,
 ) {
     spawn_trees(commands, meshes, materials, map, zones);
-    spawn_field_tiling(commands, meshes, materials, map, zones, roads);
+    spawn_field_tiling(commands, meshes, materials, map, zones, roads, params);
     spawn_sheds(commands, meshes, materials, map, zones);
 }
 
-const FIELD_SEED_SPACING: f32 = 95.0;
-const FIELD_SLOPE_WEIGHT: f32 = 6.0;
 const SMOOTH_PASSES: u32 = 2;
 const RENDER_STRIDE: usize = 3;
 const FARM_YARD_RADIUS: f32 = 42.0;
@@ -59,6 +59,7 @@ fn spawn_field_tiling(
     map: &TerrainMap,
     zones: &ZoneMap,
     roads: &RoadNetwork,
+    params: &GenParams,
 ) {
     let n = map.grid_size();
     let farms: Vec<Vec2> = map
@@ -85,11 +86,11 @@ fn spawn_field_tiling(
         })
         .collect();
 
-    let seeds = scatter_seeds(map, &is_farmland);
+    let seeds = scatter_seeds(map, &is_farmland, params);
     if seeds.is_empty() {
         return;
     }
-    let owner = smooth_owners(map, &is_farmland, claim_regions(map, &is_farmland, &seeds), SMOOTH_PASSES);
+    let owner = smooth_owners(map, &is_farmland, claim_regions(map, &is_farmland, &seeds, params), SMOOTH_PASSES);
 
     let field_colour: Vec<[f32; 3]> = seeds
         .iter()
@@ -121,20 +122,21 @@ fn spawn_field_tiling(
     spawn_field_boundaries(commands, meshes, materials, map, &coarse_owner, cn);
 }
 
-fn scatter_seeds(map: &TerrainMap, is_farmland: &[bool]) -> Vec<usize> {
+fn scatter_seeds(map: &TerrainMap, is_farmland: &[bool], params: &GenParams) -> Vec<usize> {
     let n = map.grid_size();
     let half_map = crate::map::HALF_SIZE;
-    let cols = (crate::map::MAP_SIZE / FIELD_SEED_SPACING).ceil() as i32;
+    let spacing = params.field_spacing;
+    let cols = (crate::map::MAP_SIZE / spacing).ceil() as i32;
     let mut seeds = Vec::new();
     for sz in 0..cols {
         for sx in 0..cols {
             let base = Vec2::new(
-                -half_map + (sx as f32 + 0.5) * FIELD_SEED_SPACING,
-                -half_map + (sz as f32 + 0.5) * FIELD_SEED_SPACING,
+                -half_map + (sx as f32 + 0.5) * spacing,
+                -half_map + (sz as f32 + 0.5) * spacing,
             );
             let jitter = Vec2::new(
-                (field_hash(base, 40) - 0.5) * FIELD_SEED_SPACING * 0.7,
-                (field_hash(base, 41) - 0.5) * FIELD_SEED_SPACING * 0.7,
+                (field_hash(base, 40) - 0.5) * spacing * 0.7,
+                (field_hash(base, 41) - 0.5) * spacing * 0.7,
             );
             let (ix, iz) = nearest_cell(map, base + jitter);
             let idx = iz * n + ix;
@@ -149,7 +151,7 @@ fn scatter_seeds(map: &TerrainMap, is_farmland: &[bool]) -> Vec<usize> {
 // A weighted multi-source search: every farmland cell is claimed by whichever seed reaches
 // it most cheaply, where the cost of a step rises with the slope it crosses. This is the
 // same shape of search used for river and road routing.
-fn claim_regions(map: &TerrainMap, is_farmland: &[bool], seeds: &[usize]) -> Vec<Option<u32>> {
+fn claim_regions(map: &TerrainMap, is_farmland: &[bool], seeds: &[usize], params: &GenParams) -> Vec<Option<u32>> {
     let n = map.grid_size();
     let mut cost = vec![f32::MAX; n * n];
     let mut owner: Vec<Option<u32>> = vec![None; n * n];
@@ -171,7 +173,7 @@ fn claim_regions(map: &TerrainMap, is_farmland: &[bool], seeds: &[usize]) -> Vec
             let diagonal = (nb % n != c % n) && (nb / n != c / n);
             let step = if diagonal { CELL * std::f32::consts::SQRT_2 } else { CELL };
             let climb = (map.vertex_height(nb % n, nb / n) - map.vertex_height(c % n, c / n)).abs() / CELL;
-            let next_cost = cost[c] + step * (1.0 + FIELD_SLOPE_WEIGHT * climb);
+            let next_cost = cost[c] + step * (1.0 + params.field_contour_weight * climb);
             if next_cost < cost[nb] {
                 cost[nb] = next_cost;
                 owner[nb] = Some(id);
@@ -573,15 +575,16 @@ mod tests {
     use crate::map::TerrainMap;
     use crate::zones::ZoneMap;
 
-    fn generate() -> (TerrainMap, ZoneMap) {
-        let map = TerrainMap::generate(crate::MAP_SEED);
+    fn generate() -> (TerrainMap, ZoneMap, crate::params::GenParams) {
+        let params = crate::params::GenParams::default();
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
         let zones = ZoneMap::generate(&map);
-        (map, zones)
+        (map, zones, params)
     }
 
     #[test]
     fn claims_most_of_the_farmland() {
-        let (map, zones) = generate();
+        let (map, zones, params) = generate();
         let n = map.grid_size();
         let farms: Vec<Vec2> = map
             .pois
@@ -600,9 +603,9 @@ mod tests {
             })
             .collect();
         let farmland_count = is_farmland.iter().filter(|b| **b).count();
-        let seeds = scatter_seeds(&map, &is_farmland);
+        let seeds = scatter_seeds(&map, &is_farmland, &params);
         assert!(seeds.len() > 500, "only {} field seeds, too sparse", seeds.len());
-        let owner = claim_regions(&map, &is_farmland, &seeds);
+        let owner = claim_regions(&map, &is_farmland, &seeds, &params);
         let claimed = owner.iter().filter(|o| o.is_some()).count();
         assert!(
             claimed as f32 > farmland_count as f32 * 0.9,
@@ -612,7 +615,7 @@ mod tests {
 
     #[test]
     fn boundary_segment_count_stays_bounded() {
-        let (map, zones) = generate();
+        let (map, zones, params) = generate();
         let n = map.grid_size();
         let farms: Vec<Vec2> = map
             .pois
@@ -630,8 +633,8 @@ mod tests {
                 !farms.iter().any(|f| f.distance(grid_pos(ix, iz)) < FARM_YARD_RADIUS)
             })
             .collect();
-        let seeds = scatter_seeds(&map, &is_farmland);
-        let owner = smooth_owners(&map, &is_farmland, claim_regions(&map, &is_farmland, &seeds), SMOOTH_PASSES);
+        let seeds = scatter_seeds(&map, &is_farmland, &params);
+        let owner = smooth_owners(&map, &is_farmland, claim_regions(&map, &is_farmland, &seeds, &params), SMOOTH_PASSES);
         let cn = n.div_ceil(RENDER_STRIDE);
         let coarse_owner: Vec<Option<u32>> = (0..cn * cn)
             .map(|i| {

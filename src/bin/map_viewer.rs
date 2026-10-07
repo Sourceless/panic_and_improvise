@@ -7,7 +7,9 @@ use bevy::render::render_resource::TextureFormat;
 use bevy::render::view::window::screenshot::{save_to_disk, Screenshot, ScreenshotCaptured};
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::pbr::{MeshMaterial3d};
+use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use fps_prototype::map::TerrainMap;
+use fps_prototype::params::GenParams;
 use fps_prototype::fill::spawn_fill;
 use fps_prototype::roads::{road_mesh, RoadKind, RoadNetwork};
 use fps_prototype::zones::{overlay_mesh, ZoneMap};
@@ -65,6 +67,7 @@ fn main() {
                 ..default()
             }),
             TerrainPlugin,
+            EguiPlugin::default(),
         ))
         .insert_resource(Viewer {
             seed,
@@ -81,7 +84,8 @@ fn main() {
                 })
                 .unwrap_or(Vec2::ZERO),
         })
-        .insert_resource(TerrainMap::generate(seed))
+        .insert_resource(TerrainMap::generate(seed, &GenParams::default()))
+        .insert_resource(GenParams::default())
         .insert_non_send(ClipboardHandle(arboard::Clipboard::new().ok()))
         .insert_resource(GlobalAmbientLight {
             color: Color::WHITE,
@@ -93,6 +97,7 @@ fn main() {
             Update,
             (handle_keys, copy_screenshot_key, orbit_input, regenerate, zone_overlay, update_camera, update_hud).chain(),
         )
+        .add_systems(EguiPrimaryContextPass, ui_panel)
         .run();
 }
 
@@ -216,6 +221,39 @@ fn copy_screenshot_to_clipboard(
     }
 }
 
+fn ui_panel(mut contexts: EguiContexts, mut params: ResMut<GenParams>, mut viewer: ResMut<Viewer>) -> Result {
+    let ctx = contexts.ctx_mut()?;
+    let mut viewport_ui = egui::Ui::new(
+        ctx.clone(),
+        "viewport".into(),
+        egui::UiBuilder::new()
+            .layer_id(egui::LayerId::background())
+            .max_rect(ctx.viewport_rect()),
+    );
+    egui::Panel::left("params_panel").default_size(260.0).show(&mut viewport_ui, |ui| {
+        ui.heading("Generation parameters");
+        ui.add(egui::Slider::new(&mut params.relief_scale, 0.2..=2.5).text("Relief scale"));
+        ui.add(egui::Slider::new(&mut params.erosion_droplets, 0..=800_000).text("Erosion droplets"));
+        ui.add(egui::Slider::new(&mut params.river_slope_weight, 1.0..=15.0).text("River slope weight"));
+        ui.separator();
+        ui.add(egui::Slider::new(&mut params.field_spacing, 40.0..=200.0).text("Field spacing"));
+        ui.add(egui::Slider::new(&mut params.field_contour_weight, 0.5..=15.0).text("Field contour weight"));
+        ui.separator();
+        ui.add(egui::Slider::new(&mut params.road_slope_scale, 0.2..=3.0).text("Road slope cost"));
+        ui.add(egui::Slider::new(&mut params.road_water_scale, 0.2..=3.0).text("Road water cost"));
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Regenerate").clicked() {
+                viewer.pending_regen = true;
+            }
+            if ui.button("Reset to defaults").clicked() {
+                *params = GenParams::default();
+            }
+        });
+    });
+    Ok(())
+}
+
 fn new_random_seed() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -226,6 +264,7 @@ fn new_random_seed() -> u64 {
 fn regenerate(
     mut commands: Commands,
     mut viewer: ResMut<Viewer>,
+    params: Res<GenParams>,
     old_terrain: Query<Entity, Or<(With<TerrainRoot>, With<SettlementRoot>, With<ZoneOverlay>)>>,
     textures: Res<TerrainTextures>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -239,12 +278,12 @@ fn regenerate(
     for entity in &old_terrain {
         commands.entity(entity).despawn();
     }
-    let map = TerrainMap::generate(viewer.seed);
+    let map = TerrainMap::generate(viewer.seed, &params);
     let zones = ZoneMap::generate(&map);
-    let roads = RoadNetwork::generate(&map);
+    let roads = RoadNetwork::generate(&map, &params);
     spawn_terrain(&mut commands, &mut meshes, &mut standard, &mut terrain, &textures, &map);
     spawn_roads(&mut commands, &mut meshes, &mut standard, &map, &roads);
-    spawn_fill(&mut commands, &mut meshes, &mut standard, &map, &zones, &roads);
+    spawn_fill(&mut commands, &mut meshes, &mut standard, &map, &zones, &roads, &params);
     commands.insert_resource(zones);
     commands.insert_resource(roads);
     commands.insert_resource(map);
@@ -259,14 +298,21 @@ fn build_fill(
     map: Res<TerrainMap>,
     zones: Res<ZoneMap>,
     roads: Res<RoadNetwork>,
+    params: Res<GenParams>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut standard: ResMut<Assets<StandardMaterial>>,
 ) {
-    spawn_fill(&mut commands, &mut meshes, &mut standard, &map, &zones, &roads);
+    spawn_fill(&mut commands, &mut meshes, &mut standard, &map, &zones, &roads, &params);
 }
 
-fn build_roads(mut commands: Commands, map: Res<TerrainMap>, mut meshes: ResMut<Assets<Mesh>>, mut standard: ResMut<Assets<StandardMaterial>>) {
-    let roads = RoadNetwork::generate(&map);
+fn build_roads(
+    mut commands: Commands,
+    map: Res<TerrainMap>,
+    params: Res<GenParams>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut standard: ResMut<Assets<StandardMaterial>>,
+) {
+    let roads = RoadNetwork::generate(&map, &params);
     spawn_roads(&mut commands, &mut meshes, &mut standard, &map, &roads);
     commands.insert_resource(roads);
 }

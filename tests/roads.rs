@@ -5,8 +5,8 @@ use fps_prototype::MAP_SEED;
 #[test]
 fn every_settlement_connects_to_the_network() {
     for seed in [MAP_SEED, 1, 2, 3] {
-        let map = TerrainMap::generate(seed);
-        let roads = RoadNetwork::generate(&map);
+        let map = TerrainMap::generate(seed, &fps_prototype::params::GenParams::default());
+        let roads = RoadNetwork::generate(&map, &fps_prototype::params::GenParams::default());
         let n = map.grid_size();
         for poi in map.pois.iter().filter(|p| matches!(p.kind, PoiKind::Village | PoiKind::Mill | PoiKind::Farm)) {
             let near = (0..n).flat_map(|z| (0..n).map(move |x| (x, z))).any(|(x, z)| {
@@ -19,16 +19,16 @@ fn every_settlement_connects_to_the_network() {
 
 #[test]
 fn road_lengths_are_sensible() {
-    let map = TerrainMap::generate(MAP_SEED);
-    let roads = RoadNetwork::generate(&map);
+    let map = TerrainMap::generate(MAP_SEED, &fps_prototype::params::GenParams::default());
+    let roads = RoadNetwork::generate(&map, &fps_prototype::params::GenParams::default());
     assert!(roads.length(RoadKind::Major) > 500.0, "major network is too short");
     assert!(roads.length(RoadKind::Minor) > 500.0, "minor network is too short");
 }
 
 #[test]
 fn some_roads_bridge_water_but_not_too_many() {
-    let map = TerrainMap::generate(MAP_SEED);
-    let roads = RoadNetwork::generate(&map);
+    let map = TerrainMap::generate(MAP_SEED, &fps_prototype::params::GenParams::default());
+    let roads = RoadNetwork::generate(&map, &fps_prototype::params::GenParams::default());
     let n = map.grid_size();
     let mut road_cells = 0;
     let mut water_road_cells = 0;

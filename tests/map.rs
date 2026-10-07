@@ -3,7 +3,7 @@ use fps_prototype::map::{grid_pos, PoiKind, TerrainMap, HALF_SIZE, MAP_SIZE};
 use fps_prototype::MAP_SEED;
 
 fn map() -> TerrainMap {
-    TerrainMap::generate(MAP_SEED)
+    TerrainMap::generate(MAP_SEED, &fps_prototype::params::GenParams::default())
 }
 
 #[test]
@@ -86,8 +86,8 @@ fn terrain_has_real_relief() {
 
 #[test]
 fn same_seed_gives_same_map() {
-    let a = TerrainMap::generate(7);
-    let b = TerrainMap::generate(7);
+    let a = TerrainMap::generate(7, &fps_prototype::params::GenParams::default());
+    let b = TerrainMap::generate(7, &fps_prototype::params::GenParams::default());
     for p in [Vec2::new(-234.0, 187.0), Vec2::new(300.0, -210.0)] {
         assert_eq!(a.height_at(p), b.height_at(p));
     }
@@ -97,7 +97,7 @@ fn same_seed_gives_same_map() {
 #[test]
 fn every_settlement_has_water_nearby() {
     for seed in [MAP_SEED, 1, 2, 3, 4] {
-        let map = TerrainMap::generate(seed);
+        let map = TerrainMap::generate(seed, &fps_prototype::params::GenParams::default());
         for poi in &map.pois {
             assert!(
                 map.river_distance(poi.position) <= 540.0,

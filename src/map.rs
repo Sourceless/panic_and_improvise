@@ -4,6 +4,8 @@ use std::collections::BinaryHeap;
 
 use bevy::prelude::*;
 
+use crate::params::GenParams;
+
 pub const MAP_SIZE: f32 = 5000.0;
 pub const HALF_SIZE: f32 = MAP_SIZE / 2.0;
 pub const CELL: f32 = 10.0;
@@ -13,7 +15,6 @@ const COUNT: usize = VERTS * VERTS;
 
 const RIVER_MIN_SPAN: f32 = 3500.0;
 const NONE: u32 = u32::MAX;
-const RIVER_UPHILL_PENALTY: f32 = 6.0;
 const RIVER_ELEVATION_SCALE: f32 = 12.0;
 const RIVER_WIGGLE: f32 = 4.0;
 const VALLEY_DEPTH: f32 = 22.0;
@@ -57,21 +58,21 @@ pub struct TerrainMap {
 }
 
 impl TerrainMap {
-    pub fn generate(seed: u64) -> Self {
+    pub fn generate(seed: u64, params: &GenParams) -> Self {
         let mut rng = Rng(seed);
 
         let mut base: Vec<f32> = (0..COUNT)
             .map(|idx| {
                 let (ix, iz) = (idx % VERTS, idx / VERTS);
-                base_height(grid_pos(ix, iz), seed)
+                base_height(grid_pos(ix, iz), seed, params)
             })
             .collect();
-        let path = river_path(&base, seed, &mut Rng(seed ^ 0x51DE_0001));
+        let path = river_path(&base, seed, params, &mut Rng(seed ^ 0x51DE_0001));
         carve_valley(&mut base, &path);
         for h in &mut base {
             *h /= EROSION_HEIGHT_UNIT;
         }
-        erode(&mut base, &mut Rng(seed ^ 0xE20D_E000));
+        erode(&mut base, params.erosion_droplets, &mut Rng(seed ^ 0xE20D_E000));
         for h in &mut base {
             *h *= EROSION_HEIGHT_UNIT;
         }
@@ -228,7 +229,7 @@ pub fn fbm(x: f32, z: f32, seed: u64, octaves: u32) -> f32 {
 }
 
 // Layered noise: a domain-warped broad field, then rolling and small undulations.
-fn base_height(p: Vec2, seed: u64) -> f32 {
+fn base_height(p: Vec2, seed: u64, params: &GenParams) -> f32 {
     let warp = Vec2::new(
         fbm(p.x / 1200.0, p.y / 1200.0, seed ^ 0x1, 3) - 0.5,
         fbm(p.x / 1200.0 + 7.3, p.y / 1200.0 + 1.9, seed ^ 0x2, 3) - 0.5,
@@ -237,7 +238,7 @@ fn base_height(p: Vec2, seed: u64) -> f32 {
     let broad = fbm(q.x / 1400.0, q.y / 1400.0, seed, 3) - 0.5;
     let rolling = fbm(q.x / 500.0, q.y / 500.0, seed ^ 0x3, 4) - 0.5;
     let small = fbm(q.x / 140.0, q.y / 140.0, seed ^ 0x4, 4) - 0.5;
-    broad * 320.0 + rolling * 120.0 + small * 35.0 + 50.0
+    (broad * 320.0 + rolling * 120.0 + small * 35.0) * params.relief_scale + 50.0
 }
 
 fn neighbours(idx: usize) -> impl Iterator<Item = usize> {
@@ -265,7 +266,7 @@ fn on_edge(idx: usize, side: usize) -> bool {
 // The main river enters at a random point on one edge and crosses to the opposite edge
 // along the cheapest path, where climbing costs more than flowing, so it follows low
 // ground and the valleys that erosion carved.
-fn river_path(heights: &[f32], seed: u64, rng: &mut Rng) -> Vec<usize> {
+fn river_path(heights: &[f32], seed: u64, params: &GenParams, rng: &mut Rng) -> Vec<usize> {
     let side = (rng.range(0.0, 4.0) as usize).min(3);
     let along = (rng.range(0.2, 0.8) * (VERTS - 1) as f32) as usize;
     let source = match side {
@@ -297,7 +298,7 @@ fn river_path(heights: &[f32], seed: u64, rng: &mut Rng) -> Vec<usize> {
             let step = if diagonal { CELL * std::f32::consts::SQRT_2 } else { CELL };
             let climb = (heights[n] - heights[c]).max(0.0) / CELL;
             let wiggle = (1.0 + RIVER_WIGGLE * (value_noise((n % VERTS) as f32 / 6.0, (n / VERTS) as f32 / 6.0, seed) - 0.5)).max(0.1);
-            let next_cost = cost[c] + step * wiggle * (1.0 + RIVER_UPHILL_PENALTY * climb) * (1.0 + heights[n].max(0.0) / RIVER_ELEVATION_SCALE);
+            let next_cost = cost[c] + step * wiggle * (1.0 + params.river_slope_weight * climb) * (1.0 + heights[n].max(0.0) / RIVER_ELEVATION_SCALE);
             if next_cost < cost[n] {
                 cost[n] = next_cost;
                 previous[n] = current;
@@ -343,7 +344,6 @@ fn grid_pos_of(idx: usize) -> Vec2 {
 }
 
 
-const DROPLETS: usize = 300_000;
 const DROPLET_LIFETIME: usize = 80;
 const DROPLET_INERTIA: f32 = 0.1;
 const DROPLET_CAPACITY: f32 = 1.0;
@@ -360,9 +360,9 @@ const EROSION_HEIGHT_UNIT: f32 = 50.0;
 // Particle-based hydraulic erosion (after Lague, and Mei et al. 2007): water droplets roll
 // downhill, carry sediment up to a capacity set by speed and slope, erode when under
 // capacity and deposit when over it.
-fn erode(heights: &mut [f32], rng: &mut Rng) {
+fn erode(heights: &mut [f32], droplets: u32, rng: &mut Rng) {
     let max = (VERTS - 1) as f32;
-    for _ in 0..DROPLETS {
+    for _ in 0..droplets {
         let mut pos = Vec2::new(rng.range(0.0, max), rng.range(0.0, max));
         let mut dir = Vec2::ZERO;
         let mut speed = 1.0_f32;
