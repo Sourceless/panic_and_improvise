@@ -18,6 +18,8 @@ fn linear(c: Rgb) -> [f32; 4] {
 
 #[derive(Default)]
 pub struct MeshBuilder {
+    /// How opaque everything added from here on is (1 unless it is glass).
+    alpha: Option<f32>,
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     colours: Vec<[f32; 4]>,
@@ -25,6 +27,16 @@ pub struct MeshBuilder {
 }
 
 impl MeshBuilder {
+    pub fn with_alpha(alpha: f32) -> MeshBuilder {
+        MeshBuilder { alpha: Some(alpha), ..Default::default() }
+    }
+
+    fn colour_of(&self, colour: Rgb) -> [f32; 4] {
+        let mut c = linear(colour);
+        c[3] = self.alpha.unwrap_or(1.0);
+        c
+    }
+
     pub fn is_empty(&self) -> bool {
         self.positions.is_empty()
     }
@@ -39,7 +51,8 @@ impl MeshBuilder {
         for c in corners {
             self.positions.push(c.to_array());
             self.normals.push(normal.to_array());
-            self.colours.push(linear(colour));
+            let c = self.colour_of(colour);
+            self.colours.push(c);
         }
         self.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
@@ -50,7 +63,8 @@ impl MeshBuilder {
         for c in corners {
             self.positions.push(c.to_array());
             self.normals.push(normal.to_array());
-            self.colours.push(linear(colour));
+            let c = self.colour_of(colour);
+            self.colours.push(c);
         }
         self.indices.extend_from_slice(&[base, base + 1, base + 2]);
     }

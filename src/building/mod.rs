@@ -4,7 +4,9 @@
 pub mod furnish;
 pub mod geom;
 pub mod kinds;
+pub mod mill;
 pub mod plan;
+pub mod public;
 
 use bevy::prelude::*;
 
@@ -25,6 +27,7 @@ pub mod colour {
     pub const TIMBER: Rgb = [0.52, 0.4, 0.28];
     pub const AWNINGS: [Rgb; 4] = [[0.7, 0.12, 0.1], [0.12, 0.4, 0.2], [0.15, 0.25, 0.55], [0.85, 0.7, 0.15]];
     pub const GLASS: Rgb = [0.1, 0.14, 0.18];
+    pub const GLASS_PANE: Rgb = [0.55, 0.7, 0.8];
     pub const METAL: Rgb = [0.45, 0.47, 0.5];
     pub const ASPHALT: Rgb = [0.12, 0.12, 0.13];
 }
@@ -71,6 +74,14 @@ fn style_for(b: &Building, rng: &mut Rng) -> Style {
             style.outer = colour::WALLS[2];
             style.roof = colour::TILE;
         }
+        BuildingKind::Church => {
+            style.outer = colour::STONE;
+            style.roof = colour::SLATE;
+        }
+        BuildingKind::Shed => {
+            style.outer = [0.62, 0.62, 0.64];
+            style.roof = colour::METAL;
+        }
         BuildingKind::Barn => {
             style.outer = colour::TIMBER;
             style.roof = colour::METAL;
@@ -84,30 +95,31 @@ fn style_for(b: &Building, rng: &mut Rng) -> Style {
 
 /// The model of a building, in its own frame.
 pub fn build(b: &Building, site: &Site, rng: &mut Rng) -> Model {
+    planned(b, site, rng).1
+}
+
+/// The plans of the parts of a building that have insides, and the model made from them.
+pub fn planned(b: &Building, site: &Site, rng: &mut Rng) -> (Vec<plan::Layout>, Model) {
     match b.kind {
-        BuildingKind::Silo => silo(b, site),
-        BuildingKind::Mill => mill(b, site),
-        BuildingKind::Church => church(b, site),
+        BuildingKind::Silo => (Vec::new(), silo(b, site)),
+        BuildingKind::Mill => (Vec::new(), mill(b, site)),
         BuildingKind::PetrolStation => petrol_station(b, site, rng),
         _ => gabled(b, site, rng),
     }
 }
 
 /// A building with a plan and a pitched roof.
-fn gabled(b: &Building, site: &Site, rng: &mut Rng) -> Model {
-    planned(b, site, rng).1
-}
-
-/// The plan of a building and the model made from it.
-pub fn planned(b: &Building, site: &Site, rng: &mut Rng) -> (plan::Layout, Model) {
+fn gabled(b: &Building, site: &Site, rng: &mut Rng) -> (Vec<plan::Layout>, Model) {
     let style = style_for(b, rng);
-    let layout = kinds::layout(b, style, rng);
-    let mut model = plan::assemble(&layout, site.skirt, rng);
-    let height = layout.height();
+    let volumes = kinds::volumes(b, style, rng);
+    let mut model = Model::default();
+    for v in &volumes {
+        model.extend(plan::assemble(&v.layout, site.skirt, rng));
+        roof(&mut model, v, &style);
+    }
+    let height = volumes[0].layout.height();
     let (w, d) = (b.width, b.depth);
     let rise = (d * 0.5).min(3.6);
-    let base = Vec3::new(layout.inside.centre().x, height, layout.inside.centre().y);
-    model.push(Piece::Gable { base, length: w, span: d, rise, overhang: 0.35, yaw: 0.0 }, style.roof, Layer::Shell, None);
 
     let chimney = |model: &mut Model, along: f32| {
         model.block(Vec3::new(along * w, height + rise + 0.3, 0.0), Vec3::new(0.85, 2.0, 0.95), colour::BRICK, Layer::Shell, Some(Material::Stone));
@@ -143,39 +155,76 @@ pub fn planned(b: &Building, site: &Site, rng: &mut Rng) -> (plan::Layout, Model
             chimney(&mut model, -0.35);
         }
         BuildingKind::Hall => {
-            model.block(Vec3::new(0.0, 1.3, -(d * 0.5 + 0.9)), Vec3::new(3.2, 2.6, 1.8), colour::TIMBER, Layer::Shell, Some(Material::Wood));
-            model.block(Vec3::new(0.0, 2.7, -(d * 0.5 + 0.9)), Vec3::new(3.6, 0.2, 2.2), colour::METAL, Layer::Shell, None);
+            // A porch over the door: a roof on two posts.
+            let along = volumes[0].layout.storeys[0].doors_outside[0].along;
+            model.block(Vec3::new(along, 2.9, -(d * 0.5 + 0.9)), Vec3::new(3.6, 0.2, 2.2), colour::METAL, Layer::Shell, None);
+            for sx in [-1.5, 1.5] {
+                model.block(Vec3::new(along + sx, 1.45, -(d * 0.5 + 1.8)), Vec3::new(0.15, 2.9, 0.15), colour::TIMBER, Layer::Shell, Some(Material::Wood));
+            }
+        }
+        BuildingKind::Church => {
+            // The tower goes on up above its room, solid, with a spire; and a porch roof for the door.
+            model.block(Vec3::new(0.0, 4.6 + 5.7, -6.75), Vec3::new(5.0, 11.4, 5.0), colour::STONE, Layer::Shell, Some(Material::Stone));
+            model.push(Piece::Cone { base: Vec3::new(0.0, 16.0, -6.75), radius: 3.2, height: 7.0 }, colour::SLATE, Layer::Shell, None);
         }
         _ => {}
     }
-    steps(&mut model, &layout, site, d);
-    (layout, model)
+    steps(&mut model, &volumes[0].layout, site);
+    (volumes.into_iter().map(|v| v.layout).collect(), model)
+}
+
+/// The roof over a part of a building.
+fn roof(model: &mut Model, v: &plan::Volume, style: &Style) {
+    let outside = v.layout.inside.grown(style.wall_thickness * 0.5);
+    let c = outside.centre();
+    let height = v.layout.height();
+    match v.roof {
+        plan::Roof::Gable { along: plan::Axis::X, rise } => {
+            model.push(Piece::Gable { base: Vec3::new(c.x, height, c.y), length: outside.width(), span: outside.depth(), rise, overhang: 0.35, yaw: 0.0 }, style.roof, Layer::Shell, None);
+        }
+        plan::Roof::Gable { along: plan::Axis::Z, rise } => {
+            model.push(
+                Piece::Gable { base: Vec3::new(c.x, height, c.y), length: outside.depth(), span: outside.width(), rise, overhang: 0.35, yaw: std::f32::consts::FRAC_PI_2 },
+                style.roof,
+                Layer::Shell,
+                None,
+            );
+        }
+        plan::Roof::Flat => {
+            model.block(Vec3::new(c.x, height + 0.12, c.y), Vec3::new(outside.width() + 0.3, 0.24, outside.depth() + 0.3), colour::METAL, Layer::Shell, None);
+        }
+        plan::Roof::Open => {}
+    }
 }
 
 /// Steps up to each front door from the ground outside, if the floor is raised above it.
-fn steps(model: &mut Model, layout: &plan::Layout, site: &Site, depth: f32) {
-    let rise = site.door_rise;
+fn steps(model: &mut Model, layout: &plan::Layout, site: &Site) {
+    let front = layout.inside.z0 - layout.style.wall_thickness * 0.5;
+    for door in &layout.storeys[0].doors_outside {
+        if door.side == plan::Side::Front {
+            steps_at(model, door.along, door.width, front, site.door_rise);
+        }
+    }
+}
+
+/// Steps up to a door at `along` in the front wall at `front` (z), a floor `rise` above the ground.
+pub(crate) fn steps_at(model: &mut Model, along: f32, width: f32, front: f32, rise: f32) {
     if rise < 0.3 {
         return;
     }
     let count = (rise / 0.3).ceil() as usize;
     let step = rise / count as f32;
-    for door in &layout.storeys[0].doors_outside {
-        if door.side != plan::Side::Front {
-            continue;
-        }
-        for i in 0..count - 1 {
-            // The outermost first: each is a step lower and a step further out.
-            let top = -rise + (i as f32 + 1.0) * step;
-            let out = (count - 1 - i) as f32 * 0.4;
-            model.span(
-                Vec3::new(door.along - door.width * 0.5 - 0.3, -rise - 0.6, -depth * 0.5 - out - 0.4),
-                Vec3::new(door.along + door.width * 0.5 + 0.3, top, -depth * 0.5 - out + 0.0),
-                colour::STONE,
-                Layer::Shell,
-                Some(Material::Stone),
-            );
-        }
+    for i in 0..count - 1 {
+        // The outermost first: each is a step lower and a step further out.
+        let top = -rise + (i as f32 + 1.0) * step;
+        let out = (count - 1 - i) as f32 * 0.4;
+        model.span(
+            Vec3::new(along - width * 0.5 - 0.3, -rise - 0.6, front - out - 0.4),
+            Vec3::new(along + width * 0.5 + 0.3, top, front - out),
+            colour::STONE,
+            Layer::Shell,
+            Some(Material::Stone),
+        );
     }
 }
 
@@ -189,30 +238,10 @@ fn silo(b: &Building, site: &Site) -> Model {
 }
 
 fn mill(b: &Building, site: &Site) -> Model {
-    let mut model = Model::default();
-    let r = b.width * 0.5;
-    let h = b.wall_height;
-    model.push(Piece::Cylinder { base: Vec3::new(0.0, -site.skirt, 0.0), radius: r, height: h + site.skirt }, colour::STONE, Layer::Shell, Some(Material::Stone));
-    model.push(Piece::Cone { base: Vec3::new(0.0, h, 0.0), radius: r + 0.8, height: 4.5 }, colour::TILE, Layer::Shell, None);
-    // The wheel, on the water side, turning about a horizontal axis.
-    model.block(Vec3::new(0.0, 2.5, -(r + 0.5)), Vec3::new(0.6, 6.0, 6.0), colour::TIMBER, Layer::Shell, None);
-    model
+    mill::build(b, site)
 }
 
-fn church(b: &Building, site: &Site) -> Model {
-    let mut model = Model::default();
-    let _ = b;
-    // Modelled from the nave out: nave 7 x 14, the tower 5 x 5 at its front end.
-    let shift = 2.25;
-    let nave = Vec3::new(7.0, 6.0, 14.0);
-    model.block(Vec3::new(0.0, nave.y * 0.5 - site.skirt * 0.5, shift), Vec3::new(nave.x, nave.y + site.skirt, nave.z), colour::STONE, Layer::Shell, Some(Material::Stone));
-    model.push(Piece::Gable { base: Vec3::new(0.0, nave.y, shift), length: nave.x, span: nave.z, rise: 3.5, overhang: 0.0, yaw: std::f32::consts::FRAC_PI_2 }, colour::SLATE, Layer::Shell, None);
-    model.block(Vec3::new(0.0, 8.0 - site.skirt * 0.5, -9.0 + shift), Vec3::new(5.0, 16.0 + site.skirt, 5.0), colour::STONE, Layer::Shell, Some(Material::Stone));
-    model.push(Piece::Cone { base: Vec3::new(0.0, 16.0, -9.0 + shift), radius: 3.2, height: 7.0 }, colour::SLATE, Layer::Shell, None);
-    model
-}
-
-fn petrol_station(b: &Building, _site: &Site, rng: &mut Rng) -> Model {
+fn petrol_station(b: &Building, _site: &Site, rng: &mut Rng) -> (Vec<plan::Layout>, Model) {
     let mut model = Model::default();
     let (w, d) = (b.width, b.depth);
     let cube = |model: &mut Model, c: Vec3, size: Vec3, colour: Rgb, solid: Option<Material>| model.block(c, size, colour, Layer::Shell, solid);
@@ -225,13 +254,14 @@ fn petrol_station(b: &Building, _site: &Site, rng: &mut Rng) -> Model {
     for (x, z) in [(-2.2, -6.2), (2.2, -6.2), (-2.2, -3.8), (2.2, -3.8)] {
         cube(&mut model, Vec3::new(x, 0.75, z), Vec3::new(0.75, 1.5, 0.45), colour::AWNINGS[0], Some(Material::Metal));
     }
-    // The kiosk, solid for now.
-    cube(&mut model, Vec3::new(0.0, 1.6, 6.0), Vec3::new(8.5, 3.2, 5.0), colour::WHITE, Some(Material::Stone));
-    cube(&mut model, Vec3::new(0.0, 1.5, 3.46), Vec3::new(6.5, 1.6, 0.08), colour::GLASS, None);
-    cube(&mut model, Vec3::new(0.0, 3.35, 6.0), Vec3::new(9.2, 0.3, 5.7), colour::METAL, None);
+    // The kiosk is a small shop.
+    let volume = public::kiosk(style_for(b, rng));
+    model.extend(plan::assemble(&volume.layout, _site.skirt, rng));
+    roof(&mut model, &volume, &volume.layout.style);
+    let layouts = vec![volume.layout.clone()];
     cube(&mut model, Vec3::new(9.0, 3.5, -9.0), Vec3::new(0.35, 7.0, 0.35), colour::METAL, Some(Material::Metal));
     cube(&mut model, Vec3::new(9.0, 6.6, -9.0), Vec3::new(1.9, 1.7, 0.25), colour::AWNINGS[3], None);
-    model
+    (layouts, model)
 }
 
 #[cfg(test)]
@@ -240,6 +270,30 @@ mod tests {
     use crate::map::TerrainMap;
     use crate::params::GenParams;
     use crate::settlement_plan::SettlementPlan;
+
+    /// The model of a building as JSON, for the drawing tool, and how many items it has.
+    fn model_json(b: &Building, map: &TerrainMap) -> (String, usize) {
+        let ground = crate::settlement::ground_under(map, b);
+        let mut rng = Rng::from_position(b.centre);
+        let model = build(b, &ground.site, &mut rng);
+        let items: Vec<String> = model
+            .items
+            .iter()
+            .map(|i| {
+                let (kind, a, b, c) = match i.piece {
+                    Piece::Block { centre, size, yaw } => ("block", centre, size, yaw),
+                    Piece::Gable { base, length, span, rise, yaw, .. } => ("gable", base, Vec3::new(length, rise, span), yaw),
+                    Piece::Cylinder { base, radius, height } => ("cylinder", base, Vec3::new(radius, height, 0.0), 0.0),
+                    Piece::Cone { base, radius, height } => ("cone", base, Vec3::new(radius, height, 0.0), 0.0),
+                };
+                format!(
+                    "{{\"kind\":\"{kind}\",\"centre\":[{},{},{}],\"size\":[{},{},{}],\"yaw\":{},\"colour\":[{},{},{}],\"interior\":{},\"solid\":{}}}",
+                    a.x, a.y, a.z, b.x, b.y, b.z, c, i.colour[0], i.colour[1], i.colour[2], i.layer == Layer::Interior, i.solid.is_some()
+                )
+            })
+            .collect();
+        (format!("{{\"building\":\"{:?} {:.1}x{:.1}\",\"items\":[{}]}}", b.kind, b.width, b.depth, items.join(",")), model.items.len())
+    }
 
     /// Writes a model of one building of a kind on the real map as JSON, for `tools/draw_building.py`.
     ///   BUILDING_KIND=House BUILDING_INDEX=0 BUILDING_DUMP=/tmp/house.json cargo test --lib dump_a_building -- --ignored
@@ -254,31 +308,13 @@ mod tests {
         let roads = crate::roads::RoadNetwork::generate(&map, &params);
         let plan = SettlementPlan::generate(&map, &roads);
         let b = plan.layouts.iter().flat_map(|l| &l.buildings).filter(|b| format!("{:?}", b.kind) == kind).nth(index).expect("no such building");
-        let ground = crate::settlement::ground_under(&map, b);
-        let mut rng = Rng::from_position(b.centre);
-        let model = build(b, &ground.site, &mut rng);
-        let items: Vec<String> = model
-            .items
-            .iter()
-            .map(|i| {
-                let (kind, a, b, c, d) = match i.piece {
-                    Piece::Block { centre, size, yaw } => ("block", centre, size, yaw, 0.0),
-                    Piece::Gable { base, length, span, rise, yaw, .. } => ("gable", base, Vec3::new(length, rise, span), yaw, 0.0),
-                    Piece::Cylinder { base, radius, height } => ("cylinder", base, Vec3::new(radius, height, 0.0), 0.0, 0.0),
-                    Piece::Cone { base, radius, height } => ("cone", base, Vec3::new(radius, height, 0.0), 0.0, 0.0),
-                };
-                let _ = d;
-                format!(
-                    "{{\"kind\":\"{kind}\",\"centre\":[{},{},{}],\"size\":[{},{},{}],\"yaw\":{},\"colour\":[{},{},{}],\"interior\":{},\"solid\":{}}}",
-                    a.x, a.y, a.z, b.x, b.y, b.z, c, i.colour[0], i.colour[1], i.colour[2], i.layer == Layer::Interior, i.solid.is_some()
-                )
-            })
-            .collect();
-        std::fs::write(&path, format!("{{\"building\":\"{:?} {:.1}x{:.1}\",\"items\":[{}]}}", b.kind, b.width, b.depth, items.join(","))).unwrap();
-        eprintln!("{:?} {:.1} x {:.1}: {} items", b.kind, b.width, b.depth, model.items.len());
+        let (json, count) = model_json(b, &map);
+        std::fs::write(&path, json).unwrap();
+        eprintln!("{:?} {:.1} x {:.1}: {} items", b.kind, b.width, b.depth, count);
     }
 
     use crate::collision::{Colliders, PLAYER_RADIUS, STEP_DOWN, STEP_UP};
+    use geom::Rect;
     use std::collections::{HashSet, VecDeque};
 
     const CELL: f32 = 0.1;
@@ -286,13 +322,20 @@ mod tests {
     /// Where a person could walk in a building, found by walking: from outside the front door, over
     /// every cell they can step to without being pushed back by something solid or dropping off an edge,
     /// following the floor (and the stairs) up and down. Returns the cells reached, with the height of
-    /// the feet in each.
-    fn walk(model: &geom::Model, layout: &plan::Layout, ground: f32) -> Vec<(IVec2, f32)> {
+    /// the feet in each, and the bounds the cells are numbered in.
+    fn walk(model: &geom::Model, layouts: &[plan::Layout], ground: f32) -> (Vec<(IVec2, f32)>, geom::Rect) {
         let mut colliders = Colliders::default();
         for solid in model.solids(Vec3::ZERO, 0.0) {
             colliders.add(solid);
         }
-        let bounds = layout.inside.grown(2.5);
+        let mut bounds = layouts[0].inside;
+        for l in layouts {
+            bounds.x0 = bounds.x0.min(l.inside.x0);
+            bounds.z0 = bounds.z0.min(l.inside.z0);
+            bounds.x1 = bounds.x1.max(l.inside.x1);
+            bounds.z1 = bounds.z1.max(l.inside.z1);
+        }
+        let bounds = bounds.grown(2.5);
         let cell_at = |c: IVec2| Vec2::new(bounds.x0 + (c.x as f32 + 0.5) * CELL, bounds.z0 + (c.y as f32 + 0.5) * CELL);
         let feet_at = |p: Vec2, from: f32| -> Option<f32> {
             // The floor under a point as far as someone whose feet are at `from` can tell: what they can
@@ -304,9 +347,10 @@ mod tests {
         let mut seen: HashSet<(IVec2, i32)> = HashSet::new();
         let mut reached: Vec<(IVec2, f32)> = Vec::new();
         let mut queue = VecDeque::new();
-        // From just outside each front door.
-        for door in &layout.storeys[0].doors_outside {
-            let start = IVec2::new(((door.along - bounds.x0) / CELL) as i32, ((layout.inside.z0 - 1.0 - bounds.z0) / CELL) as i32);
+        // From just outside each front door of the first part.
+        let first = &layouts[0];
+        for door in first.storeys[0].doors_outside.iter().filter(|d| d.side == plan::Side::Front) {
+            let start = IVec2::new(((door.along - bounds.x0) / CELL) as i32, ((first.inside.z0 - 1.0 - bounds.z0) / CELL) as i32);
             seen.insert((start, 0));
             queue.push_back((start, ground));
         }
@@ -330,26 +374,30 @@ mod tests {
                 queue.push_back((n, floor));
             }
         }
-        reached
+        (reached, bounds)
     }
 
     /// Every room of a building can be walked to from the front door, at its own floor.
     fn check_every_room_is_reachable(b: &Building, map: &TerrainMap) -> Result<(), String> {
         let ground = crate::settlement::ground_under(map, b);
         let mut rng = Rng::from_position(b.centre);
-        let (layout, model) = planned(b, &ground.site, &mut rng);
-        let reached = walk(&model, &layout, -0.12);
-        let bounds = layout.inside.grown(2.5);
-        for (s, storey) in layout.storeys.iter().enumerate() {
-            let floor = layout.floor_of(s);
-            for (i, room) in storey.rooms.iter().enumerate() {
-                let inside = room.rect.grown(-0.3);
-                let found = reached.iter().any(|&(c, feet)| {
-                    let p = Vec2::new(bounds.x0 + (c.x as f32 + 0.5) * CELL, bounds.z0 + (c.y as f32 + 0.5) * CELL);
-                    inside.contains(p) && (feet - floor).abs() < 0.3
-                });
-                if !found {
-                    return Err(format!("{:?} {:.1}x{:.1}: the {:?} (room {i}) of storey {s} can't be reached", b.kind, b.width, b.depth, room.kind));
+        let (layouts, model) = planned(b, &ground.site, &mut rng);
+        if layouts.is_empty() {
+            return Ok(());
+        }
+        let (reached, bounds) = walk(&model, &layouts, -0.12);
+        for layout in &layouts {
+            for (s, storey) in layout.storeys.iter().enumerate() {
+                let floor = layout.floor_of(s);
+                for (i, room) in storey.rooms.iter().enumerate() {
+                    let inside = room.rect.grown(-0.3);
+                    let found = reached.iter().any(|&(c, feet)| {
+                        let p = Vec2::new(bounds.x0 + (c.x as f32 + 0.5) * CELL, bounds.z0 + (c.y as f32 + 0.5) * CELL);
+                        inside.contains(p) && (feet - floor).abs() < 0.3
+                    });
+                    if !found {
+                        return Err(format!("{:?} {:.1}x{:.1}: the {:?} (room {i}) of storey {s} can't be reached", b.kind, b.width, b.depth, room.kind));
+                    }
                 }
             }
         }
@@ -361,10 +409,11 @@ mod tests {
         let params = GenParams::default();
         let map = TerrainMap::generate(crate::MAP_SEED, &params);
         let roads = crate::roads::RoadNetwork::generate(&map, &params);
-        let plan = SettlementPlan::generate(&map, &roads);
+        let mut plan = SettlementPlan::generate(&map, &roads);
+        plan.sheds = crate::fill::shed_buildings(&map, &crate::zones::ZoneMap::generate(&map, &params));
         let mut checked = 0;
         let mut failures = Vec::new();
-        for (i, b) in plan.layouts.iter().flat_map(|l| &l.buildings).filter(|b| matches!(b.kind, BuildingKind::Cottage | BuildingKind::House | BuildingKind::Farmhouse | BuildingKind::Terrace)).enumerate() {
+        for (i, b) in plan.layouts.iter().flat_map(|l| &l.buildings).chain(&plan.sheds).filter(|b| !matches!(b.kind, BuildingKind::Silo | BuildingKind::Mill)).enumerate() {
             if i % 4 != 0 {
                 continue;
             }
@@ -376,18 +425,40 @@ mod tests {
         eprintln!("{checked} buildings checked, {} failures", failures.len());
         if let Ok(which) = std::env::var("SHOW_FAILURE") {
             let which: usize = which.parse().unwrap_or(0);
-            let b = plan.layouts.iter().flat_map(|l| &l.buildings).filter(|b| matches!(b.kind, BuildingKind::Cottage | BuildingKind::House | BuildingKind::Farmhouse | BuildingKind::Terrace)).enumerate().filter(|(i, b)| i % 4 == 0 && check_every_room_is_reachable(b, &map).is_err()).map(|(_, b)| b).nth(which).unwrap();
+            let b = plan.layouts.iter().flat_map(|l| &l.buildings).filter(|b| !matches!(b.kind, BuildingKind::Silo | BuildingKind::Mill)).enumerate().filter(|(i, b)| i % 4 == 0 && check_every_room_is_reachable(b, &map).is_err()).map(|(_, b)| b).nth(which).unwrap();
+            if let Ok(path) = std::env::var("SHOW_DUMP") {
+                std::fs::write(path, model_json(b, &map).0).unwrap();
+            }
             let ground = crate::settlement::ground_under(&map, b);
             let mut rng = Rng::from_position(b.centre);
-            let (layout, model) = planned(b, &ground.site, &mut rng);
-            let reached = walk(&model, &layout, -0.12);
-            let bounds = layout.inside.grown(2.5);
+            let (layouts, model) = planned(b, &ground.site, &mut rng);
+            let (reached, bounds) = walk(&model, &layouts, -0.12);
+            for l in &layouts {
+                for (si, st) in l.storeys.iter().enumerate() {
+                    for (ri, r) in st.rooms.iter().enumerate() {
+                        eprintln!("storey {si} room {ri} {:?} {:.2},{:.2} to {:.2},{:.2}", r.kind, r.rect.x0, r.rect.z0, r.rect.x1, r.rect.z1);
+                    }
+                }
+            }
+            if let Ok(room) = std::env::var("SHOW_ROOM") {
+                let ri: usize = room.parse().unwrap();
+                let r = layouts[0].storeys[0].rooms[ri].rect.grown(0.3);
+                for it in &model.items {
+                    if let Piece::Block { centre, size, .. } = it.piece {
+                        let b = Rect::new(centre.x - size.x * 0.5, centre.z - size.z * 0.5, centre.x + size.x * 0.5, centre.z + size.z * 0.5);
+                        if b.overlaps(&r) && centre.y - size.y * 0.5 < 1.0 && it.solid.is_some() {
+                            eprintln!("  item {:.2},{:.2} to {:.2},{:.2} y {:.2}..{:.2}", b.x0, b.z0, b.x1, b.z1, centre.y - size.y * 0.5, centre.y + size.y * 0.5);
+                        }
+                    }
+                }
+            }
             let (nx, nz) = ((bounds.width() / CELL) as i32, (bounds.depth() / CELL) as i32);
-            for level in 0..layout.storeys.len() {
+            let levels = layouts.iter().map(|l| l.storeys.len()).max().unwrap_or(1);
+            for level in 0..levels {
                 eprintln!("storey {level}  ({:?} {:.1}x{:.1})", b.kind, b.width, b.depth);
-                let floor = layout.floor_of(level);
-                for z in (0..nz).step_by(2) {
-                    let row: String = (0..nx.min(70)).step_by(1).map(|x| if reached.iter().any(|&(c, f)| c == IVec2::new(x, z) && (f - floor).abs() < 0.3) { '.' } else { '#' }).collect();
+                let floor = layouts[0].floor_of(level.min(layouts[0].storeys.len() - 1));
+                for z in (0..nz).step_by(3) {
+                    let row: String = (0..nx.min(180)).step_by(2).map(|x| if reached.iter().any(|&(c, f)| c == IVec2::new(x, z) && (f - floor).abs() < 0.3) { '.' } else { '#' }).collect();
                     eprintln!("{row}");
                 }
             }
@@ -404,10 +475,23 @@ mod tests {
         let plan = SettlementPlan::generate(&map, &roads);
         let kind = std::env::var("BKIND").unwrap_or_else(|_| "House".into());
         let index: usize = std::env::var("BINDEX").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-        let b = plan.layouts.iter().flat_map(|l| &l.buildings).filter(|b| format!("{:?}", b.kind) == kind).nth(index).unwrap();
+        let b = match std::env::var("BFAILING") {
+            Ok(n) => plan
+                .layouts
+                .iter()
+                .flat_map(|l| &l.buildings)
+                .filter(|b| !matches!(b.kind, BuildingKind::Silo | BuildingKind::Mill))
+                .enumerate()
+                .filter(|(i, b)| i % 4 == 0 && check_every_room_is_reachable(b, &map).is_err())
+                .map(|(_, b)| b)
+                .nth(n.parse().unwrap())
+                .unwrap(),
+            Err(_) => plan.layouts.iter().flat_map(|l| &l.buildings).filter(|b| format!("{:?}", b.kind) == kind).nth(index).unwrap(),
+        };
         let ground = crate::settlement::ground_under(&map, b);
         let mut rng = Rng::from_position(b.centre);
-        let (layout, model) = planned(b, &ground.site, &mut rng);
+        let (layouts, model) = planned(b, &ground.site, &mut rng);
+        let layout = layouts[0].clone();
         eprintln!("inside {:?}", layout.inside);
         for (s, st) in layout.storeys.iter().enumerate() {
             for r in &st.rooms {
@@ -429,5 +513,66 @@ mod tests {
         let floor = support.unwrap_or(-0.12).max(-0.12);
         let pushed = colliders.resolve(p, PLAYER_RADIUS, floor, STEP_UP);
         eprintln!("at {p:?} from {from}: support {support:?}, floor {floor}, resolve -> {pushed:?} (moved {:.3})", pushed.distance(p));
+    }
+
+    #[test]
+    fn the_mills_floors_are_all_reached_by_its_stairs() {
+        let params = GenParams::default();
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
+        let roads = crate::roads::RoadNetwork::generate(&map, &params);
+        let plan = SettlementPlan::generate(&map, &roads);
+        let mills: Vec<&Building> = plan.layouts.iter().flat_map(|l| &l.buildings).filter(|b| b.kind == BuildingKind::Mill).collect();
+        assert!(!mills.is_empty());
+        for b in mills {
+            let ground = crate::settlement::ground_under(&map, b);
+            let mut rng = Rng::from_position(b.centre);
+            let (_, model) = planned(b, &ground.site, &mut rng);
+            // A stand-in for a plan: the floors and a door.
+            let storey = b.wall_height / 3.0;
+            let room = plan::Room { rect: Rect::new(-1.0, -1.0, 1.0, 1.0), kind: plan::RoomKind::Mill };
+            let floors: Vec<plan::Storey> = (0..3)
+                .map(|_| plan::Storey {
+                    rooms: vec![room],
+                    height: storey,
+                    doors_outside: vec![plan::ExteriorDoor { side: plan::Side::Front, along: 0.0, width: 1.2, height: 2.2 }],
+                    ..Default::default()
+                })
+                .collect();
+            let layout = plan::Layout { inside: Rect::new(-3.0, -3.0, 3.0, 3.0), storeys: floors, style: plan::Style::default() };
+            // The door is at the front of the ring, 3.7 m out; start outside it.
+            let (reached, bounds) = walk(&model, &[layout.clone()], -0.12);
+            for s in 0..3 {
+                let floor = layout.floor_of(s);
+                let found = reached.iter().any(|&(c, feet)| {
+                    let p = Vec2::new(bounds.x0 + (c.x as f32 + 0.5) * CELL, bounds.z0 + (c.y as f32 + 0.5) * CELL);
+                    p.length() < 3.0 && (feet - floor).abs() < 0.3
+                });
+                assert!(found, "floor {s} of the mill can't be reached");
+            }
+        }
+    }
+
+    /// How long it takes to build every building of the map, and how much there is of it.
+    ///   cargo test --lib how_much_is_built -- --ignored --nocapture
+    #[test]
+    #[ignore = "a measurement"]
+    fn how_much_is_built() {
+        let params = GenParams::default();
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
+        let roads = crate::roads::RoadNetwork::generate(&map, &params);
+        let mut plan = SettlementPlan::generate(&map, &roads);
+        plan.sheds = crate::fill::shed_buildings(&map, &crate::zones::ZoneMap::generate(&map, &params));
+        let start = std::time::Instant::now();
+        let (mut items, mut solids, mut shell_tris, mut count) = (0, 0, 0usize, 0);
+        for b in plan.layouts.iter().flat_map(|l| &l.buildings).chain(&plan.sheds) {
+            let ground = crate::settlement::ground_under(&map, b);
+            let mut rng = Rng::from_position(b.centre);
+            let model = build(b, &ground.site, &mut rng);
+            items += model.items.len();
+            solids += model.solids(Vec3::ZERO, 0.0).len();
+            shell_tris += model.items.iter().filter(|i| i.layer == Layer::Shell).count() * 12;
+            count += 1;
+        }
+        eprintln!("{count} buildings in {:.2?}: {items} items, {solids} solids, about {shell_tris} shell triangles", start.elapsed());
     }
 }

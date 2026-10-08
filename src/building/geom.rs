@@ -13,6 +13,8 @@ use crate::meshbake::{MeshBuilder, Rgb};
 pub enum Layer {
     Shell,
     Interior,
+    /// Window glass: baked apart so that it can be see-through.
+    Glass,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -144,7 +146,7 @@ impl Model {
 
     /// The mesh of everything on a layer.
     pub fn bake(&self, layer: Layer) -> Mesh {
-        let mut b = MeshBuilder::default();
+        let mut b = if layer == Layer::Glass { MeshBuilder::with_alpha(0.22) } else { MeshBuilder::default() };
         for item in self.items.iter().filter(|i| i.layer == layer) {
             match item.piece {
                 Piece::Block { centre, size, yaw } => b.cuboid(centre, size, yaw, item.colour),
@@ -154,6 +156,11 @@ impl Model {
             }
         }
         b.into_mesh()
+    }
+
+    pub fn extend(&mut self, other: Model) {
+        self.items.extend(other.items);
+        self.lights.extend(other.lights);
     }
 
     pub fn has(&self, layer: Layer) -> bool {

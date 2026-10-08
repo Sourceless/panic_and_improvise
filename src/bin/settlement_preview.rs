@@ -105,7 +105,7 @@ fn setup(
     let track = ribbon(RoadKind::Minor, line(Vec2::new(700.0, 0.0), Vec2::new(802.0, 0.0), 5.0), false, false);
     let mill_road = ribbon(RoadKind::Major, line(Vec2::new(-900.0, 0.0), Vec2::new(-800.0, 0.0), 5.0), false, false);
     let mut ribbons = vec![main, north_south, track, mill_road];
-    let plan = SettlementPlan { layouts: map.pois.iter().map(|poi| Layout::generate(&map, poi, &ribbons)).collect() };
+    let plan = SettlementPlan { layouts: map.pois.iter().map(|poi| Layout::generate(&map, poi, &ribbons)).collect(), sheds: Vec::new() };
     ribbons.extend(plan.lanes());
     eprintln!(
         "{} buildings: {:?}",
@@ -164,14 +164,30 @@ fn setup(
         let at = Vec3::new(b.centre.x, 20.12, b.centre.y);
         View { name, camera: Transform::from_translation(at + turn * local).looking_at(at + turn * look, Vec3::Y), fov: 1.2 }
     };
-    for (kind, label) in [(BuildingKind::House, "house"), (BuildingKind::Cottage, "cottage"), (BuildingKind::Terrace, "terrace"), (BuildingKind::Farmhouse, "farmhouse")] {
-        let found = plan.layouts.iter().flat_map(|l| &l.buildings).find(|b| b.kind == kind);
-        if let Some(b) = found {
-            let (w, d) = (b.width, b.depth);
-            views.push(inside(Box::leak(format!("{label}_door").into_boxed_str()), b, Vec3::new(-w * 0.2, 1.6, d * 0.3), Vec3::new(-w * 0.15, 1.2, -d * 0.5)));
-            views.push(inside(Box::leak(format!("{label}_back").into_boxed_str()), b, Vec3::new(w * 0.15, 1.6, -d * 0.3), Vec3::new(w * 0.2, 1.0, d * 0.5)));
-            views.push(inside(Box::leak(format!("{label}_up").into_boxed_str()), b, Vec3::new(-w * 0.2, 4.4, d * 0.3), Vec3::new(w * 0.1, 3.4, -d * 0.4)));
-            views.push(inside(Box::leak(format!("{label}_cut").into_boxed_str()), b, Vec3::new(w * 0.45, 3.0, d * 0.45), Vec3::new(-w * 0.1, 0.8, -d * 0.1)));
+    // Each kind of building from inside: standing just in the door, looking down its length.
+    let kinds = [
+        (BuildingKind::House, "house"),
+        (BuildingKind::Cottage, "cottage"),
+        (BuildingKind::Terrace, "terrace"),
+        (BuildingKind::Farmhouse, "farmhouse"),
+        (BuildingKind::Pub, "pub_in"),
+        (BuildingKind::Shop, "shop_in"),
+        (BuildingKind::School, "school_in"),
+        (BuildingKind::Hall, "hall_in"),
+        (BuildingKind::Church, "church_in"),
+        (BuildingKind::Barn, "barn_in"),
+        (BuildingKind::Mill, "mill_in"),
+    ];
+    let all: Vec<&fps_prototype::settlement_plan::Building> = plan.layouts.iter().flat_map(|l| &l.buildings).collect();
+    for (kind, label) in kinds {
+        let Some(b) = all.iter().find(|b| b.kind == kind) else { continue };
+        let (w, d) = (b.width, b.depth);
+        let (near, far) = if kind == BuildingKind::Church { (-2.0, 8.0) } else if kind == BuildingKind::Mill { (-2.6, 2.0) } else { (-d * 0.5 + 1.6, d * 0.5) };
+        let off = if matches!(kind, BuildingKind::Church | BuildingKind::Mill) { 0.0 } else { w * 0.2 };
+        views.push(inside(Box::leak(format!("{label}_a").into_boxed_str()), b, Vec3::new(off, 1.65, near), Vec3::new(-off * 0.3, 1.3, far)));
+        views.push(inside(Box::leak(format!("{label}_b").into_boxed_str()), b, Vec3::new(-off, 1.65, far - 1.2), Vec3::new(off * 0.5, 1.2, near)));
+        if matches!(kind, BuildingKind::House | BuildingKind::Cottage | BuildingKind::Terrace | BuildingKind::Farmhouse | BuildingKind::Pub) {
+            views.push(inside(Box::leak(format!("{label}_up").into_boxed_str()), b, Vec3::new(-w * 0.2, 4.3, d * 0.3), Vec3::new(w * 0.1, 3.4, -d * 0.4)));
         }
     }
     commands.insert_resource(Views(views));

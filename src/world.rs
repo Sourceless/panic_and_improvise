@@ -34,7 +34,8 @@ pub fn build_world(
     let zones = ZoneMap::generate(map, params);
     let mut roads = RoadNetwork::generate(map, params);
     // Each settlement is planned along the roads that reach it, and brings its own lanes.
-    let plan = SettlementPlan::generate(map, &roads);
+    let mut plan = SettlementPlan::generate(map, &roads);
+    plan.sheds = crate::fill::shed_buildings(map, &zones);
     roads.add_ribbons(plan.lanes());
     // Everything solid that the generators place is collected here for the player to bump into.
     let mut colliders = Colliders::default();

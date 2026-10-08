@@ -3,7 +3,7 @@
 //! a small one and no two are quite alike.
 
 use super::geom::Rect;
-use super::plan::{Climb, ExteriorDoor, Layout, Room, RoomKind, Side, Stair, Storey, Style};
+use super::plan::{Axis, Climb, ExteriorDoor, Layout, Room, RoomKind, Roof, Side, Stair, Storey, Style, Volume};
 use crate::settlement_plan::{Building, BuildingKind, Rng};
 
 /// Floor-to-floor height of a house.
@@ -27,15 +27,20 @@ pub fn stair_run(height: f32) -> f32 {
     (risers - 1.0) * TREAD
 }
 
-/// The plan of a building.
-pub fn layout(b: &Building, style: Style, rng: &mut Rng) -> Layout {
+/// The parts of a building, each with its plan and roof.
+pub fn volumes(b: &Building, style: Style, rng: &mut Rng) -> Vec<Volume> {
+    if let Some(volumes) = super::public::volumes(b, style, rng) {
+        return volumes;
+    }
     let inside = Rect::new(-b.width * 0.5, -b.depth * 0.5, b.width * 0.5, b.depth * 0.5).grown(-style.wall_thickness * 0.5);
-    match b.kind {
+    let layout = match b.kind {
         BuildingKind::Cottage => cottage(inside, b.wall_height, style, rng),
         BuildingKind::House | BuildingKind::Farmhouse => house(inside, style, rng),
         BuildingKind::Terrace => terrace(inside, style, rng),
         _ => single_room(inside, style, RoomKind::Store, 3.2),
-    }
+    };
+    let rise = (b.depth * 0.5).min(3.6);
+    vec![Volume { layout, roof: Roof::Gable { along: Axis::X, rise } }]
 }
 
 /// An empty box of a building, for kinds that don't have a plan of their own yet.
@@ -44,7 +49,7 @@ fn single_room(inside: Rect, style: Style, kind: RoomKind, height: f32) -> Layou
     let storey = Storey {
         rooms: vec![room(inside, kind)],
         roots: vec![0],
-        doors_outside: vec![ExteriorDoor { side: Side::Front, along, width: style.door_width }],
+        doors_outside: vec![ExteriorDoor { side: Side::Front, along, width: style.door_width, height: super::plan::DOOR_HEIGHT }],
         height,
         ..Default::default()
     };
@@ -90,7 +95,7 @@ fn single_storey(inside: Rect, style: Style, rng: &mut Rng) -> Layout {
     let storey = Storey {
         rooms,
         roots: vec![0],
-        doors_outside: vec![ExteriorDoor { side: Side::Front, along: front_door_x, width: style.door_width }],
+        doors_outside: vec![ExteriorDoor { side: Side::Front, along: front_door_x, width: style.door_width, height: super::plan::DOOR_HEIGHT }],
         height: h,
         ..Default::default()
     };
@@ -136,7 +141,7 @@ fn open_stair_house(inside: Rect, style: Style, rng: &mut Rng) -> Option<Layout>
         rooms: ground,
         stairs_up: vec![stair],
         roots: vec![0],
-        doors_outside: vec![ExteriorDoor { side: Side::Front, along: door_x, width: style.door_width }],
+        doors_outside: vec![ExteriorDoor { side: Side::Front, along: door_x, width: style.door_width, height: super::plan::DOOR_HEIGHT }],
         height: h,
         ..Default::default()
     };
@@ -188,7 +193,7 @@ fn house(inside: Rect, style: Style, rng: &mut Rng) -> Layout {
         stairs_up: vec![stair],
         extra_links: links,
         roots: vec![0],
-        doors_outside: vec![ExteriorDoor { side: Side::Front, along: door_x, width: style.door_width }],
+        doors_outside: vec![ExteriorDoor { side: Side::Front, along: door_x, width: style.door_width, height: super::plan::DOOR_HEIGHT }],
         height: h,
         ..Default::default()
     };

@@ -40,6 +40,8 @@ pub enum BuildingKind {
     Silo,
     /// The mill's tower: round.
     Mill,
+    /// A big metal shed on industrial land, outside any settlement.
+    Shed,
 }
 
 impl BuildingKind {
@@ -98,12 +100,14 @@ pub struct Layout {
 #[derive(Resource, Clone, Debug, Default)]
 pub struct SettlementPlan {
     pub layouts: Vec<Layout>,
+    /// The sheds of the industrial land, which belong to no settlement.
+    pub sheds: Vec<Building>,
 }
 
 impl SettlementPlan {
     pub fn generate(map: &TerrainMap, roads: &RoadNetwork) -> SettlementPlan {
         let ribbons = road_ribbons(map, roads);
-        SettlementPlan { layouts: map.pois.iter().map(|poi| Layout::generate(map, poi, &ribbons)).collect() }
+        SettlementPlan { layouts: map.pois.iter().map(|poi| Layout::generate(map, poi, &ribbons)).collect(), sheds: Vec::new() }
     }
 
     /// Every lane of every settlement.

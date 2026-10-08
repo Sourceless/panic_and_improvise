@@ -44,6 +44,11 @@ pub struct Buildings {
     since_look: f32,
 }
 
+/// Window glass: see-through, a little shiny.
+fn glass_material(materials: &mut Assets<StandardMaterial>) -> Handle<StandardMaterial> {
+    materials.add(StandardMaterial { base_color: Color::WHITE, alpha_mode: AlphaMode::Blend, perceptual_roughness: 0.08, reflectance: 0.6, ..default() })
+}
+
 pub struct SettlementPlugin;
 
 impl Plugin for SettlementPlugin {
@@ -76,24 +81,28 @@ pub fn spawn_settlements(
 ) {
     // Every part is coloured in its own vertices, so one plain material serves the lot.
     let material = materials.add(StandardMaterial { base_color: Color::WHITE, perceptual_roughness: 0.9, ..default() });
+    let glass = glass_material(materials);
     let mut entries = Vec::new();
-    for (poi, layout) in map.pois.iter().zip(&plan.layouts) {
-        for (i, b) in layout.buildings.iter().enumerate() {
-            let ground = ground_under(map, b);
-            let origin = Vec3::new(b.centre.x, ground.floor, b.centre.y);
-            let mut rng = Rng::from_position(b.centre + Vec2::splat(i as f32 * 0.37) + poi.position * 0.001);
-            let model = building::build(b, &ground.site, &mut rng);
-            for solid in model.solids(origin, b.yaw) {
-                colliders.add(solid);
-            }
-            commands.spawn((
-                SettlementRoot,
-                Mesh3d(meshes.add(model.bake(Layer::Shell))),
-                MeshMaterial3d(material.clone()),
-                Transform::from_translation(origin).with_rotation(Quat::from_rotation_y(b.yaw)),
-            ));
-            entries.push(Entry { origin, yaw: b.yaw, model: Arc::new(model), interior: None, lamps: Vec::new() });
+    let all = map
+        .pois
+        .iter()
+        .zip(&plan.layouts)
+        .flat_map(|(poi, layout)| layout.buildings.iter().enumerate().map(move |(i, b)| (b, Vec2::splat(i as f32 * 0.37) + poi.position * 0.001)))
+        .chain(plan.sheds.iter().map(|b| (b, Vec2::ZERO)));
+    for (b, jitter) in all {
+        let ground = ground_under(map, b);
+        let origin = Vec3::new(b.centre.x, ground.floor, b.centre.y);
+        let mut rng = Rng::from_position(b.centre + jitter);
+        let model = building::build(b, &ground.site, &mut rng);
+        for solid in model.solids(origin, b.yaw) {
+            colliders.add(solid);
         }
+        let at = Transform::from_translation(origin).with_rotation(Quat::from_rotation_y(b.yaw));
+        commands.spawn((SettlementRoot, Mesh3d(meshes.add(model.bake(Layer::Shell))), MeshMaterial3d(material.clone()), at));
+        if model.has(Layer::Glass) {
+            commands.spawn((SettlementRoot, Mesh3d(meshes.add(model.bake(Layer::Glass))), MeshMaterial3d(glass.clone()), at, bevy::light::NotShadowCaster));
+        }
+        entries.push(Entry { origin, yaw: b.yaw, model: Arc::new(model), interior: None, lamps: Vec::new() });
     }
     commands.insert_resource(Buildings { entries, material, since_look: 1.0 });
 }

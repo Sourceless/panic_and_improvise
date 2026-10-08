@@ -7,8 +7,8 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::collections::BinaryHeap;
 
-use crate::collision::{Colliders, Material, Shape, Solid};
-use crate::settlement_plan::SettlementPlan;
+use crate::collision::{Colliders, Material, Solid};
+use crate::settlement_plan::{Building, BuildingKind, SettlementPlan};
 use crate::contour::{clip_to_terrain_triangle, triangulate, Contour, Seg, Smoothing, OPEN};
 use crate::field_material::{FieldExtension, FieldMaterial};
 use crate::map::{fbm, grid_pos, TerrainMap, CELL, TILE_CELLS};
@@ -34,19 +34,12 @@ pub fn spawn_fill(
     colliders: &mut Colliders,
 ) {
     let hedge_points = spawn_field_tiling(commands, meshes, materials, field_materials, textures, map, zones, roads, params, colliders);
-    let sheds = shed_sites(map, zones);
     if !crate::world::skip("trees") {
         // No tree grows through a house, a barn or a shed.
-        let built = plan
-            .layouts
-            .iter()
-            .flat_map(|l| &l.buildings)
-            .map(|b| (b.centre, b.shape()))
-            .chain(sheds.iter().map(|&(p, size)| (p, Shape::Box { centre: p, half: Vec2::new(size.x, size.z) * 0.5, yaw: 0.0 })));
+        let built = plan.layouts.iter().flat_map(|l| &l.buildings).chain(&plan.sheds).map(|b| (b.centre, b.shape()));
         let keepout = crate::vegetation::Keepout::new(built);
         crate::vegetation::spawn_vegetation(commands, meshes, materials, map, zones, &hedge_points, &keepout, colliders);
     }
-    spawn_sheds(commands, meshes, materials, map, &sheds, colliders);
 }
 
 const SMOOTH_PASSES: u32 = 2;
@@ -931,33 +924,8 @@ fn push_hedge_segment(buf: &mut WallBuf, map: &TerrainMap, a: Vec2, ga: f32, b: 
     }
 }
 
-fn spawn_sheds(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    map: &TerrainMap,
-    sheds: &[(Vec2, Vec3)],
-    colliders: &mut Colliders,
-) {
-    let shed = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
-    let wall = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.62, 0.62, 0.64),
-        ..default()
-    });
-    for &(p, size) in sheds {
-        let ground = map.height_at(p);
-        colliders.add(Solid::rect(p, Vec2::new(size.x, size.z) * 0.5, 0.0, ground + size.y).of(Material::Metal));
-        commands.spawn((
-            TerrainRoot,
-            Mesh3d(shed.clone()),
-            MeshMaterial3d(wall.clone()),
-            Transform::from_xyz(p.x, ground + size.y / 2.0, p.y).with_scale(size),
-        ));
-    }
-}
-
-/// Where the sheds of the industrial land stand, and how big (length, height, width) each is.
-fn shed_sites(map: &TerrainMap, zones: &ZoneMap) -> Vec<(Vec2, Vec3)> {
+/// The sheds of the industrial land: where each stands and how big it is.
+pub fn shed_buildings(map: &TerrainMap, zones: &ZoneMap) -> Vec<Building> {
     let mut sites = Vec::new();
     let steps = (crate::map::MAP_SIZE / SHED_SPACING) as usize;
     for iz in 0..steps {
@@ -975,7 +943,7 @@ fn shed_sites(map: &TerrainMap, zones: &ZoneMap) -> Vec<(Vec2, Vec3)> {
                 7.0 + hash01(ix, iz, 11) * 4.0,
                 14.0 + hash01(ix, iz, 12) * 12.0,
             );
-            sites.push((p, size));
+            sites.push(Building { kind: BuildingKind::Shed, centre: p, yaw: 0.0, width: size.x, depth: size.z, wall_height: size.y, front: Vec2::NEG_Y });
         }
     }
     sites
@@ -1002,6 +970,7 @@ fn hash01(ix: usize, iz: usize, salt: u64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collision::Shape;
     use crate::map::TerrainMap;
     use crate::zones::ZoneMap;
 
@@ -1257,14 +1226,8 @@ mod tests {
         let (map, zones, params) = generate();
         let roads = RoadNetwork::generate(&map, &params);
         let settlements = SettlementPlan::generate(&map, &roads);
-        let sheds = shed_sites(&map, &zones);
-        let shapes: Vec<(Vec2, Shape)> = settlements
-            .layouts
-            .iter()
-            .flat_map(|l| &l.buildings)
-            .map(|b| (b.centre, b.shape()))
-            .chain(sheds.iter().map(|&(p, size)| (p, Shape::Box { centre: p, half: Vec2::new(size.x, size.z) * 0.5, yaw: 0.0 })))
-            .collect();
+        let sheds = shed_buildings(&map, &zones);
+        let shapes: Vec<(Vec2, Shape)> = settlements.layouts.iter().flat_map(|l| &l.buildings).chain(&sheds).map(|b| (b.centre, b.shape())).collect();
         let without = crate::vegetation::plan_vegetation(&map, &zones, &[], &crate::vegetation::Keepout::default());
         let keepout = crate::vegetation::Keepout::new(shapes.iter().cloned());
         let with = crate::vegetation::plan_vegetation(&map, &zones, &[], &keepout);

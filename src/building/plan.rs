@@ -6,6 +6,7 @@ use bevy::prelude::*;
 use super::furnish;
 use super::geom::{Layer, Model, Rect};
 use crate::collision::Material;
+use super::colour;
 use crate::meshbake::Rgb;
 use crate::settlement_plan::Rng;
 
@@ -74,6 +75,8 @@ pub struct ExteriorDoor {
     /// Where along that wall (x for the front and back, z for the sides).
     pub along: f32,
     pub width: f32,
+    /// How high the opening is; a barn door is taller than a house door.
+    pub height: f32,
 }
 
 /// The way a stair climbs, in the building's frame.
@@ -163,11 +166,36 @@ impl Default for Style {
     }
 }
 
+impl Style {
+    /// Paint for window frames.
+    pub fn trim_light(&self) -> Rgb {
+        [0.92, 0.92, 0.9]
+    }
+}
+
 pub const INTERIOR_WALL: f32 = 0.12;
 pub const DOOR_HEIGHT: f32 = 2.05;
-pub const INTERIOR_DOOR_WIDTH: f32 = 1.0;
+pub const INTERIOR_DOOR_WIDTH: f32 = 1.1;
 const SLAB: f32 = 0.2;
 const EPS: f32 = 1e-3;
+
+/// How a part of a building is roofed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Roof {
+    /// A pitched roof with its ridge along x or z, `rise` high.
+    Gable { along: Axis, rise: f32 },
+    /// A flat roof with a low parapet.
+    Flat,
+    /// Left to whoever builds the building (a tower with a spire of its own).
+    Open,
+}
+
+/// A part of a building under one roof: a house is one, a church is a nave, a tower and a chancel.
+#[derive(Clone, Debug)]
+pub struct Volume {
+    pub layout: Layout,
+    pub roof: Roof,
+}
 
 /// A whole building's plan.
 #[derive(Clone, Debug)]
@@ -275,6 +303,7 @@ pub struct Door {
     pub edge: usize,
     pub centre: f32,
     pub width: f32,
+    pub height: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -301,7 +330,7 @@ pub fn place_doors(storey: &Storey, edges: &[Edge], keep_clear: &[Rect], rng: &m
                 && outside.along + outside.width * 0.5 <= e.hi + EPS
         });
         if let Some(edge) = found {
-            doors.push(Door { edge, centre: outside.along, width: outside.width });
+            doors.push(Door { edge, centre: outside.along, width: outside.width, height: outside.height });
         }
     }
     // Rooms joined to the first, one at a time: the nearest unjoined room to a joined one, and a
@@ -380,7 +409,7 @@ pub fn place_doors(storey: &Storey, edges: &[Edge], keep_clear: &[Rect], rng: &m
                         de.axis == e.axis && (de.at - e.at).abs() < EPS && (d.centre - c).abs() < (d.width + width) * 0.5 + 0.3
                     });
                 if !clashes {
-                    doors.push(Door { edge: k, centre: c, width });
+                    doors.push(Door { edge: k, centre: c, width, height: DOOR_HEIGHT });
                     break 'edges;
                 }
             }
@@ -496,16 +525,32 @@ pub fn assemble(layout: &Layout, skirt: f32, rng: &mut Rng) -> Model {
             .stairs_up
             .iter()
             .chain(if s > 0 { layout.storeys[s - 1].stairs_up.iter() } else { [].iter() })
-            .map(|st| st.along_its_run(1.0))
+            .map(|st| st.along_its_run(0.4))
             .collect();
         let doors = place_doors(storey, &edges, &stair_footprints, rng);
         let windows = place_windows(storey, &edges, &doors, style, rng);
 
+        // Window panes and their frames.
+        for w in &windows {
+            let e = edges[w.edge];
+            let head = style.window_head.min(storey.height - 0.4);
+            let (h, mid) = (head - style.window_sill, y0 + (head + style.window_sill) * 0.5);
+            let (cx, cz, along_x) = match e.axis {
+                Axis::X => (w.centre, e.at, true),
+                Axis::Z => (e.at, w.centre, false),
+            };
+            let size = |len: f32, depth: f32, hh: f32| if along_x { Vec3::new(len, hh, depth) } else { Vec3::new(depth, hh, len) };
+            model.block(Vec3::new(cx, mid, cz), size(w.width, 0.03, h), colour::GLASS_PANE, Layer::Glass, None);
+            // The frame: a bar up the middle and one across, and the sill.
+            model.block(Vec3::new(cx, mid, cz), size(0.05, 0.08, h), style.trim_light(), Layer::Shell, None);
+            model.block(Vec3::new(cx, mid, cz), size(w.width, 0.08, 0.05), style.trim_light(), Layer::Shell, None);
+            model.block(Vec3::new(cx, y0 + style.window_sill - 0.03, cz), size(w.width + 0.16, style.wall_thickness + 0.12, 0.06), style.trim_light(), Layer::Shell, None);
+        }
         for (k, e) in edges.iter().enumerate() {
             let exterior = e.b.is_none();
             let mut openings: Vec<Opening> = Vec::new();
             for d in doors.iter().filter(|d| d.edge == k) {
-                openings.push(Opening { lo: d.centre - d.width * 0.5, hi: d.centre + d.width * 0.5, sill: 0.0, head: DOOR_HEIGHT.min(storey.height - 0.4) });
+                openings.push(Opening { lo: d.centre - d.width * 0.5, hi: d.centre + d.width * 0.5, sill: 0.0, head: d.height.min(storey.height - 0.4) });
             }
             for w in windows.iter().filter(|w| w.edge == k) {
                 openings.push(Opening { lo: w.centre - w.width * 0.5, hi: w.centre + w.width * 0.5, sill: style.window_sill, head: style.window_head.min(storey.height - 0.4) });
@@ -544,8 +589,16 @@ pub fn assemble(layout: &Layout, skirt: f32, rng: &mut Rng) -> Model {
         // A light in the ceiling of each room that is big enough to want one.
         for room in &storey.rooms {
             if room.rect.area() > 3.5 {
-                let c = room.rect.centre();
-                model.lights.push((Vec3::new(c.x, y1 - 0.4, c.y), room.rect.width().max(room.rect.depth()) * 0.8 + 1.5));
+                // One lamp a room, more in a big one: a lamp every six metres or so each way.
+                let (nx, nz) = (((room.rect.width() / 6.0).ceil() as usize).max(1), ((room.rect.depth() / 6.0).ceil() as usize).max(1));
+                for i in 0..nx {
+                    for j in 0..nz {
+                        let x = room.rect.x0 + room.rect.width() * (i as f32 + 0.5) / nx as f32;
+                        let z = room.rect.z0 + room.rect.depth() * (j as f32 + 0.5) / nz as f32;
+                        let reach = (room.rect.width() / nx as f32).max(room.rect.depth() / nz as f32) * 0.8 + 1.5;
+                        model.lights.push((Vec3::new(x, y1 - 0.4, z), reach));
+                    }
+                }
             }
         }
 
@@ -574,7 +627,7 @@ pub fn assemble(layout: &Layout, skirt: f32, rng: &mut Rng) -> Model {
     model
 }
 
-fn balustrade(model: &mut Model, hole: &Rect, open_end: Option<Climb>, y: f32, style: &Style, inside: &Rect) {
+pub(crate) fn balustrade(model: &mut Model, hole: &Rect, open_end: Option<Climb>, y: f32, style: &Style, inside: &Rect) {
     let colour = style.trim;
     let t = 0.06;
     let h = 1.0;
@@ -604,7 +657,7 @@ fn balustrade(model: &mut Model, hole: &Rect, open_end: Option<Climb>, y: f32, s
 
 /// The steps of a stair: one fewer than the risers, the last riser being from the top step onto the
 /// floor above.
-fn stair(model: &mut Model, st: &Stair, y0: f32, storey_height: f32, ground: bool, style: &Style) {
+pub(crate) fn stair(model: &mut Model, st: &Stair, y0: f32, storey_height: f32, ground: bool, style: &Style) {
     let risers = (storey_height / 0.2).round().max(2.0);
     let rise = storey_height / risers;
     let steps = risers as usize - 1;
@@ -670,7 +723,7 @@ mod tests {
             ],
             height: 2.8,
             roots: vec![0],
-            doors_outside: vec![ExteriorDoor { side: Side::Front, along: 1.1, width: 1.0 }],
+            doors_outside: vec![ExteriorDoor { side: Side::Front, along: 1.1, width: 1.0, height: DOOR_HEIGHT }],
             ..Default::default()
         };
         let e = edges(&storey.rooms);
