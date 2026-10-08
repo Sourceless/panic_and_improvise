@@ -1,6 +1,7 @@
 pub mod cloud_material;
 pub mod cloud_shadows;
 pub mod contour;
+pub mod crosshair;
 pub mod field_material;
 pub mod fill;
 pub mod grass;

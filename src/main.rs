@@ -12,21 +12,6 @@ fn main() {
             ..default()
         }))
         .add_plugins((GamePlugin, TerrainPlugin))
-        .add_systems(Startup, setup_hud)
+        .add_plugins(fps_prototype::crosshair::CrosshairPlugin)
         .run();
-}
-
-fn setup_hud(mut commands: Commands) {
-    commands.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Percent(50.0),
-            top: Val::Percent(50.0),
-            width: Val::Px(4.0),
-            height: Val::Px(4.0),
-            margin: UiRect::all(Val::Px(-2.0)),
-            ..default()
-        },
-        BackgroundColor(Color::WHITE),
-    ));
 }

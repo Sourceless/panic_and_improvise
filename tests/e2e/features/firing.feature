@@ -53,3 +53,13 @@ Feature: Firing the gun
     When I fire once
     Then the muzzle flash shows
     And the muzzle flash is gone
+
+  Scenario: Tracers only show once the bullet is well out
+    Given the target dummy is out of the way
+    When I fire once
+    Then every tracer showing has flown at least 15 metres
+
+  Scenario: A tracer does show once the bullet is out
+    Given the target dummy is out of the way
+    When I fire once
+    Then a tracer shows once the bullet is well out

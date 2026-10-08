@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
-use bevy::prelude::MouseButton;
+use bevy::prelude::{KeyCode, MouseButton};
+use fps_prototype::player::Stance;
 use cucumber::{given, then, when};
 
 use crate::{send, snapshot, Command};
@@ -230,4 +231,116 @@ fn dummy_respawns(_world: &mut GameWorld, seconds: u64) {
     step_pause();
     let respawned = wait_for(Duration::from_secs(seconds), || snapshot().dummy_health >= 100.0);
     assert!(respawned, "target dummy did not respawn within {seconds} seconds");
+}
+
+fn key_named(name: &str) -> KeyCode {
+    match name {
+        "C" => KeyCode::KeyC,
+        "Z" => KeyCode::KeyZ,
+        "W" => KeyCode::KeyW,
+        "Space" => KeyCode::Space,
+        "Shift" => KeyCode::ShiftLeft,
+        other => panic!("no key called {other}"),
+    }
+}
+
+#[given(regex = r"^I press ([A-Za-z]+)$")]
+#[when(regex = r"^I press ([A-Za-z]+)$")]
+fn press_key(_world: &mut GameWorld, name: String) {
+    step_pause();
+    send(Command::TapKey(key_named(&name)));
+    // Let the game see the press before the next step.
+    std::thread::sleep(Duration::from_millis(100));
+}
+
+#[given(regex = r"^I hold ([A-Za-z]+)$")]
+#[when(regex = r"^I hold ([A-Za-z]+)$")]
+fn hold_key(_world: &mut GameWorld, name: String) {
+    step_pause();
+    send(Command::PressKey(key_named(&name)));
+}
+
+#[when(regex = r"^I release ([A-Za-z]+)$")]
+fn release_key(_world: &mut GameWorld, name: String) {
+    send(Command::ReleaseKey(key_named(&name)));
+}
+
+#[given("the target dummy is out of the way")]
+fn dummy_out_of_the_way(_world: &mut GameWorld) {
+    send(Command::RemoveDummies);
+    step_pause();
+}
+
+#[given(regex = r"^I am (standing|crouching|prone)$")]
+#[then(regex = r"^I am (standing|crouching|prone)$")]
+fn i_am_in_stance(_world: &mut GameWorld, name: String) {
+    let want = match name.as_str() {
+        "standing" => Stance::Stand,
+        "crouching" => Stance::Crouch,
+        _ => Stance::Prone,
+    };
+    let reached = wait_for(Duration::from_secs(8), || snapshot().stance == want);
+    assert!(reached, "wanted to be {want:?} but am {:?}", snapshot().stance);
+}
+
+#[then(regex = r"^my eyes are (?:below|under) ([\d.]+) metres$")]
+fn eyes_below(_world: &mut GameWorld, metres: f32) {
+    let low = wait_for(Duration::from_secs(8), || snapshot().eye_height < metres);
+    assert!(low, "eyes still at {} m", snapshot().eye_height);
+}
+
+#[then(regex = r"^my eyes are above ([\d.]+) metres$")]
+fn eyes_above(_world: &mut GameWorld, metres: f32) {
+    let high = wait_for(Duration::from_secs(8), || snapshot().eye_height > metres);
+    assert!(high, "eyes only at {} m", snapshot().eye_height);
+}
+
+#[then(regex = r"^I am moving slower than ([\d.]+) metres per second$")]
+fn moving_slower_than(_world: &mut GameWorld, limit: f32) {
+    // Give the movement time to build up to its top speed first.
+    std::thread::sleep(Duration::from_secs(2));
+    let speed = snapshot().ground_speed;
+    assert!(speed < limit && speed > 0.2, "moving at {speed} m/s");
+}
+
+#[then(regex = r"^I am moving faster than ([\d.]+) metres per second$")]
+fn moving_faster_than(_world: &mut GameWorld, limit: f32) {
+    let fast = wait_for(Duration::from_secs(8), || snapshot().ground_speed > limit);
+    assert!(fast, "only moving at {} m/s", snapshot().ground_speed);
+}
+
+#[given(regex = r"^the crosshair is less than ([\d.]+) degrees wide$")]
+#[then(regex = r"^the crosshair is less than ([\d.]+) degrees wide$")]
+fn spread_less_than(_world: &mut GameWorld, degrees: f32) {
+    let ok = wait_for(Duration::from_secs(8), || snapshot().spread.to_degrees() < degrees);
+    assert!(ok, "spread is {:.2} degrees", snapshot().spread.to_degrees());
+}
+
+#[given(regex = r"^the crosshair is more than ([\d.]+) degrees wide$")]
+#[then(regex = r"^the crosshair is more than ([\d.]+) degrees wide$")]
+fn spread_more_than(_world: &mut GameWorld, degrees: f32) {
+    let ok = wait_for(Duration::from_secs(8), || snapshot().spread.to_degrees() > degrees);
+    assert!(ok, "spread is only {:.2} degrees", snapshot().spread.to_degrees());
+}
+
+#[then("every tracer showing has flown at least 15 metres")]
+fn tracers_only_far_out(_world: &mut GameWorld) {
+    // Look many times while the bullet travels: a bullet is only ever shown once it is well out.
+    let mut looked = 0;
+    let mut seen_bullet = false;
+    let deadline = Instant::now() + Duration::from_millis(800);
+    while Instant::now() < deadline {
+        for (travelled, visible) in snapshot().bullets {
+            seen_bullet = true;
+            assert!(!visible || travelled >= 15.0, "a tracer showed after only {travelled} m");
+        }
+        looked += 1;
+    }
+    assert!(seen_bullet, "never saw a bullet in flight ({looked} looks)");
+}
+
+#[then("a tracer shows once the bullet is well out")]
+fn tracer_shows(_world: &mut GameWorld) {
+    let shown = wait_for(Duration::from_secs(3), || snapshot().bullets.iter().any(|&(_, visible)| visible));
+    assert!(shown, "no tracer ever appeared");
 }

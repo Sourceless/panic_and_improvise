@@ -23,6 +23,69 @@ const AIM_SLOWDOWN: f32 = 0.4;
 /// How much the look sensitivity falls at full zoom, tracking the narrower field of view.
 const ADS_LOOK_SCALE: f32 = 0.7;
 const EYE_HEIGHT: f32 = 1.8;
+/// How fast (per second, exponentially) the eye settles to a new stance's height.
+const STANCE_EASE: f32 = 9.0;
+
+/// How the player is standing: upright, crouched or prone. Each lower stance is steadier (the
+/// gun's spread is smaller) and has the eye closer to the ground, but is slower.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Stance {
+    #[default]
+    Stand,
+    Crouch,
+    Prone,
+}
+
+impl Stance {
+    /// Height of the eye above the ground, metres.
+    pub fn eye_height(self) -> f32 {
+        match self {
+            Stance::Stand => EYE_HEIGHT,
+            Stance::Crouch => 1.2,
+            Stance::Prone => 0.5,
+        }
+    }
+
+    /// Walking speed relative to standing.
+    pub fn speed_scale(self) -> f32 {
+        match self {
+            Stance::Stand => 1.0,
+            Stance::Crouch => 0.55,
+            Stance::Prone => 0.25,
+        }
+    }
+
+    /// How much of the gun's inaccuracy is left in this stance.
+    pub fn spread_scale(self) -> f32 {
+        match self {
+            Stance::Stand => 1.0,
+            Stance::Crouch => 0.65,
+            Stance::Prone => 0.4,
+        }
+    }
+
+    /// Only a standing player can sprint or jump.
+    pub fn can_sprint_or_jump(self) -> bool {
+        self == Stance::Stand
+    }
+}
+
+/// What the player's keys do to their stance this frame. `C` toggles crouching and `Z` prone
+/// (pressing the same key again stands up); sprinting needs an upright player, so starting a
+/// sprint stands you up; and the jump key stands you up from a crouch or prone, rather than
+/// jumping from it. Returns the new stance.
+pub fn next_stance(current: Stance, crouch_pressed: bool, prone_pressed: bool, jump_pressed: bool, sprinting: bool) -> Stance {
+    if sprinting || jump_pressed {
+        return Stance::Stand;
+    }
+    if crouch_pressed {
+        return if current == Stance::Crouch { Stance::Stand } else { Stance::Crouch };
+    }
+    if prone_pressed {
+        return if current == Stance::Prone { Stance::Stand } else { Stance::Prone };
+    }
+    current
+}
 
 /// How far the gun is raised to its sights, 0 (hip) to 1 (aimed). Written by the weapon, read by
 /// the player (slower, steadier aim) and the camera (zoom).
@@ -58,6 +121,11 @@ pub struct FpsCamera {
     /// Feet height above the ground, and the speed it is changing at (positive is up).
     pub(crate) air_height: f32,
     pub(crate) vertical_speed: f32,
+    pub(crate) stance: Stance,
+    /// The eye's current height above the feet, easing toward the stance's height.
+    pub(crate) eye_height: f32,
+    /// Set when the jump key was used to stand up, so that holding it doesn't also jump.
+    pub(crate) jump_spent_standing: bool,
 }
 
 impl FpsCamera {
@@ -72,6 +140,15 @@ impl FpsCamera {
     /// How fast the player is moving along the ground, metres per second.
     pub fn speed(&self) -> f32 {
         self.velocity.length()
+    }
+
+    pub fn stance(&self) -> Stance {
+        self.stance
+    }
+
+    /// The eye's height above the ground right now (it eases between stances).
+    pub fn eye_height(&self) -> f32 {
+        self.eye_height
     }
 
     /// Whether the player's feet are off the ground.
@@ -91,7 +168,7 @@ pub fn spawn_player(mut commands: Commands, map: Res<TerrainMap>) {
     commands.spawn((
         Camera3d::default(),
         Transform::from_translation(eye).looking_at(eye - Vec3::Z, Vec3::Y),
-        FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0 },
+        FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false },
     ));
 }
 
@@ -185,6 +262,7 @@ pub struct MoveIntent {
     pub jump: bool,
     /// How far the gun is on its sights, 0 to 1: aiming is slower than walking.
     pub aim: f32,
+    pub stance: Stance,
 }
 
 /// The player's movement state, apart from where they are.
@@ -210,8 +288,12 @@ impl MoveState {
 pub fn step_movement(mut state: MoveState, intent: MoveIntent, dt: f32) -> MoveState {
     let grounded = state.grounded();
     // Sprinting needs somewhere to go: it only applies while moving.
-    let sprinting = intent.sprint && intent.direction != Vec2::ZERO;
-    let speed = if sprinting { MOVE_SPEED * SPRINT_MULTIPLIER } else { MOVE_SPEED * (1.0 - AIM_SLOWDOWN * intent.aim) };
+    let sprinting = intent.sprint && intent.direction != Vec2::ZERO && intent.stance.can_sprint_or_jump();
+    let speed = if sprinting {
+        MOVE_SPEED * SPRINT_MULTIPLIER
+    } else {
+        MOVE_SPEED * (1.0 - AIM_SLOWDOWN * intent.aim) * intent.stance.speed_scale()
+    };
     let target = intent.direction * speed;
     let response = if grounded { GROUND_RESPONSE } else { AIR_RESPONSE };
     state.velocity = state.velocity.lerp(target, 1.0 - (-response * dt).exp());
@@ -220,7 +302,7 @@ pub fn step_movement(mut state: MoveState, intent: MoveIntent, dt: f32) -> MoveS
         state.velocity = Vec2::ZERO;
     }
 
-    if grounded && intent.jump {
+    if grounded && intent.jump && intent.stance.can_sprint_or_jump() {
         state.vertical_speed = JUMP_SPEED;
     }
     if !grounded || state.vertical_speed > 0.0 {
@@ -261,12 +343,31 @@ fn player_movement(
     if keys.pressed(KeyCode::KeyA) {
         direction -= right;
     }
+    // Sprinting is for running forward, not backpedalling.
+    let sprint_keys = keys.pressed(KeyCode::ShiftLeft) && keys.pressed(KeyCode::KeyW) && !keys.pressed(KeyCode::KeyS);
+    // The jump key, from a crouch or prone, stands you up instead of jumping; and holding it
+    // afterwards doesn't then also jump.
+    let jump_key = keys.pressed(KeyCode::Space);
+    let stands_up = keys.just_pressed(KeyCode::Space) && cam.stance != Stance::Stand;
+    if stands_up {
+        cam.jump_spent_standing = true;
+    }
+    if !jump_key {
+        cam.jump_spent_standing = false;
+    }
+    cam.stance = next_stance(cam.stance, keys.just_pressed(KeyCode::KeyC), keys.just_pressed(KeyCode::KeyZ), stands_up, sprint_keys);
+    // The eye eases to its new height (a crouch takes a moment).
+    let target_eye = cam.stance.eye_height();
+    cam.eye_height += (target_eye - cam.eye_height) * (1.0 - (-STANCE_EASE * time.delta_secs()).exp());
+    if (cam.eye_height - target_eye).abs() < 0.002 {
+        cam.eye_height = target_eye;
+    }
     let intent = MoveIntent {
         direction: direction.normalize_or_zero(),
-        // Sprinting is for running forward, not backpedalling.
-        sprint: keys.pressed(KeyCode::ShiftLeft) && keys.pressed(KeyCode::KeyW) && !keys.pressed(KeyCode::KeyS),
-        jump: keys.pressed(KeyCode::Space),
+        sprint: sprint_keys,
+        jump: jump_key && !cam.jump_spent_standing,
         aim: aim.0,
+        stance: cam.stance,
     };
     let state = step_movement(
         MoveState { velocity: cam.velocity, air_height: cam.air_height, vertical_speed: cam.vertical_speed },
@@ -283,7 +384,7 @@ fn player_movement(
     transform.translation.z = pos.y;
 
     let ground = terrain.height_at(pos);
-    transform.translation.y = ground + cam.air_height + EYE_HEIGHT;
+    transform.translation.y = ground + cam.air_height + cam.eye_height;
 }
 
 /// Widens the view a little while sprinting, which makes speed read on screen.
@@ -402,7 +503,7 @@ mod tests {
             .add_systems(Update, player_movement);
         app.world_mut().spawn((
             Transform::from_xyz(0.0, ground + EYE_HEIGHT, 0.0),
-            FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0 },
+            FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false },
         ));
         // Every update advances the clock by exactly 1/60 s, whatever the real time taken.
         app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_secs_f32(1.0 / 60.0)));
@@ -467,5 +568,65 @@ mod tests {
         assert!((aimed - walk * (1.0 - AIM_SLOWDOWN)).abs() < 0.1, "walk {walk}, aimed {aimed}");
         let sprint = run(MoveState::default(), MoveIntent { sprint: true, aim: 1.0, ..forward() }, 1.0).velocity.length();
         assert!(sprint > walk * 1.7, "sprinting is not slowed by aim: {sprint}");
+    }
+
+    fn stance_intent(stance: Stance) -> MoveIntent {
+        MoveIntent { stance, ..forward() }
+    }
+
+    #[test]
+    fn lower_stances_are_slower() {
+        let speed = |stance| run(MoveState::default(), stance_intent(stance), 1.5).velocity.length();
+        let (stand, crouch, prone) = (speed(Stance::Stand), speed(Stance::Crouch), speed(Stance::Prone));
+        assert!(crouch < stand * 0.7 && crouch > stand * 0.4, "crouch {crouch} vs stand {stand}");
+        assert!(prone < crouch * 0.6, "prone {prone} vs crouch {crouch}");
+        assert!(prone > 0.5, "prone should still crawl: {prone}");
+    }
+
+    #[test]
+    fn you_cannot_sprint_while_crouched_or_prone() {
+        for stance in [Stance::Crouch, Stance::Prone] {
+            let sprinting = run(MoveState::default(), MoveIntent { sprint: true, stance, ..forward() }, 1.5);
+            let walking = run(MoveState::default(), stance_intent(stance), 1.5);
+            assert!((sprinting.velocity.length() - walking.velocity.length()).abs() < 0.05, "{stance:?}");
+        }
+    }
+
+    #[test]
+    fn you_cannot_jump_while_crouched_or_prone() {
+        for stance in [Stance::Crouch, Stance::Prone] {
+            let s = run(MoveState::default(), MoveIntent { jump: true, stance, ..default() }, 0.5);
+            assert!(s.grounded() && s.air_height == 0.0, "{stance:?}");
+        }
+    }
+
+    #[test]
+    fn eyes_are_lower_in_lower_stances() {
+        assert!(Stance::Stand.eye_height() > Stance::Crouch.eye_height());
+        assert!(Stance::Crouch.eye_height() > Stance::Prone.eye_height());
+        assert_eq!(Stance::Stand.eye_height(), EYE_HEIGHT);
+        assert!(Stance::Prone.eye_height() > 0.2, "eyes must stay above the ground");
+    }
+
+    #[test]
+    fn c_toggles_crouching_and_z_toggles_prone() {
+        use Stance::*;
+        assert_eq!(next_stance(Stand, true, false, false, false), Crouch);
+        assert_eq!(next_stance(Crouch, true, false, false, false), Stand);
+        assert_eq!(next_stance(Stand, false, true, false, false), Prone);
+        assert_eq!(next_stance(Prone, false, true, false, false), Stand);
+        assert_eq!(next_stance(Crouch, false, true, false, false), Prone, "crouch to prone");
+        assert_eq!(next_stance(Prone, true, false, false, false), Crouch, "prone to crouch");
+        assert_eq!(next_stance(Crouch, false, false, false, false), Crouch, "no keys, no change");
+    }
+
+    #[test]
+    fn sprinting_or_jumping_stands_you_up() {
+        use Stance::*;
+        for from in [Crouch, Prone] {
+            assert_eq!(next_stance(from, false, false, false, true), Stand, "sprint from {from:?}");
+            assert_eq!(next_stance(from, false, false, true, false), Stand, "jump from {from:?}");
+        }
+        assert_eq!(next_stance(Stand, false, false, false, false), Stand);
     }
 }

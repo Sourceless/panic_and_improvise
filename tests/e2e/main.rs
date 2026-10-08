@@ -23,6 +23,10 @@ use fps_prototype::map::TerrainMap;
 use fps_prototype::GamePlugin;
 
 pub enum Command {
+    PressKey(KeyCode),
+    ReleaseKey(KeyCode),
+    TapKey(KeyCode),
+    RemoveDummies,
     Press(MouseButton),
     Release(MouseButton),
     Tap(MouseButton),
@@ -32,7 +36,7 @@ pub enum Command {
     Quit { failed: bool },
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Snapshot {
     pub cursor_captured: bool,
     pub shot_sound_loaded: bool,
@@ -51,6 +55,17 @@ pub struct Snapshot {
     pub flash_visible: bool,
     /// Where the last bullet started, relative to the camera (right, up, forward).
     pub last_shot_origin: Option<(f32, f32, f32)>,
+    pub stance: fps_prototype::player::Stance,
+    /// The eye's height above the ground, metres.
+    pub eye_height: f32,
+    /// How fast the player is moving along the ground, m/s.
+    pub ground_speed: f32,
+    /// Whether the player's feet are off the ground.
+    pub airborne: bool,
+    /// The gun's current inaccuracy (radians, half-angle), as the crosshair shows it.
+    pub spread: f32,
+    /// Bullets in flight: how far each has flown and whether its tracer is showing.
+    pub bullets: Vec<(f32, bool)>,
 }
 
 static GAME: OnceLock<Sender<Command>> = OnceLock::new();
@@ -78,6 +93,9 @@ struct PendingTaps(Vec<MouseButton>);
 
 #[derive(Resource, Default)]
 struct HeldButtons(Vec<MouseButton>);
+
+#[derive(Resource, Default)]
+struct HeldKeys(Vec<KeyCode>);
 
 fn main() -> ExitCode {
     let headed = std::env::var("E2E_HEADED").is_ok();
@@ -143,6 +161,7 @@ fn build_app(headed: bool, rx: Receiver<Command>) -> App {
         .insert_resource(Bridge { rx: Mutex::new(rx) })
         .init_resource::<PendingTaps>()
         .init_resource::<HeldButtons>()
+        .init_resource::<HeldKeys>()
         .add_systems(PreUpdate, (isolate_input, drive).chain().after(InputSystems))
         .add_systems(Last, release_taps);
     app
@@ -154,12 +173,16 @@ fn isolate_input(
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut motion: ResMut<Messages<MouseMotion>>,
     held: Res<HeldButtons>,
+    held_keys: Res<HeldKeys>,
 ) {
     mouse.reset_all();
     keys.reset_all();
     motion.clear();
     for button in &held.0 {
         mouse.press(*button);
+    }
+    for key in &held_keys.0 {
+        keys.press(*key);
     }
 }
 
@@ -193,6 +216,25 @@ fn drive(world: &mut World) {
             Command::Tap(button) => {
                 world.resource_mut::<ButtonInput<MouseButton>>().press(button);
                 world.resource_mut::<PendingTaps>().0.push(button);
+            }
+            Command::PressKey(key) => {
+                world.resource_mut::<ButtonInput<KeyCode>>().press(key);
+                let mut held = world.resource_mut::<HeldKeys>();
+                if !held.0.contains(&key) {
+                    held.0.push(key);
+                }
+            }
+            Command::ReleaseKey(key) => {
+                world.resource_mut::<ButtonInput<KeyCode>>().release(key);
+                world.resource_mut::<HeldKeys>().0.retain(|held| *held != key);
+            }
+            // A tap lasts one frame: input is cleared at the start of the next.
+            Command::TapKey(key) => world.resource_mut::<ButtonInput<KeyCode>>().press(key),
+            Command::RemoveDummies => {
+                let dummies: Vec<Entity> = world.query_filtered::<Entity, With<TargetDummy>>().iter(world).collect();
+                for dummy in dummies {
+                    world.despawn(dummy);
+                }
             }
             Command::SetCursorCaptured(captured) => set_cursor(world, captured),
             Command::LoadRoom => load_room(world),
@@ -229,6 +271,8 @@ fn load_room(world: &mut World) {
     }
     world.resource_mut::<ButtonInput<MouseButton>>().reset_all();
     world.resource_mut::<HeldButtons>().0.clear();
+    world.resource_mut::<HeldKeys>().0.clear();
+    world.resource_mut::<ButtonInput<KeyCode>>().reset_all();
     set_cursor(world, true);
     world.run_system_once(spawn_player).expect("spawn player");
     world.run_system_once(spawn_gun).expect("spawn gun");
@@ -276,7 +320,24 @@ fn take_snapshot(world: &mut World) -> Snapshot {
         .query_filtered::<&Visibility, With<fps_prototype::muzzle_flash::MuzzleFlash>>()
         .iter(world)
         .any(|v| *v != Visibility::Hidden);
+    let (stance, eye_height, ground_speed, airborne) = world
+        .query::<&FpsCamera>()
+        .iter(world)
+        .next()
+        .map_or((Default::default(), 0.0, 0.0, false), |c| (c.stance(), c.eye_height(), c.speed(), c.airborne()));
+    let spread = world.query::<&Gun>().iter(world).map(|gun| gun.current_spread).next().unwrap_or(0.0);
+    let bullets = world
+        .query::<(&Bullet, &Visibility)>()
+        .iter(world)
+        .map(|(bullet, visibility)| (bullet.travelled(), *visibility != Visibility::Hidden))
+        .collect();
     Snapshot {
+        stance,
+        eye_height,
+        ground_speed,
+        airborne,
+        spread,
+        bullets,
         worst_shot_error,
         flash_visible,
         camera_pitch,

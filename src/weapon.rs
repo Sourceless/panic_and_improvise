@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use crate::gun_model::{self, BORE_Y, MUZZLE_Z, REAR_PEEP_Z, SIGHT_LINE};
-use crate::player::{spawn_player, toggle_cursor_grab, AimBlend, FpsCamera};
+use crate::player::{spawn_player, toggle_cursor_grab, AimBlend, FpsCamera, Stance};
 pub use crate::gun_model::sight_points;
 use crate::map::TerrainMap;
 use crate::target::{dummy_aabb, TargetDummy};
@@ -11,6 +11,9 @@ const FIRE_INTERVAL: f32 = 0.12;
 const BULLET_SPEED: f32 = 300.0;
 const BULLET_LIFETIME: f32 = 2.0;
 const BULLET_DAMAGE: f32 = 25.0;
+/// Tracers appear after the bullet has flown this far (metres), and are this long.
+const TRACER_START: f32 = 15.0;
+const TRACER_LENGTH: f32 = 2.4;
 
 /// Where the gun sits in camera space when carried at the hip, and when aimed down its sights.
 const HIP_POSITION: Vec3 = Vec3::new(0.2, -0.2, -0.5);
@@ -94,8 +97,16 @@ pub struct Gun {
     /// How far (radians) the latest shot strayed from where the gun was pointed, and the worst so far.
     pub last_shot_error: f32,
     pub worst_shot_error: f32,
+    /// The cone shots would land in if fired this instant (radians); the crosshair shows it.
+    pub current_spread: f32,
     /// The gun model's jolt, 1 right after a shot, decaying to 0.
     pub gun_kick: f32,
+}
+
+/// The gun's inaccuracy right now: how far a shot could stray (radians, half-angle of the cone),
+/// given how far it's on the sights, how the player is moving and standing, and the burst bloom.
+pub fn current_spread(gun: &Gun, player: &FpsCamera) -> f32 {
+    spread_half_angle(gun.aim_blend, player.speed() / FULL_RUN_SPEED, player.airborne(), gun.bloom, player.stance())
 }
 
 impl Gun {
@@ -153,12 +164,13 @@ pub fn recover_kick(kick: Vec2, since_shot: f32, dt: f32) -> (Vec2, Vec2) {
 
 /// How far a shot may stray from where the gun is pointed (the half-angle of the cone it lands
 /// in, in radians). `blend` is how far the gun is on its sights, `speed` how fast the player
-/// moves as a fraction of a full run, `bloom` the burst penalty built up so far.
-pub fn spread_half_angle(blend: f32, speed: f32, airborne: bool, bloom: f32) -> f32 {
+/// moves as a fraction of a full run, `bloom` the burst penalty built up so far, and `stance`
+/// whether they're standing, crouched or prone (each steadier than the last).
+pub fn spread_half_angle(blend: f32, speed: f32, airborne: bool, bloom: f32, stance: Stance) -> f32 {
     let blend = blend.clamp(0.0, 1.0);
     let base = HIP_SPREAD + (ADS_SPREAD - HIP_SPREAD) * blend;
     let penalties = MOVING_SPREAD * speed.clamp(0.0, 1.0) + if airborne { AIRBORNE_SPREAD } else { 0.0 } + bloom.clamp(0.0, BLOOM_MAX);
-    base + penalties * (1.0 - (1.0 - ADS_PENALTY_LEFT) * blend)
+    (base + penalties * (1.0 - (1.0 - ADS_PENALTY_LEFT) * blend)) * stance.spread_scale()
 }
 
 /// A direction picked uniformly inside the cone of half-angle `half_angle` around `aim`, from two
@@ -203,6 +215,22 @@ pub fn ray_hits_aabb(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<f3
 pub struct Bullet {
     velocity: Vec3,
     age: f32,
+    /// How far it has flown, metres. The tracer isn't drawn until it's flown a way.
+    travelled: f32,
+}
+
+impl Bullet {
+    /// How far the bullet has flown, metres.
+    pub fn travelled(&self) -> f32 {
+        self.travelled
+    }
+}
+
+/// Whether a bullet that has flown `distance` metres shows its tracer yet. Right at the muzzle a
+/// glowing streak is just a distraction in your face (and spoils the sight picture), so it only
+/// appears once the bullet is well on its way.
+pub fn tracer_visible(distance: f32) -> bool {
+    distance >= TRACER_START
 }
 
 #[derive(Resource)]
@@ -248,10 +276,13 @@ pub fn spawn_gun(
         _ => (1..=3).map(|i| asset_server.load(format!("sounds/smg/smg_shot_{i}.wav"))).collect(),
     };
     commands.insert_resource(BulletAssets {
-        mesh: meshes.add(Sphere::new(0.03)),
+        // A thin streak along the line of flight (the bullet is turned to face the way it goes).
+        mesh: meshes.add(Cuboid::new(0.018, 0.018, TRACER_LENGTH)),
+        // Unlit and additive, with HDR values, so it glows (and blooms) against any sky.
         material: materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 0.85, 0.3),
-            emissive: LinearRgba::rgb(12.0, 9.0, 2.0),
+            base_color: Color::linear_rgb(5.0, 3.2, 1.0),
+            unlit: true,
+            alpha_mode: AlphaMode::Add,
             ..default()
         }),
         shot_sound: shot_sounds[0].clone(),
@@ -277,6 +308,7 @@ pub fn spawn_gun(
                     rng: 0x9E37_79B9,
                     last_shot_error: 0.0,
                     worst_shot_error: 0.0,
+                    current_spread: HIP_SPREAD,
                     gun_kick: 0.0,
                 },
                 gun_transform(0.0),
@@ -301,6 +333,7 @@ fn aim(
     keys: Res<ButtonInput<KeyCode>>,
     cursors: Query<&CursorOptions, With<PrimaryWindow>>,
     mut guns: Query<(&mut Gun, &mut Transform)>,
+    player: Query<&FpsCamera>,
     mut blend: ResMut<AimBlend>,
 ) {
     let Ok((mut gun, mut transform)) = guns.single_mut() else {
@@ -329,6 +362,9 @@ fn aim(
     }
     *transform = gun_pose(gun.aim_blend, gun.gun_kick);
     blend.0 = gun.aim_blend;
+    if let Ok(player) = player.single() {
+        gun.current_spread = current_spread(&gun, player);
+    }
 }
 
 fn fire(
@@ -375,7 +411,7 @@ fn fire(
     let direction = launch_direction(muzzle, eye, forward, distance);
 
     // Where the shot actually goes: anywhere inside the gun's cone of inaccuracy.
-    let half_angle = spread_half_angle(gun.aim_blend, view.speed() / FULL_RUN_SPEED, view.airborne(), gun.bloom);
+    let half_angle = current_spread(&gun, &view);
     let (u, v) = (gun.random(), gun.random());
     let direction_shot = scatter_direction(direction, half_angle, u, v);
     let error = direction.dot(direction_shot).clamp(-1.0, 1.0).acos();
@@ -404,10 +440,14 @@ fn fire(
         Bullet {
             velocity: direction_shot * BULLET_SPEED,
             age: 0.0,
+            travelled: 0.0,
         },
         Mesh3d(assets.mesh.clone()),
         MeshMaterial3d(assets.material.clone()),
-        Transform::from_translation(muzzle),
+        bevy::light::NotShadowCaster,
+        // Hidden until it has flown a way (see `tracer_visible`).
+        Visibility::Hidden,
+        Transform::from_translation(muzzle).looking_to(direction_shot, Vec3::Y),
     ));
 
     // Recoil: the shot has left; now the gun jolts and the view climbs.
@@ -473,12 +513,12 @@ fn what_is_under_crosshair(eye: Vec3, forward: Vec3, dummies: &Query<&Transform,
 fn move_bullets(
     mut commands: Commands,
     time: Res<Time>,
-    mut bullets: Query<(Entity, &mut Transform, &mut Bullet)>,
+    mut bullets: Query<(Entity, &mut Transform, &mut Bullet, &mut Visibility)>,
     mut dummies: Query<(&Transform, &mut TargetDummy), Without<Bullet>>,
     map: Res<TerrainMap>,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut transform, mut bullet) in &mut bullets {
+    for (entity, mut transform, mut bullet, mut visibility) in &mut bullets {
         let start = transform.translation;
         let end = start + bullet.velocity * dt;
         bullet.age += dt;
@@ -497,6 +537,10 @@ fn move_bullets(
         }
 
         transform.translation = end;
+        bullet.travelled += (end - start).length();
+        if tracer_visible(bullet.travelled) && *visibility == Visibility::Hidden {
+            *visibility = Visibility::Inherited;
+        }
         let ground = map.height_at(Vec2::new(end.x, end.z));
         if hit || bullet.age > BULLET_LIFETIME || end.y < ground {
             commands.entity(entity).despawn();
@@ -641,15 +685,15 @@ mod tests {
 
     #[test]
     fn hip_fire_is_loose_and_aimed_fire_is_tight() {
-        let hip = spread_half_angle(0.0, 0.0, false, 0.0);
-        let ads = spread_half_angle(1.0, 0.0, false, 0.0);
+        let hip = spread_half_angle(0.0, 0.0, false, 0.0, Stance::Stand);
+        let ads = spread_half_angle(1.0, 0.0, false, 0.0, Stance::Stand);
         assert!((0.025..0.04).contains(&hip), "hip cone {hip} rad");
         assert!(ads < 0.006, "sights cone {ads} rad");
         assert!(hip > ads * 6.0, "hip should be several times looser than aimed");
         // Easing onto the sights tightens it steadily.
         let mut last = hip;
         for step in 1..=10 {
-            let now = spread_half_angle(step as f32 / 10.0, 0.0, false, 0.0);
+            let now = spread_half_angle(step as f32 / 10.0, 0.0, false, 0.0, Stance::Stand);
             assert!(now < last, "spread should shrink as the gun comes up");
             last = now;
         }
@@ -657,16 +701,16 @@ mod tests {
 
     #[test]
     fn moving_jumping_and_long_bursts_all_widen_the_spread_but_less_on_the_sights() {
-        let still = spread_half_angle(0.0, 0.0, false, 0.0);
-        assert!(spread_half_angle(0.0, 1.0, false, 0.0) > still + 0.015, "running");
-        assert!(spread_half_angle(0.0, 0.0, true, 0.0) > still + 0.03, "in the air");
-        assert!(spread_half_angle(0.0, 0.0, false, BLOOM_MAX) > still + 0.025, "after a long burst");
+        let still = spread_half_angle(0.0, 0.0, false, 0.0, Stance::Stand);
+        assert!(spread_half_angle(0.0, 1.0, false, 0.0, Stance::Stand) > still + 0.015, "running");
+        assert!(spread_half_angle(0.0, 0.0, true, 0.0, Stance::Stand) > still + 0.03, "in the air");
+        assert!(spread_half_angle(0.0, 0.0, false, BLOOM_MAX, Stance::Stand) > still + 0.025, "after a long burst");
         // The same penalties cost far less when braced on the sights.
-        let hip_cost = spread_half_angle(0.0, 1.0, true, BLOOM_MAX) - still;
-        let ads_cost = spread_half_angle(1.0, 1.0, true, BLOOM_MAX) - spread_half_angle(1.0, 0.0, false, 0.0);
+        let hip_cost = spread_half_angle(0.0, 1.0, true, BLOOM_MAX, Stance::Stand) - still;
+        let ads_cost = spread_half_angle(1.0, 1.0, true, BLOOM_MAX, Stance::Stand) - spread_half_angle(1.0, 0.0, false, 0.0, Stance::Stand);
         assert!(ads_cost < hip_cost * 0.3, "ads penalty {ads_cost} vs hip {hip_cost}");
         // Bloom can't grow without bound.
-        assert_eq!(spread_half_angle(0.0, 0.0, false, 10.0), spread_half_angle(0.0, 0.0, false, BLOOM_MAX));
+        assert_eq!(spread_half_angle(0.0, 0.0, false, 10.0, Stance::Stand), spread_half_angle(0.0, 0.0, false, BLOOM_MAX, Stance::Stand));
     }
 
     #[test]
@@ -709,5 +753,37 @@ mod tests {
         assert!((scatter_direction(aim, 0.0, 0.7, 0.3) - aim).length() < 1e-6);
         // Straight up or down must not break the basis.
         assert!(scatter_direction(Vec3::Y, 0.02, 0.5, 0.5).is_finite());
+    }
+
+    #[test]
+    fn lower_stances_are_steadier() {
+        let spread = |stance| spread_half_angle(0.0, 0.0, false, 0.0, stance);
+        assert!(spread(Stance::Crouch) < spread(Stance::Stand) * 0.75, "crouching");
+        assert!(spread(Stance::Prone) < spread(Stance::Crouch) * 0.75, "prone");
+    }
+
+    #[test]
+    fn stances_scale_every_source_of_inaccuracy() {
+        // Running, jumping and a long burst are each less wild when crouched or prone.
+        for (speed, airborne, bloom) in [(1.0, false, 0.0), (0.0, true, 0.0), (0.0, false, BLOOM_MAX)] {
+            let stand = spread_half_angle(0.0, speed, airborne, bloom, Stance::Stand);
+            let crouch = spread_half_angle(0.0, speed, airborne, bloom, Stance::Crouch);
+            let prone = spread_half_angle(0.0, speed, airborne, bloom, Stance::Prone);
+            assert!(prone < crouch && crouch < stand, "{speed} {airborne} {bloom}");
+        }
+    }
+
+    #[test]
+    fn crouched_and_moving_is_still_worse_than_crouched_and_still() {
+        let still = spread_half_angle(0.0, 0.0, false, 0.0, Stance::Crouch);
+        assert!(spread_half_angle(0.0, 0.3, false, 0.0, Stance::Crouch) > still);
+    }
+
+    #[test]
+    fn tracers_stay_hidden_near_the_muzzle() {
+        assert!(!tracer_visible(0.0));
+        assert!(!tracer_visible(TRACER_START - 0.1));
+        assert!(tracer_visible(TRACER_START));
+        assert!(tracer_visible(200.0));
     }
 }
