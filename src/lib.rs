@@ -24,6 +24,7 @@ pub mod road_material;
 pub mod roads;
 pub mod sound;
 pub mod settlement;
+pub mod settlement_plan;
 pub mod target;
 pub mod vegetation;
 pub mod terrain;

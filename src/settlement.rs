@@ -5,7 +5,8 @@ use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
 
 use crate::collision::{Colliders, Solid};
-use crate::map::{PoiKind, TerrainMap};
+use crate::map::{Poi, PoiKind, TerrainMap};
+use crate::settlement_plan::{footprint_points, BuildingKind, Layout, SettlementPlan};
 
 #[derive(Component)]
 pub struct SettlementRoot;
@@ -56,6 +57,7 @@ pub fn spawn_settlements(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     map: &TerrainMap,
+    plan: &SettlementPlan,
     colliders: &mut Colliders,
 ) {
     let mut colour = |r: f32, g: f32, b: f32| {
@@ -83,7 +85,7 @@ pub fn spawn_settlements(
         unit_gable: meshes.add(gable(1.0, 1.0, 1.0)),
     };
 
-    for poi in &map.pois {
+    for (poi, layout) in map.pois.iter().zip(&plan.layouts) {
         let ground = map.height_at(poi.position);
         let root = commands
             .spawn((
@@ -94,14 +96,7 @@ pub fn spawn_settlements(
             .id();
         let mut rng = Rng::from_position(poi.position);
         let parts = match poi.kind {
-            PoiKind::Village => {
-                let church_offset = Vec3::new(
-                    poi.landmark.x - poi.position.x,
-                    map.height_at(poi.landmark) - ground,
-                    poi.landmark.y - poi.position.y,
-                );
-                village(meshes, &palette, &mut rng, map, poi.position, poi.radius, church_offset)
-            }
+            PoiKind::Village => village_parts(meshes, &palette, &mut rng, map, poi, layout),
             PoiKind::Farm => farm(meshes, &palette, &mut rng),
             PoiKind::Mill => mill(meshes, &palette),
         };
@@ -122,68 +117,51 @@ pub fn spawn_settlements(
     }
 }
 
-// Houses on a loose jittered grid inside the settlement's radius, thinning out toward the
-// edge. A bigger settlement is simply a bigger grid, so the same code makes a hamlet and the
-// town; the town additionally gets a clear central square, and taller buildings in its core.
-fn village(
-    meshes: &mut Assets<Mesh>,
-    palette: &Palette,
-    rng: &mut Rng,
-    map: &TerrainMap,
-    origin: Vec2,
-    radius: f32,
-    church_offset: Vec3,
-) -> Vec<Part> {
+/// The buildings of a village, as the plan has them: each stands where it was put, turned to face its
+/// street.
+fn village_parts(meshes: &mut Assets<Mesh>, palette: &Palette, rng: &mut Rng, map: &TerrainMap, poi: &Poi, layout: &Layout) -> Vec<Part> {
+    let ground = map.height_at(poi.position);
+    let relative = |p: Vec2| Vec3::new(p.x - poi.position.x, map.height_at(p) - ground, p.y - poi.position.y);
     let mut parts = Vec::new();
-    let ground = map.height_at(origin);
-    let is_town = radius >= 150.0;
-    let (step_x, step_z) = (12.0_f32, 13.0_f32);
-    let (cols, rows) = ((radius / step_x) as i32, (radius / step_z) as i32);
-    for gz in -rows..=rows {
-        for gx in -cols..=cols {
-            let (cx, cz) = (gx as f32 * step_x, gz as f32 * step_z);
-            let dist = Vec2::new(cx, cz).length() / radius;
-            if dist > 0.92 || (is_town && dist < 0.09) {
-                continue;
+    for building in &layout.buildings {
+        let centre = relative(building.centre);
+        match building.kind {
+            BuildingKind::Church => {
+                // The church is modelled around its own origin: shifted so its footprint is centred,
+                // then turned and put where the plan says.
+                let turn = Quat::from_rotation_y(building.yaw);
+                for mut part in church(meshes, palette) {
+                    part.transform.translation = centre + turn * (part.transform.translation + Vec3::new(0.0, 0.0, CHURCH_SHIFT));
+                    part.transform.rotation = turn * part.transform.rotation;
+                    parts.push(part);
+                }
             }
-            // Taper the skip chance toward the edges so the settlement reads as a loose
-            // cluster rather than a crisp disc of houses.
-            if rng.unit() < 0.08 + 0.45 * dist * dist {
-                continue;
+            _ => {
+                let walls = palette.walls[(rng.unit() * palette.walls.len() as f32) as usize % palette.walls.len()].clone();
+                let roof = if rng.unit() < 0.7 { palette.slate.clone() } else { palette.tile.clone() };
+                // Where the ground falls away from the middle of the house, the walls go down to meet it.
+                let lowest = footprint_points(&building.shape()).iter().map(|&p| map.height_at(p) - ground).fold(f32::MAX, f32::min);
+                let sink = (centre.y - lowest).max(0.0) + 0.15;
+                house(
+                    &mut parts,
+                    palette,
+                    walls,
+                    roof,
+                    Vec3::new(centre.x, centre.y - sink, centre.z),
+                    building.yaw,
+                    building.width,
+                    building.depth,
+                    building.wall_height + sink,
+                );
             }
-            let x = cx + rng.range(-4.5, 4.5);
-            let z = cz + rng.range(-3.5, 3.5);
-            let world = origin + Vec2::new(x, z);
-            // Keep clear of the river and lakes, which a large footprint can now overlap.
-            if map.water_distance(world) < 10.0 {
-                continue;
-            }
-            let base_yaw = if rng.unit() < 0.15 { FRAC_PI_2 } else { 0.0 };
-            let yaw = base_yaw + rng.range(-0.35, 0.35);
-            let walls = palette.walls[(rng.unit() * palette.walls.len() as f32) as usize % palette.walls.len()].clone();
-            let roof = if rng.unit() < 0.7 { palette.slate.clone() } else { palette.tile.clone() };
-            let core_boost = if is_town { 1.0 + 0.7 * (1.0 - dist / 0.5).max(0.0) } else { 1.0 };
-            house(
-                &mut parts,
-                palette,
-                walls,
-                roof,
-                Vec3::new(x, map.height_at(world) - ground, z),
-                yaw,
-                rng.range(7.0, 9.0),
-                rng.range(5.5, 6.5),
-                rng.range(3.8, 4.4) * core_boost,
-            );
-        }
-    }
-    if radius >= crate::map::SMALL_SETTLEMENT_RADIUS {
-        for mut part in church(meshes, palette) {
-            part.transform.translation += church_offset;
-            parts.push(part);
         }
     }
     parts
 }
+
+/// How far the church model's footprint is from its origin along its length (the nave runs from -7 to
+/// 7 and the tower out to -11.5, so the middle of the whole is at -2.25).
+const CHURCH_SHIFT: f32 = 2.25;
 
 fn church(meshes: &mut Assets<Mesh>, palette: &Palette) -> Vec<Part> {
     let mut parts = Vec::new();
@@ -411,7 +389,10 @@ mod tests {
         let params = GenParams::default();
         let map = TerrainMap::generate(crate::MAP_SEED, &params);
         let roads = RoadNetwork::generate(&map, &params);
-        let clearance = RoadClearance::new(&road_ribbons(&map, &roads));
+        let plan = SettlementPlan::generate(&map, &roads);
+        let mut streets = road_ribbons(&map, &roads);
+        streets.extend(plan.lanes());
+        let clearance = RoadClearance::new(&streets);
         let mut meshes = Assets::<Mesh>::default();
         let palette = Palette {
             walls: vec![Handle::default()],
@@ -434,22 +415,19 @@ mod tests {
             overlapping: usize,
             on_water: usize,
             on_slope: usize,
-            with_road_through_the_middle: usize,
         }
         let mut tiers: std::collections::BTreeMap<&str, Tally> = Default::default();
-        for poi in &map.pois {
+        for (poi, layout) in map.pois.iter().zip(&plan.layouts) {
             let ground = map.height_at(poi.position);
             let mut rng = Rng::from_position(poi.position);
-            let parts = match poi.kind {
-                PoiKind::Village => {
-                    let church_offset = Vec3::new(poi.landmark.x - poi.position.x, map.height_at(poi.landmark) - ground, poi.landmark.y - poi.position.y);
-                    village(&mut meshes, &palette, &mut rng, &map, poi.position, poi.radius, church_offset)
+            let shapes: Vec<Shape> = match poi.kind {
+                PoiKind::Village => layout.buildings.iter().map(|b| b.shape()).collect(),
+                other => {
+                    let parts = if other == PoiKind::Farm { farm(&mut meshes, &palette, &mut rng) } else { mill(&mut meshes, &palette) };
+                    let origin = Vec3::new(poi.position.x, ground, poi.position.y);
+                    parts.iter().filter_map(|p| p.solid.map(|f| solid_for(origin, &p.transform, f).shape)).collect()
                 }
-                PoiKind::Farm => farm(&mut meshes, &palette, &mut rng),
-                PoiKind::Mill => mill(&mut meshes, &palette),
             };
-            let origin = Vec3::new(poi.position.x, ground, poi.position.y);
-            let solids: Vec<Solid> = parts.iter().filter_map(|p| p.solid.map(|f| solid_for(origin, &p.transform, f))).collect();
             let tier = match (poi.kind, poi.radius) {
                 (PoiKind::Mill, _) => "mill",
                 (PoiKind::Farm, _) => "farm",
@@ -460,32 +438,16 @@ mod tests {
             };
             let tally = tiers.entry(tier).or_default();
             tally.settlements += 1;
-            let points = |shape: &Shape| -> Vec<Vec2> {
-                match *shape {
-                    Shape::Box { centre, half, yaw } => {
-                        let corner = |x: f32, z: f32| {
-                            let v = Quat::from_rotation_y(yaw) * Vec3::new(x * half.x, 0.0, z * half.y);
-                            centre + Vec2::new(v.x, v.z)
-                        };
-                        vec![corner(-1.0, -1.0), corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0), corner(0.0, -1.0), corner(0.0, 1.0), corner(-1.0, 0.0), corner(1.0, 0.0), centre]
-                    }
-                    Shape::Circle { centre, radius } => vec![centre, centre + Vec2::X * radius, centre - Vec2::X * radius, centre + Vec2::Y * radius, centre - Vec2::Y * radius],
-                    Shape::Wall { a, b, .. } => vec![a, b],
-                }
-            };
-            for (i, solid) in solids.iter().enumerate() {
+            for (i, shape) in shapes.iter().enumerate() {
                 tally.buildings += 1;
-                let pts = points(&solid.shape);
+                let pts = footprint_points(shape);
                 let worst = pts.iter().map(|&p| clearance.clearance(p)).fold(f32::MAX, f32::min);
                 if worst < 0.0 {
                     tally.on_road += 1;
                 } else if worst < 3.0 {
                     tally.by_road += 1;
                 }
-                if pts.last().is_some_and(|&c| clearance.clearance(c) < 0.0) {
-                    tally.with_road_through_the_middle += 1;
-                }
-                if solids.iter().enumerate().any(|(j, other)| j != i && pts.iter().any(|&p| other.shape.separation(p).0 < -0.01)) {
+                if shapes.iter().enumerate().any(|(j, other)| j != i && pts.iter().any(|&p| other.separation(p).0 < -0.01)) {
                     tally.overlapping += 1;
                 }
                 if pts.iter().any(|&p| map.water_distance(p) < 3.0 || map.water_surface_at(p).is_some()) {

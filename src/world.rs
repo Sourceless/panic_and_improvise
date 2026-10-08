@@ -11,6 +11,7 @@ use crate::map::TerrainMap;
 use crate::params::GenParams;
 use crate::road_material::RoadMaterial;
 use crate::roads::{spawn_roads, RoadNetwork};
+use crate::settlement_plan::SettlementPlan;
 use crate::terrain::{spawn_terrain, TerrainMaterial, TerrainTextures};
 use crate::water_material::WaterMaterial;
 use crate::zones::ZoneMap;
@@ -31,13 +32,17 @@ pub fn build_world(
     params: &GenParams,
 ) {
     let zones = ZoneMap::generate(map, params);
-    let roads = RoadNetwork::generate(map, params);
+    let mut roads = RoadNetwork::generate(map, params);
+    // Each settlement is planned along the roads that reach it, and brings its own lanes.
+    let plan = SettlementPlan::generate(map, &roads);
+    roads.add_ribbons(plan.lanes());
     // Everything solid that the generators place is collected here for the player to bump into.
     let mut colliders = Colliders::default();
-    spawn_terrain(commands, meshes, standard, terrain, textures, map, &zones, waters, images, &mut colliders);
+    spawn_terrain(commands, meshes, standard, terrain, textures, map, &zones, waters, images, &plan, &mut colliders);
     spawn_roads(commands, meshes, road_materials, textures, map, &roads);
     spawn_fill(commands, meshes, standard, fields, textures, map, &zones, &roads, params, &mut colliders);
     commands.insert_resource(colliders);
+    commands.insert_resource(plan);
     commands.insert_resource(zones);
     commands.insert_resource(roads);
 }

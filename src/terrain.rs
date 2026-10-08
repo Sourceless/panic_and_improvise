@@ -146,6 +146,7 @@ pub fn spawn_terrain(
     zones: &ZoneMap,
     waters: &mut Assets<crate::water_material::WaterMaterial>,
     images: &mut Assets<Image>,
+    plan: &crate::settlement_plan::SettlementPlan,
     colliders: &mut crate::collision::Colliders,
 ) {
     let ground = terrain.add(ExtendedMaterial {
@@ -180,7 +181,7 @@ pub fn spawn_terrain(
     }
 
     if !crate::world::skip("settlements") {
-        crate::settlement::spawn_settlements(commands, meshes, standard, map, colliders);
+        crate::settlement::spawn_settlements(commands, meshes, standard, map, plan, colliders);
     }
 }
 

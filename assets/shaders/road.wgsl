@@ -3,7 +3,8 @@
 // (lines painted here, half width / 10 m, is a track, edge line runs here). Tarmac gets worn wheel tracks, patched
 // repairs, crumbling edges and the white lines of a British road, drawn exactly rather than
 // from a texture: a broken centre line (3 m marks, 6 m gaps, TSRGD diagram 1008.1) and
-// continuous edge lines, each 100 mm wide. Tracks get gravel, two ruts and grass between them.
+// continuous edge lines, each 100 mm wide. Tracks get gravel, two ruts and grass between them; footpaths
+// get packed earth with grass at the edges.
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
@@ -87,7 +88,17 @@ fn fragment(
 
     var col: vec3<f32>;
     var roughness = 0.92;
-    if track < 0.5 {
+    if track > 0.25 && track < 0.75 {
+        // A footpath: packed earth worn bare down the middle, with grass and weeds creeping in from
+        // both sides.
+        col = surface * vec3<f32>(0.78, 0.68, 0.52) * 0.85 * (0.85 + 0.3 * patches);
+        let worn = 1.0 - smoothstep(0.1, hw, lane);
+        col = mix(col * 0.82, col * 1.05, worn * 0.5);
+        let green = vec3<f32>(0.20, 0.28, 0.10) * (0.7 + 0.6 * grain);
+        let verge = smoothstep(hw * 0.35, hw, lane) * smoothstep(0.25, 0.65, grain + 0.3 * edge);
+        col = mix(col, green, verge * 0.85);
+        roughness = 1.0;
+    } else if track < 0.5 {
         // Tarmac: chip-seal texture darkened to a worn road, with patched repairs, darker wheel
         // paths, and a crumbling edge where it meets the verge.
         col = surface * vec3<f32>(0.50, 0.50, 0.52) * (0.86 + 0.28 * patches);

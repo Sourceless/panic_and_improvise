@@ -15,6 +15,8 @@ const ROAD_LIFT: f32 = 0.25;
 const MINOR_SINK: f32 = 0.02;
 const MAJOR_HALF_WIDTH: f32 = 4.0;
 const MINOR_HALF_WIDTH: f32 = 2.2;
+pub const LANE_HALF_WIDTH: f32 = 2.4;
+pub const PATH_HALF_WIDTH: f32 = 0.7;
 /// The marked lines stop this far short of the end of a stretch of road that finishes at a
 /// junction: a centre line doesn't run through a junction, and nor does an edge line cross the
 /// mouth of a side road.
@@ -24,6 +26,7 @@ const MOUTH_MARGIN: f32 = 1.5;
 /// How many metres of road one repeat of the surface texture covers.
 const ASPHALT_TILE: f32 = 3.0;
 const TRACK_TILE: f32 = 2.5;
+const PATH_TILE: f32 = 2.0;
 
 // Major roads (between villages and the mill) tolerate more climbing and wider water
 // crossings than minor roads (farm tracks), which stick closer to flat, dry ground.
@@ -32,11 +35,19 @@ const MAJOR_WATER_COST: f32 = 3.0;
 const MINOR_SLOPE_PENALTY: f32 = 9.0;
 const MINOR_WATER_COST: f32 = 6.0;
 const EXISTING_ROAD_DISCOUNT: f32 = 0.12;
+const PATH_SLOPE_PENALTY: f32 = 5.0;
+const PATH_WATER_COST: f32 = 4.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RoadKind {
+    /// Between villages: tarmac, with the white lines.
     Major,
+    /// A farm track: gravel.
     Minor,
+    /// A street inside a village or town: narrower tarmac, unmarked.
+    Lane,
+    /// A footpath: packed earth, a person wide.
+    Path,
 }
 
 #[derive(Resource)]
@@ -44,6 +55,8 @@ pub struct RoadNetwork {
     cells: Vec<Option<RoadKind>>,
     edges: Vec<(usize, usize, RoadKind)>,
     verts: usize,
+    /// Streets laid out by something other than the grid search (a village's lanes), kept as they are.
+    extra: Vec<RoadRibbon>,
 }
 
 impl RoadNetwork {
@@ -76,11 +89,19 @@ impl RoadNetwork {
             .collect();
         grow_network(map, seeds, farms, RoadKind::Minor, params, &mut cells, &mut edges);
 
-        RoadNetwork { cells, edges, verts: n }
+        RoadNetwork { cells, edges, verts: n, extra: Vec::new() }
     }
 
+    /// The road on a grid cell, if there is one. Footpaths are not counted: they run across fields
+    /// and don't clear a path through them.
     pub fn kind_at(&self, ix: usize, iz: usize) -> Option<RoadKind> {
-        self.cells[iz * self.verts + ix]
+        self.cells[iz * self.verts + ix].filter(|&kind| kind != RoadKind::Path)
+    }
+
+    /// Adds streets that were laid out directly (a settlement's lanes), so that they are built,
+    /// kept clear of, and avoided like any other road.
+    pub fn add_ribbons(&mut self, ribbons: impl IntoIterator<Item = RoadRibbon>) {
+        self.extra.extend(ribbons);
     }
 
     pub fn length(&self, kind: RoadKind) -> f32 {
@@ -179,7 +200,9 @@ fn step_cost(map: &TerrainMap, cells: &[Option<RoadKind>], from: usize, to: usiz
     let climb = (map.vertex_height(tx, tz) - map.vertex_height(fx, fz)).abs() / CELL;
     let (slope_penalty, water_cost) = match kind {
         RoadKind::Major => (MAJOR_SLOPE_PENALTY, MAJOR_WATER_COST),
-        RoadKind::Minor => (MINOR_SLOPE_PENALTY, MINOR_WATER_COST),
+        RoadKind::Minor | RoadKind::Lane => (MINOR_SLOPE_PENALTY, MINOR_WATER_COST),
+        // A walker puts up with more slope than a car, and will wade a stream sooner than go round.
+        RoadKind::Path => (PATH_SLOPE_PENALTY, PATH_WATER_COST),
     };
     let slope_penalty = slope_penalty * params.road_slope_scale;
     let water_cost = water_cost * params.road_water_scale;
@@ -213,7 +236,12 @@ fn nearest_cell(map: &TerrainMap, p: Vec2) -> usize {
 }
 
 pub fn half_width(kind: RoadKind) -> f32 {
-    if kind == RoadKind::Major { MAJOR_HALF_WIDTH } else { MINOR_HALF_WIDTH }
+    match kind {
+        RoadKind::Major => MAJOR_HALF_WIDTH,
+        RoadKind::Minor => MINOR_HALF_WIDTH,
+        RoadKind::Lane => LANE_HALF_WIDTH,
+        RoadKind::Path => PATH_HALF_WIDTH,
+    }
 }
 
 /// One stretch of road, laid out: its smooth centreline and, at each point, how far the road
@@ -235,7 +263,7 @@ pub struct RoadRibbon {
 // so that it keeps its width.
 pub fn road_ribbons(map: &TerrainMap, roads: &RoadNetwork) -> Vec<RoadRibbon> {
     let mut ribbons = Vec::new();
-    for kind in [RoadKind::Major, RoadKind::Minor] {
+    for kind in [RoadKind::Major, RoadKind::Minor, RoadKind::Path] {
         for chain in road_chains(roads, kind) {
             let points = smooth_polyline(chain.cells.iter().map(|&c| idx_to_pos(map, c)).collect());
             if points.len() < 2 {
@@ -258,18 +286,24 @@ pub fn road_ribbons(map: &TerrainMap, roads: &RoadNetwork) -> Vec<RoadRibbon> {
             ribbons.push(RoadRibbon { kind, points, half_widths, start_junction: chain.start_junction, end_junction: chain.end_junction });
         }
     }
+    ribbons.extend(roads.extra.iter().cloned());
     ribbons
 }
 
 /// The vertex colour of a road vertex, which carries what the road shader needs besides position:
 /// r is 1 where lane markings are painted and 0 where they aren't (near junctions), g the road's
-/// half width at the vertex in tens of metres, b is 1 for a farm track and 0 for tarmac, and a is
+/// half width at the vertex in tens of metres, b is the surface (0 tarmac, 0.5 footpath, 1 farm track), and a is
 /// 1 where the edge line runs and 0 where it is broken for the mouth of a side road.
 pub fn road_vertex_data(kind: RoadKind, painted: bool, edge_line: bool, half_width: f32) -> [f32; 4] {
     [
         if kind == RoadKind::Major && painted { 1.0 } else { 0.0 },
         half_width / 10.0,
-        if kind == RoadKind::Minor { 1.0 } else { 0.0 },
+        // What the surface is: 0 tarmac, 0.5 a footpath, 1 a farm track.
+        match kind {
+            RoadKind::Minor => 1.0,
+            RoadKind::Path => 0.5,
+            _ => 0.0,
+        },
         if edge_line { 1.0 } else { 0.0 },
     ]
 }
@@ -296,8 +330,19 @@ fn junction_mouths(ribbons: &[RoadRibbon]) -> Vec<(Vec2, f32)> {
 // metres; UV 1 is (metres across from the centre line, metres along the road), for the lane
 // markings; the normals follow the ground.
 pub fn road_mesh(map: &TerrainMap, ribbons: &[RoadRibbon], kind: RoadKind) -> Mesh {
-    let tile = if kind == RoadKind::Major { ASPHALT_TILE } else { TRACK_TILE };
-    let lift = if kind == RoadKind::Major { ROAD_LIFT } else { ROAD_LIFT - MINOR_SINK };
+    let tile = match kind {
+        RoadKind::Major | RoadKind::Lane => ASPHALT_TILE,
+        RoadKind::Minor => TRACK_TILE,
+        RoadKind::Path => PATH_TILE,
+    };
+    // Where roads cross the one that matters more is on top: a lane joins a main road without a seam.
+    let lift = ROAD_LIFT
+        - match kind {
+            RoadKind::Major => 0.0,
+            RoadKind::Lane => MINOR_SINK * 0.5,
+            RoadKind::Minor => MINOR_SINK,
+            RoadKind::Path => MINOR_SINK * 1.5,
+        };
     let n = map.grid_size();
     let mouths = junction_mouths(ribbons);
     let (mut positions, mut normals, mut uv0, mut uv1, mut colours, mut indices) = (vec![], vec![], vec![], vec![], vec![], vec![]);
@@ -541,7 +586,7 @@ pub fn spawn_roads(
     };
     let major = material(&textures.asphalt, 0.92);
     let minor = material(&textures.track, 1.0);
-    for (kind, material) in [(RoadKind::Major, major), (RoadKind::Minor, minor)] {
+    for (kind, material) in [(RoadKind::Major, major.clone()), (RoadKind::Lane, major), (RoadKind::Minor, minor.clone()), (RoadKind::Path, minor)] {
         commands.spawn((
             crate::terrain::TerrainRoot,
             bevy::light::NotShadowCaster,
