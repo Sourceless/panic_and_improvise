@@ -27,30 +27,43 @@ struct View {
     name: &'static str,
     camera: Transform,
     gun: Transform,
+    /// Vertical field of view in radians; a very narrow one makes a near-orthographic photo-style view.
+    fov: f32,
 }
 
 fn views() -> Vec<View> {
-    let first_person = |name, gun| View { name, camera: Transform::IDENTITY, gun };
-    let orbit = |name, at: Vec3| View {
+    const FOV: f32 = 0.7854;
+    let first_person = |name, gun| View { name, camera: Transform::IDENTITY, gun, fov: FOV };
+    // Photo-style side views: a long, narrow lens from 3.5 m, looking square at the gun.
+    let side = |name, x: f32| View {
         name,
-        camera: Transform::from_translation(at + Vec3::new(0.0, 0.0, -0.15)).looking_at(Vec3::new(-0.02, 0.0, -0.15), Vec3::Y),
+        camera: Transform::from_xyz(x, 0.0, -0.16).looking_at(Vec3::new(0.0, 0.0, -0.16), Vec3::Y),
         gun: Transform::IDENTITY,
+        fov: 0.2,
     };
     vec![
         first_person("hip", gun_transform(0.0)),
         first_person("sights", gun_transform(1.0)),
         first_person("recoil", gun_pose(0.0, 1.0)),
-        orbit("right", Vec3::new(0.85, 0.06, 0.0)),
-        orbit("left", Vec3::new(-0.85, 0.06, 0.0)),
+        side("right", 3.5),
+        side("left", -3.5),
         View {
             name: "three_quarter",
             camera: Transform::from_xyz(-0.55, 0.28, 0.5).looking_at(Vec3::new(-0.02, -0.01, -0.15), Vec3::Y),
             gun: Transform::IDENTITY,
+            fov: FOV,
         },
         View {
             name: "front",
-            camera: Transform::from_xyz(0.25, 0.12, -1.0).looking_at(Vec3::new(0.0, 0.0, -0.3), Vec3::Y),
+            camera: Transform::from_xyz(0.3, 0.1, -1.1).looking_at(Vec3::new(0.0, 0.0, -0.3), Vec3::Y),
             gun: Transform::IDENTITY,
+            fov: FOV,
+        },
+        View {
+            name: "rear_left",
+            camera: Transform::from_xyz(-0.35, 0.25, 0.75).looking_at(Vec3::new(-0.04, 0.0, -0.2), Vec3::Y),
+            gun: Transform::IDENTITY,
+            fov: FOV,
         },
     ]
 }
@@ -104,6 +117,7 @@ fn step(
     mut frame: Local<u32>,
     out: Res<Output>,
     mut eye: Query<&mut Transform, (With<Eye>, Without<Gun>)>,
+    mut projections: Query<&mut Projection, With<Eye>>,
     mut gun: Query<&mut Transform, (With<Gun>, Without<Eye>)>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -124,6 +138,9 @@ fn step(
     };
     if within == 0 {
         *eye.single_mut().unwrap() = view.camera;
+        if let Projection::Perspective(p) = &mut *projections.single_mut().unwrap() {
+            p.fov = view.fov;
+        }
         *gun.single_mut().unwrap() = view.gun;
     }
     if within == PER_VIEW - 12 {

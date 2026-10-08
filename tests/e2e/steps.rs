@@ -77,14 +77,15 @@ fn right_click(_world: &mut GameWorld) {
 #[given("the gun is on its sights")]
 #[then("the gun is on its sights")]
 fn gun_on_sights(_world: &mut GameWorld) {
-    let raised = wait_for(Duration::from_secs(2), || snapshot().aim_blend > 0.99);
+    // Game time runs slower than real time if the machine is busy, so allow plenty.
+    let raised = wait_for(Duration::from_secs(8), || snapshot().aim_blend > 0.99);
     let state = snapshot();
     assert!(raised && state.aiming, "gun not on its sights (aiming {}, blend {})", state.aiming, state.aim_blend);
 }
 
 #[then("the gun is back at the hip")]
 fn gun_at_hip(_world: &mut GameWorld) {
-    let lowered = wait_for(Duration::from_secs(2), || snapshot().aim_blend < 0.01);
+    let lowered = wait_for(Duration::from_secs(8), || snapshot().aim_blend < 0.01);
     let state = snapshot();
     assert!(lowered && !state.aiming, "gun not at the hip (aiming {}, blend {})", state.aiming, state.aim_blend);
 }

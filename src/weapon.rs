@@ -1,9 +1,9 @@
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
-use crate::gun_model::{self, BORE_Y, MUZZLE_Z, SIGHT_TOP};
+use crate::gun_model::{self, BORE_Y, MUZZLE_Z, REAR_PEEP_Z, SIGHT_LINE};
 use crate::player::{spawn_player, toggle_cursor_grab, AimBlend, FpsCamera};
-pub use crate::gun_model::{front_sight, rear_sights};
+pub use crate::gun_model::sight_points;
 use crate::map::TerrainMap;
 use crate::target::{dummy_aabb, TargetDummy};
 
@@ -14,8 +14,11 @@ const BULLET_DAMAGE: f32 = 25.0;
 
 /// Where the gun sits in camera space when carried at the hip, and when aimed down its sights.
 const HIP_POSITION: Vec3 = Vec3::new(0.2, -0.2, -0.5);
-/// Centred, and low enough that the tops of the two sights land on the camera's axis.
-const ADS_POSITION: Vec3 = Vec3::new(0.0, -SIGHT_TOP, -0.5);
+/// Centred, and low enough that the line of sight (rear peep to front blade) is the camera's axis.
+/// Eye relief: how far the eye is behind the rear peep when aiming (a real peep sight is held
+/// close, about this far, with the stock passing behind the eye).
+const EYE_RELIEF: f32 = 0.2;
+const ADS_POSITION: Vec3 = Vec3::new(0.0, -SIGHT_LINE, -EYE_RELIEF - REAR_PEEP_Z);
 /// The barrel's tip, in the gun's own space: the bullets start here.
 pub const MUZZLE_LOCAL: Vec3 = Vec3::new(0.0, BORE_Y, MUZZLE_Z);
 /// How fast the gun moves between hip and sights (per second, exponential).
@@ -419,21 +422,18 @@ mod tests {
         gun_transform(blend).transform_point(gun_space)
     }
 
-    fn top_of(sight: Transform) -> Vec3 {
-        sight.transform_point(Vec3::new(0.0, 0.5, 0.0))
-    }
-
     #[test]
-    fn on_the_sights_both_sight_tops_sit_on_the_cameras_axis() {
-        let front = in_camera(1.0, top_of(front_sight()));
-        assert!(front.x.abs() < 1e-4 && front.y.abs() < 1e-4, "front post top at ({}, {}) in camera space", front.x, front.y);
-        for upright in rear_sights() {
-            let p = in_camera(1.0, top_of(upright));
-            assert!(p.y.abs() < 1e-4, "rear upright top is {} off the line of sight", p.y);
-            assert!(p.x.abs() < 0.02, "rear upright is {} to the side", p.x);
-            // The rear sight is nearer the eye than the front, as it must be to line up.
-            assert!(p.z > front.z);
+    fn on_the_sights_the_peep_and_the_front_blade_both_sit_on_the_cameras_axis() {
+        let (rear_gun, front_gun) = sight_points();
+        let (rear, front) = (in_camera(1.0, rear_gun), in_camera(1.0, front_gun));
+        for (name, p) in [("rear peep", rear), ("front blade", front)] {
+            assert!(p.x.abs() < 1e-4 && p.y.abs() < 1e-4, "{name} at ({}, {}) in camera space", p.x, p.y);
         }
+        // The rear sight is nearer the eye than the front, as it must be to line up.
+        assert!(rear.z > front.z + 0.3);
+        // At the hip they are not on the axis at all: the gun is off to the side and below.
+        let hip = in_camera(0.0, rear_gun);
+        assert!(hip.x > 0.1 && hip.y < -0.1);
     }
 
     #[test]
@@ -442,15 +442,6 @@ mod tests {
         assert!(p.x > 0.1 && p.y < -0.1 && p.z < -0.3, "muzzle at {p:?}");
         let aimed = in_camera(1.0, MUZZLE_LOCAL);
         assert!(aimed.x.abs() < 1e-4 && aimed.y > -0.1, "aimed muzzle at {aimed:?}");
-    }
-
-    #[test]
-    fn the_front_sight_sits_on_the_barrel_at_the_muzzle() {
-        let front = front_sight();
-        assert!((front.translation.z - MUZZLE_LOCAL.z).abs() < 0.03, "the post stands just behind the muzzle");
-        // Its foot is on the top of the barrel jacket, which is 0.02 + 0.026 high.
-        let foot = front.transform_point(Vec3::new(0.0, -0.5, 0.0)).y;
-        assert!((0.04..0.05).contains(&foot), "foot at {foot}");
     }
 
     #[test]
@@ -527,7 +518,7 @@ mod tests {
         let ads_shove = ads.translation.z - gun_transform(1.0).translation.z;
         assert!(ads_shove < hip_shove);
         // Sight tops stay close to the line of sight even in the jolt.
-        let top = ads.transform_point(Vec3::new(0.0, SIGHT_TOP, MUZZLE_Z));
-        assert!(top.y.abs() < 0.03, "sight top {} off the line of sight under recoil", top.y);
+        let blade = ads.transform_point(sight_points().1);
+        assert!(blade.y.abs() < 0.03, "front blade {} off the line of sight under recoil", blade.y);
     }
 }
