@@ -29,6 +29,7 @@ pub enum Command {
     RemoveDummies,
     /// Put something solid in the test room.
     AddSolid(fps_prototype::collision::Solid),
+    AddCanopy(fps_prototype::collision::Canopy),
     /// The wind blows toward `heading` (radians from +X toward +Z) at `speed` m/s.
     SetWind { heading: f32, speed: f32 },
     Press(MouseButton),
@@ -290,6 +291,7 @@ fn drive(world: &mut World) {
                 *world.resource_mut::<fps_prototype::wind::Wind>() = fps_prototype::wind::Wind { heading, speed };
             }
             Command::AddSolid(solid) => world.resource_mut::<fps_prototype::collision::Colliders>().add(solid),
+            Command::AddCanopy(canopy) => world.resource_mut::<fps_prototype::collision::Colliders>().add_canopy(canopy),
             Command::RemoveDummies => {
                 let dummies: Vec<Entity> = world.query_filtered::<Entity, With<TargetDummy>>().iter(world).collect();
                 for dummy in dummies {

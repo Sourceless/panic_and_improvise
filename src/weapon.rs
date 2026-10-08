@@ -5,7 +5,7 @@ use crate::gun_model::{self, BORE_Y, MUZZLE_Z, REAR_PEEP_Z, SIGHT_LINE};
 use crate::ballistics::{self, Cartridge, Flight, NINE_PARA};
 use crate::collision::Colliders;
 use crate::gun_state::{Bolt, Mechanism, State, STERLING};
-use crate::impact::{segment_aabb_hit, surface_hit, Impact, Surface};
+use crate::impact::{segment_aabb_hit, surface_hit, Impact, Rng, Surface};
 use crate::sound::play_after;
 use crate::wind::Wind;
 use crate::player::{spawn_player, toggle_cursor_grab, AimBlend, FpsCamera, Stance};
@@ -320,6 +320,9 @@ pub struct Bullet {
     age: f32,
     /// How far it has flown, metres. The tracer isn't drawn until it's flown a way.
     travelled: f32,
+    /// Whether it is in foliage right now (so that a burst of leaves is made when it goes in, and not
+    /// again every step it is in there).
+    in_foliage: bool,
 }
 
 impl Bullet {
@@ -608,6 +611,7 @@ fn fire(
             velocity: direction_shot * CARTRIDGE.muzzle_velocity,
             age: 0.0,
             travelled: 0.0,
+            in_foliage: false,
         },
         Mesh3d(assets.mesh.clone()),
         MeshMaterial3d(assets.material.clone()),
@@ -735,13 +739,34 @@ fn move_bullets(
             }
             if let Some((_, impact)) = landing {
                 if let Some(target) = impact.target {
+                    let hit_speed = impact.speed;
                     if let Ok((_, _, mut dummy)) = dummies.get_mut(target) {
-                        dummy.take_hit(BULLET_DAMAGE);
+                        dummy.take_hit(ballistics::damage_at_speed(BULLET_DAMAGE, hit_speed));
                     }
                 }
                 impacts.write(impact);
                 finished = true;
                 break;
+            }
+            // Foliage on the way (a hedge, a tree's crown) slows the bullet and knocks it a little off
+            // line, with a burst of leaves where it goes in; if it is slowed enough, it stops there.
+            let depth = colliders.as_ref().map_or(0.0, |c| c.foliage_depth(start, flight.position));
+            if depth > 0.0 {
+                let mut noise = Rng(((bullet.travelled * 977.0) as u32) | 1);
+                let jitter = Vec3::new(noise.range(-1.0, 1.0), noise.range(-1.0, 1.0), noise.range(-1.0, 1.0));
+                flight.velocity = ballistics::through_foliage(flight.velocity, depth, jitter);
+                let direction = flight.velocity.normalize_or(Vec3::NEG_Z);
+                let stopped = flight.velocity.length() < ballistics::FOLIAGE_STOP_SPEED;
+                if !bullet.in_foliage || stopped {
+                    impacts.write(Impact { position: flight.position, normal: -direction, surface: Surface::Foliage, speed, target: None });
+                }
+                bullet.in_foliage = true;
+                if stopped {
+                    finished = true;
+                    break;
+                }
+            } else {
+                bullet.in_foliage = false;
             }
             if bullet.age > BULLET_LIFETIME {
                 finished = true;

@@ -187,6 +187,32 @@ pub fn zeroed_direction(cartridge: &Cartridge, muzzle: Vec3, eye: Vec3, view_for
     line * lift.cos() + up * lift.sin()
 }
 
+/// How fast a bullet loses speed in foliage: it keeps this fraction... per unit of foliage depth, as
+/// `exp(-FOLIAGE_DRAG * depth)`. A bullet through a metre of hedge keeps about two fifths of its speed.
+pub const FOLIAGE_DRAG: f32 = 0.9;
+/// How far a bullet is knocked off line, in radians, per unit of foliage depth: about a degree
+/// going through a metre or so of hedge. (Enough to matter at long range, not to fling it about.)
+pub const FOLIAGE_DEFLECTION: f32 = 0.01;
+/// A bullet slower than this in foliage is stopped by it, m/s.
+pub const FOLIAGE_STOP_SPEED: f32 = 80.0;
+
+/// A bullet's velocity after going through `depth` of foliage: slower, and knocked a little off line
+/// in the direction of `noise` (a random vector with components between -1 and 1).
+pub fn through_foliage(velocity: Vec3, depth: f32, noise: Vec3) -> Vec3 {
+    let speed = velocity.length() * (-FOLIAGE_DRAG * depth).exp();
+    let direction = velocity.normalize_or_zero();
+    (direction + noise * (FOLIAGE_DEFLECTION * depth)).normalize_or(direction) * speed
+}
+
+/// At or above this speed a bullet does its full damage, m/s.
+pub const FULL_DAMAGE_SPEED: f32 = 300.0;
+
+/// The damage of a bullet that hits at `speed`, given what it does at full speed: it goes with the
+/// bullet's energy, so one that has been slowed (by distance, or by foliage) hits softer.
+pub fn damage_at_speed(full: f32, speed: f32) -> f32 {
+    full * (speed / FULL_DAMAGE_SPEED).powi(2).min(1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +367,42 @@ mod tests {
         let flight = point_at_range(&NINE_PARA, muzzle, direction, FORWARD, 100.0 + 0.5);
         let below = eye.y - flight.position.y;
         assert!((0.08..0.25).contains(&below), "at 100 m a 20 m zero is {below} m below the line of sight");
+    }
+
+    #[test]
+    fn foliage_slows_a_bullet_more_the_more_of_it_there_is() {
+        let v = Vec3::new(0.0, 0.0, -368.0);
+        let speed = |depth| through_foliage(v, depth, Vec3::ZERO).length();
+        assert_eq!(speed(0.0), 368.0);
+        assert!(speed(0.5) < 368.0 && speed(1.0) < speed(0.5) && speed(2.0) < speed(1.0));
+        // A metre of hedge leaves a bit over a third of the speed; two metres, only about a sixth.
+        assert!((speed(1.0) / 368.0 - (-FOLIAGE_DRAG).exp()).abs() < 1e-4);
+        assert!(speed(2.0) < FOLIAGE_STOP_SPEED, "two metres of it stops a bullet: {}", speed(2.0));
+    }
+
+    #[test]
+    fn foliage_knocks_a_bullet_off_line_but_barely_when_there_is_little_of_it() {
+        let v = Vec3::new(0.0, 0.0, -368.0);
+        let noise = Vec3::new(1.0, 0.0, 0.0);
+        let angle = |depth| {
+            let out = through_foliage(v, depth, noise);
+            (out.normalize().dot(v.normalize())).clamp(-1.0, 1.0).acos()
+        };
+        assert!(angle(0.0) < 1e-6);
+        assert!((angle(1.0) - FOLIAGE_DEFLECTION).abs() < 2e-3, "{}", angle(1.0));
+        assert!(angle(2.0) > angle(1.0));
+        // Slowed and bent, but still going the same general way.
+        assert!(through_foliage(v, 1.0, noise).z < 0.0);
+    }
+
+    #[test]
+    fn damage_follows_energy_up_to_full_and_no_further() {
+        assert_eq!(damage_at_speed(25.0, 368.0), 25.0, "muzzle speed: full");
+        assert_eq!(damage_at_speed(25.0, 300.0), 25.0);
+        assert!((damage_at_speed(25.0, 150.0) - 6.25).abs() < 1e-4, "half the speed, a quarter of it");
+        assert_eq!(damage_at_speed(25.0, 0.0), 0.0);
+        // A bullet from the Sterling at 200 m is down on 270 m/s or so: a little weaker.
+        let d = damage_at_speed(25.0, 270.0);
+        assert!(d < 25.0 && d > 18.0, "{d}");
     }
 }

@@ -27,6 +27,8 @@ pub enum Surface {
     Target,
     /// A tree, a wall, a hedge, a fence, a building: something solid in the world.
     Solid(Material),
+    /// A bullet going into leaves (a hedge, a tree's crown), which it goes on through.
+    Foliage,
 }
 
 /// A bullet has landed.
@@ -316,6 +318,18 @@ pub fn look(surface: Surface, y: f32) -> Look {
             thump: ThumpKind::Stone,
             pitch: (0.92, 1.08),
             volume: 1.0,
+        },
+        Surface::Foliage => Look {
+            hole: None,
+            hole_size: (0.0, 0.0),
+            chip: ChipKind::Leaf,
+            chips: (6.0, 11.0),
+            puffs: 0,
+            dust: Color::NONE,
+            // A bullet through leaves: a rustle, not a thump.
+            thump: ThumpKind::Dirt,
+            pitch: (1.3, 1.5),
+            volume: 0.3,
         },
         Surface::Solid(Material::Leaves) => Look {
             hole: Some(HoleStyle::Leaves),
@@ -873,6 +887,9 @@ mod tests {
             assert!(look.hole_size.0 > 0.0 && look.hole_size.1 >= look.hole_size.0);
         }
         assert!(look(Surface::Water, 0.0).hole.is_none());
+        // Leaves have no surface to scar: a bullet going through them leaves nothing behind.
+        assert!(look(Surface::Foliage, 5.0).hole.is_none());
+        assert_eq!(look(Surface::Foliage, 5.0).chip, ChipKind::Leaf);
     }
 
     #[test]

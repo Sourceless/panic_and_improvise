@@ -246,6 +246,41 @@ pub struct Mantle {
     pub top: f32,
 }
 
+/// The crown of a tree: an ellipsoid of leaves, high above the ground. Nobody walks into it, but a
+/// bullet going through it is slowed and bent by the leaves and twigs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Canopy {
+    pub centre: Vec3,
+    /// Half its width, height and depth.
+    pub radii: Vec3,
+}
+
+impl Canopy {
+    /// The part of the straight run from `a` to `b` inside the crown, as a range of the way along it.
+    fn interval(&self, a: Vec3, b: Vec3) -> Option<(f32, f32)> {
+        // In units of the radii the crown is a unit sphere.
+        let (pa, pb) = ((a - self.centre) / self.radii, (b - self.centre) / self.radii);
+        let d = pb - pa;
+        let (qa, qb, qc) = (d.dot(d), 2.0 * pa.dot(d), pa.dot(pa) - 1.0);
+        if qa < 1e-12 {
+            return (qc <= 0.0).then_some((0.0, 1.0));
+        }
+        let disc = qb * qb - 4.0 * qa * qc;
+        if disc < 0.0 {
+            return None;
+        }
+        let root = disc.sqrt();
+        let (t0, t1) = (((-qb - root) / (2.0 * qa)).max(0.0), ((-qb + root) / (2.0 * qa)).min(1.0));
+        (t0 <= t1).then_some((t0, t1))
+    }
+}
+
+/// How much a metre of a hedge counts as, and a metre of a tree's crown: a bullet is slowed by the
+/// "foliage depth" it goes through, which is the length weighted by these. A hedge is dense; a crown,
+/// mostly gaps between the leaves.
+pub const HEDGE_DENSITY: f32 = 1.0;
+pub const CANOPY_DENSITY: f32 = 0.35;
+
 /// Where a flying thing met a solid.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SolidHit {
@@ -271,6 +306,8 @@ pub struct Colliders {
     bounds: Vec<(Vec2, Vec2)>,
     bucket: f32,
     buckets: HashMap<(i32, i32), Vec<u32>>,
+    canopies: Vec<Canopy>,
+    canopy_buckets: HashMap<(i32, i32), Vec<u32>>,
 }
 
 impl Default for Colliders {
@@ -282,7 +319,7 @@ impl Default for Colliders {
 impl Colliders {
     /// An empty world whose grid has squares of the given size.
     pub fn with_bucket(bucket: f32) -> Self {
-        Colliders { solids: Vec::new(), bounds: Vec::new(), bucket, buckets: HashMap::new() }
+        Colliders { solids: Vec::new(), bounds: Vec::new(), bucket, buckets: HashMap::new(), canopies: Vec::new(), canopy_buckets: HashMap::new() }
     }
 
     pub fn len(&self) -> usize {
@@ -297,6 +334,24 @@ impl Colliders {
         self.solids.clear();
         self.bounds.clear();
         self.buckets.clear();
+        self.canopies.clear();
+        self.canopy_buckets.clear();
+    }
+
+    pub fn add_canopy(&mut self, canopy: Canopy) {
+        let id = self.canopies.len() as u32;
+        let reach = canopy.radii.x.max(canopy.radii.z) + FILE_MARGIN;
+        let (lo, hi) = (Vec2::new(canopy.centre.x, canopy.centre.z) - Vec2::splat(reach), Vec2::new(canopy.centre.x, canopy.centre.z) + Vec2::splat(reach));
+        for bz in (lo.y / self.bucket).floor() as i32..=(hi.y / self.bucket).floor() as i32 {
+            for bx in (lo.x / self.bucket).floor() as i32..=(hi.x / self.bucket).floor() as i32 {
+                self.canopy_buckets.entry((bx, bz)).or_default().push(id);
+            }
+        }
+        self.canopies.push(canopy);
+    }
+
+    pub fn canopy_count(&self) -> usize {
+        self.canopies.len()
     }
 
     pub fn add(&mut self, solid: Solid) {
@@ -344,10 +399,58 @@ impl Colliders {
         None
     }
 
+    /// How much foliage a straight run from `from` to `to` goes through: the length of it that is
+    /// inside a hedge (below its top) or the crown of a tree, each weighted by how dense it is.
+    pub fn foliage_depth(&self, from: Vec3, to: Vec3) -> f32 {
+        const PIECE: f32 = 1.5;
+        let pieces = ((from.distance(to) / PIECE).ceil() as usize).max(1);
+        (0..pieces)
+            .map(|i| self.piece_foliage(from.lerp(to, i as f32 / pieces as f32), from.lerp(to, (i + 1) as f32 / pieces as f32)))
+            .sum()
+    }
+
+    fn piece_foliage(&self, from: Vec3, to: Vec3) -> f32 {
+        let (a, b) = (Vec2::new(from.x, from.z), Vec2::new(to.x, to.z));
+        let (middle, length) = ((a + b) * 0.5, from.distance(to));
+        let mut depth = 0.0;
+        // Hedges: the part of the run inside one that is also lower than its top.
+        for solid in self.near(middle, (b - a).length() * 0.5 + 0.01).filter(|s| s.material == Material::Leaves) {
+            let Some((t_in, t_out)) = solid.shape.segment_interval(a, b) else { continue };
+            let top = solid.top_at(a.lerp(b, t_in));
+            let dy = to.y - from.y;
+            let (lo, hi) = if dy.abs() < 1e-9 {
+                if from.y > top {
+                    continue;
+                }
+                (t_in, t_out)
+            } else {
+                let t_top = (top - from.y) / dy;
+                if dy < 0.0 { (t_in.max(t_top), t_out) } else { (t_in, t_out.min(t_top)) }
+            };
+            if hi > lo {
+                depth += (hi - lo) * length * HEDGE_DENSITY;
+            }
+        }
+        // Tree crowns.
+        if let Some(ids) = self.canopy_buckets.get(&((middle.x / self.bucket).floor() as i32, (middle.y / self.bucket).floor() as i32)) {
+            for &id in ids {
+                let canopy = &self.canopies[id as usize];
+                if let Some((t0, t1)) = canopy.interval(from, to) {
+                    depth += (t1 - t0) * length * CANOPY_DENSITY;
+                }
+            }
+        }
+        depth
+    }
+
     fn piece_hit(&self, from: Vec3, to: Vec3) -> Option<SolidHit> {
         let (a, b) = (Vec2::new(from.x, from.z), Vec2::new(to.x, to.z));
         let mut best: Option<SolidHit> = None;
         for solid in self.near((a + b) * 0.5, (b - a).length() * 0.5 + 0.01) {
+            // A bullet goes through foliage rather than stopping at it (see `foliage_depth`).
+            if solid.material == Material::Leaves {
+                continue;
+            }
             let Some((t_in, t_out)) = solid.shape.segment_interval(a, b) else { continue };
             let height_at = |t: f32| from.y + (to.y - from.y) * t;
             let entry = a.lerp(b, t_in);
@@ -790,5 +893,68 @@ mod tests {
             assert!(out.dot(dir) > 0.3, "from {angle}: the face hit looks back toward the shooter: {out:?}");
             assert!(Shape::Box { centre: Vec2::new(10.0, 10.0), half: Vec2::new(4.0, 3.0), yaw: 0.7 }.separation(Vec2::new(hit.point.x, hit.point.z)).0.abs() < 1e-3);
         }
+    }
+
+    // ---- foliage ------------------------------------------------------------------------------
+
+    fn hedge_world(top: f32) -> Colliders {
+        world(&[Solid::wall(Vec2::new(-10.0, -3.0), Vec2::new(10.0, -3.0), 0.6, top, top).of(Material::Leaves)])
+    }
+
+    #[test]
+    fn a_bullet_goes_through_a_hedge_not_into_it() {
+        let c = hedge_world(1.5);
+        assert!(c.segment_hit(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 1.0, -6.0)).is_none(), "foliage doesn't stop it");
+        // ...but a person still can't walk through it.
+        assert_ne!(c.resolve(Vec2::new(0.0, -2.9), R, 0.0, STEP_UP), Vec2::new(0.0, -2.9));
+    }
+
+    #[test]
+    fn a_hedges_depth_is_how_far_through_it_the_bullet_goes() {
+        let c = hedge_world(1.5);
+        let through = c.foliage_depth(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 1.0, -6.0));
+        assert!((through - 1.2).abs() < 1e-4, "the hedge is 1.2 m thick: {through}");
+        // At an angle there is more of it.
+        let slant = c.foliage_depth(Vec3::new(-3.0, 1.0, 0.0), Vec3::new(3.0, 1.0, -6.0));
+        assert!((slant - 1.2 * 2.0f32.sqrt()).abs() < 1e-3, "{slant}");
+        assert_eq!(c.foliage_depth(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 1.0, -2.0)), 0.0, "stops short");
+    }
+
+    #[test]
+    fn over_the_top_of_a_hedge_there_is_no_foliage() {
+        let c = hedge_world(1.5);
+        assert_eq!(c.foliage_depth(Vec3::new(0.0, 1.8, 0.0), Vec3::new(0.0, 1.8, -6.0)), 0.0);
+        // Coming down into it, only the part below the top counts.
+        let down = c.foliage_depth(Vec3::new(0.0, 1.8, -2.4), Vec3::new(0.0, 1.2, -3.6));
+        assert!(down > 0.4 && down < 0.7, "about half of it: {down}");
+    }
+
+    #[test]
+    fn a_trees_crown_slows_a_bullet_by_how_much_of_it_is_crossed() {
+        let mut c = Colliders::default();
+        c.add_canopy(Canopy { centre: Vec3::new(0.0, 6.0, -5.0), radii: Vec3::new(3.0, 3.0, 3.0) });
+        let straight = c.foliage_depth(Vec3::new(0.0, 6.0, 0.0), Vec3::new(0.0, 6.0, -12.0));
+        assert!((straight - 6.0 * CANOPY_DENSITY).abs() < 1e-3, "6 m across, at crown density: {straight}");
+        let edge = c.foliage_depth(Vec3::new(2.0, 6.0, 0.0), Vec3::new(2.0, 6.0, -12.0));
+        assert!(edge > 0.0 && edge < straight, "a chord near the edge is shorter: {edge}");
+        assert_eq!(c.foliage_depth(Vec3::new(0.0, 12.0, 0.0), Vec3::new(0.0, 12.0, -12.0)), 0.0, "well above it");
+        assert_eq!(c.foliage_depth(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 1.0, -12.0)), 0.0, "and beneath it");
+    }
+
+    #[test]
+    fn a_crown_is_not_an_obstacle_to_a_person() {
+        let mut c = Colliders::default();
+        c.add_canopy(Canopy { centre: Vec3::new(0.0, 6.0, 0.0), radii: Vec3::splat(3.0) });
+        assert_eq!(c.resolve(Vec2::ZERO, R, 0.0, STEP_UP), Vec2::ZERO);
+        assert!(c.segment_hit(Vec3::new(0.0, 6.0, 5.0), Vec3::new(0.0, 6.0, -5.0)).is_none(), "nor does it stop a bullet outright");
+    }
+
+    #[test]
+    fn foliage_depth_adds_up_over_a_long_run() {
+        let mut c = Colliders::default();
+        c.add_canopy(Canopy { centre: Vec3::new(0.0, 5.0, -20.0), radii: Vec3::splat(4.0) });
+        let whole = c.foliage_depth(Vec3::new(0.0, 5.0, 0.0), Vec3::new(0.0, 5.0, -40.0));
+        let halves = c.foliage_depth(Vec3::new(0.0, 5.0, 0.0), Vec3::new(0.0, 5.0, -20.0)) + c.foliage_depth(Vec3::new(0.0, 5.0, -20.0), Vec3::new(0.0, 5.0, -40.0));
+        assert!((whole - halves).abs() < 1e-3 && (whole - 8.0 * CANOPY_DENSITY).abs() < 1e-3, "{whole} {halves}");
     }
 }

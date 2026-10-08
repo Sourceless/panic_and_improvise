@@ -837,6 +837,19 @@ impl VegetationPlan {
         }
     }
 
+    /// Every tree's crown is foliage a bullet goes through (and is slowed by), not something solid. A
+    /// crown is as the models grow it: its centre and its radii, from the same generated variants.
+    fn add_canopies(&self, colliders: &mut crate::collision::Colliders, dims: &HashMap<Species, Vec<(Vec3, Vec3, f32)>>) {
+        for tree in self.chunks.values().flatten() {
+            let Some(variants) = dims.get(&tree.species) else { continue };
+            let (centre, radii, _) = variants[tree.variant as usize % variants.len()];
+            let world_centre = tree.pos + Quat::from_rotation_y(tree.yaw) * (centre * tree.scale);
+            // Crowns aren't solid blobs: the outermost leaves are sparse, so a bit inside the box.
+            let radii = radii * tree.scale * 0.8;
+            colliders.add_canopy(crate::collision::Canopy { centre: world_centre, radii: Vec3::new(radii.x.max(radii.z), radii.y, radii.x.max(radii.z)) });
+        }
+    }
+
     pub fn tree_count(&self) -> usize {
         self.chunks.values().map(Vec::len).sum()
     }
@@ -976,6 +989,7 @@ pub fn spawn_vegetation(
             (sp, dims)
         })
         .collect();
+    plan.add_canopies(colliders, &blob_dims);
     let material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 1.0,

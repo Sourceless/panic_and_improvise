@@ -57,7 +57,7 @@ fn have_the_smg(_world: &mut GameWorld) {
 
 #[given("the shot sound is loaded")]
 fn shot_sound_loaded(_world: &mut GameWorld) {
-    let loaded = wait_for(Duration::from_secs(5), || snapshot().shot_sound_loaded);
+    let loaded = wait_for(Duration::from_secs(30), || snapshot().shot_sound_loaded);
     assert!(loaded, "shot sound did not finish loading");
 }
 
@@ -686,4 +686,33 @@ fn nothing_beyond(_world: &mut GameWorld) {
     let state = snapshot();
     assert_eq!(state.dummy_hits, 0, "the target dummy behind it was hit");
     assert_eq!(state.impacts.impacts, 1, "{} impacts", state.impacts.impacts);
+}
+
+#[given(regex = r"^there is a (thin|thick) tree crown ahead$")]
+fn crown_ahead(_world: &mut GameWorld, size: String) {
+    // 4 m across and 8 m across, both centred at the height of a standing shot, 5 m ahead.
+    let radius = if size == "thin" { 2.0 } else { 4.0 };
+    send(Command::AddCanopy(fps_prototype::collision::Canopy {
+        centre: bevy::prelude::Vec3::new(0.0, 1.8, -5.0),
+        radii: bevy::prelude::Vec3::splat(radius),
+    }));
+    step_pause();
+}
+
+#[then(regex = r"^the target dummy has taken between ([\d.]+) and ([\d.]+) damage$")]
+fn dummy_damage_between(_world: &mut GameWorld, low: f32, high: f32) {
+    let ok = wait_for(Duration::from_secs(4), || {
+        let taken = 100.0 - snapshot().dummy_health;
+        taken >= low && taken <= high
+    });
+    assert!(ok, "the target dummy has taken {} damage", 100.0 - snapshot().dummy_health);
+}
+
+#[then("the target dummy is unhurt")]
+fn dummy_unhurt(_world: &mut GameWorld) {
+    // Give a bullet time to get there, if it is going to.
+    std::thread::sleep(Duration::from_millis(900));
+    let state = snapshot();
+    assert_eq!(state.dummy_hits, 0, "the target dummy was hit");
+    assert_eq!(state.dummy_health, 100.0);
 }

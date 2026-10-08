@@ -36,13 +36,42 @@ Feature: Bullets hit the solid things in the world
     When I fire once
     Then a bullet hole appears in the wood
 
-  Scenario: Solid impact: a hedge stops a shot from a crouch
+  Scenario: Foliage: a bullet goes through a hedge, slowed to a fraction of its damage
     Given there is a 1.5 metre high hedge ahead
     And I press C
     And I right click
     And the gun is on its sights
     When I fire once
-    Then a bullet hole appears in the leaves
+    Then the target dummy has taken between 1 and 10 damage
+
+  Scenario: Foliage: it bursts into leaves where it goes in
+    Given there is a 1.5 metre high hedge ahead
+    And I press C
+    And I right click
+    And the gun is on its sights
+    When I fire once
+    Then dirt is thrown up
+
+  Scenario: Foliage: over the top of a hedge there is nothing to slow it
+    Given there is a 1.5 metre high hedge ahead
+    And I right click
+    And the gun is on its sights
+    When I fire once
+    Then the target dummy has taken 25 damage
+
+  Scenario: Foliage: a thin tree crown slows a bullet
+    Given there is a thin tree crown ahead
+    And I right click
+    And the gun is on its sights
+    When I fire once
+    Then the target dummy has taken between 1 and 10 damage
+
+  Scenario: Foliage: a thick tree crown stops it
+    Given there is a thick tree crown ahead
+    And I right click
+    And the gun is on its sights
+    When I fire once
+    Then the target dummy is unhurt
 
   Scenario: Solid impact: a shed is metal
     Given there is a metal shed ahead
