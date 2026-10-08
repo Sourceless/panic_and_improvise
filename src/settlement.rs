@@ -398,4 +398,110 @@ mod tests {
         let (distance, _) = solid.shape.separation(Vec2::new(6.0 + 2.6 + 1.0, 1.0));
         assert!((distance - 1.0).abs() < 1e-4);
     }
+
+    /// A diagnostic, not an assertion: builds every settlement on a real map and measures how well the
+    /// buildings sit among the roads, each other, water and slopes.
+    ///   cargo test --lib how_well_do_settlements -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn how_well_do_settlements_fit_their_surroundings() {
+        use crate::collision::Shape;
+        use crate::params::GenParams;
+        use crate::roads::{road_ribbons, RoadClearance, RoadNetwork};
+        let params = GenParams::default();
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
+        let roads = RoadNetwork::generate(&map, &params);
+        let clearance = RoadClearance::new(&road_ribbons(&map, &roads));
+        let mut meshes = Assets::<Mesh>::default();
+        let palette = Palette {
+            walls: vec![Handle::default()],
+            slate: Handle::default(),
+            tile: Handle::default(),
+            stone: Handle::default(),
+            brick: Handle::default(),
+            white: Handle::default(),
+            timber: Handle::default(),
+            unit_cube: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
+            unit_gable: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
+        };
+
+        #[derive(Default, Debug)]
+        struct Tally {
+            settlements: usize,
+            buildings: usize,
+            on_road: usize,
+            by_road: usize,
+            overlapping: usize,
+            on_water: usize,
+            on_slope: usize,
+            with_road_through_the_middle: usize,
+        }
+        let mut tiers: std::collections::BTreeMap<&str, Tally> = Default::default();
+        for poi in &map.pois {
+            let ground = map.height_at(poi.position);
+            let mut rng = Rng::from_position(poi.position);
+            let parts = match poi.kind {
+                PoiKind::Village => {
+                    let church_offset = Vec3::new(poi.landmark.x - poi.position.x, map.height_at(poi.landmark) - ground, poi.landmark.y - poi.position.y);
+                    village(&mut meshes, &palette, &mut rng, &map, poi.position, poi.radius, church_offset)
+                }
+                PoiKind::Farm => farm(&mut meshes, &palette, &mut rng),
+                PoiKind::Mill => mill(&mut meshes, &palette),
+            };
+            let origin = Vec3::new(poi.position.x, ground, poi.position.y);
+            let solids: Vec<Solid> = parts.iter().filter_map(|p| p.solid.map(|f| solid_for(origin, &p.transform, f))).collect();
+            let tier = match (poi.kind, poi.radius) {
+                (PoiKind::Mill, _) => "mill",
+                (PoiKind::Farm, _) => "farm",
+                (_, r) if r >= 150.0 => "town",
+                (_, r) if r >= 90.0 => "large village",
+                (_, r) if r >= 45.0 => "village",
+                _ => "hamlet",
+            };
+            let tally = tiers.entry(tier).or_default();
+            tally.settlements += 1;
+            let points = |shape: &Shape| -> Vec<Vec2> {
+                match *shape {
+                    Shape::Box { centre, half, yaw } => {
+                        let corner = |x: f32, z: f32| {
+                            let v = Quat::from_rotation_y(yaw) * Vec3::new(x * half.x, 0.0, z * half.y);
+                            centre + Vec2::new(v.x, v.z)
+                        };
+                        vec![corner(-1.0, -1.0), corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0), corner(0.0, -1.0), corner(0.0, 1.0), corner(-1.0, 0.0), corner(1.0, 0.0), centre]
+                    }
+                    Shape::Circle { centre, radius } => vec![centre, centre + Vec2::X * radius, centre - Vec2::X * radius, centre + Vec2::Y * radius, centre - Vec2::Y * radius],
+                    Shape::Wall { a, b, .. } => vec![a, b],
+                }
+            };
+            for (i, solid) in solids.iter().enumerate() {
+                tally.buildings += 1;
+                let pts = points(&solid.shape);
+                let worst = pts.iter().map(|&p| clearance.clearance(p)).fold(f32::MAX, f32::min);
+                if worst < 0.0 {
+                    tally.on_road += 1;
+                } else if worst < 3.0 {
+                    tally.by_road += 1;
+                }
+                if pts.last().is_some_and(|&c| clearance.clearance(c) < 0.0) {
+                    tally.with_road_through_the_middle += 1;
+                }
+                if solids.iter().enumerate().any(|(j, other)| j != i && pts.iter().any(|&p| other.shape.separation(p).0 < -0.01)) {
+                    tally.overlapping += 1;
+                }
+                if pts.iter().any(|&p| map.water_distance(p) < 3.0 || map.water_surface_at(p).is_some()) {
+                    tally.on_water += 1;
+                }
+                let heights: Vec<f32> = pts.iter().map(|&p| map.height_at(p)).collect();
+                let range = heights.iter().cloned().fold(f32::MIN, f32::max) - heights.iter().cloned().fold(f32::MAX, f32::min);
+                if range > 1.5 {
+                    tally.on_slope += 1;
+                }
+            }
+        }
+        println!("{:14} {:>5} {:>9} {:>8} {:>9} {:>11} {:>8} {:>8}", "tier", "count", "buildings", "on road", "by road", "overlapping", "in water", ">1.5m slope");
+        for (name, t) in &tiers {
+            let pct = |n: usize| if t.buildings == 0 { 0.0 } else { 100.0 * n as f32 / t.buildings as f32 };
+            println!("{name:14} {:>5} {:>9} {:>7.0}% {:>8.0}% {:>10.0}% {:>7.0}% {:>10.0}%", t.settlements, t.buildings, pct(t.on_road), pct(t.by_road), pct(t.overlapping), pct(t.on_water), pct(t.on_slope));
+        }
+    }
 }
