@@ -1,7 +1,9 @@
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
+use crate::gun_model::{self, BORE_Y, MUZZLE_Z, SIGHT_TOP};
 use crate::player::{spawn_player, toggle_cursor_grab, AimBlend, FpsCamera};
+pub use crate::gun_model::{front_sight, rear_sights};
 use crate::map::TerrainMap;
 use crate::target::{dummy_aabb, TargetDummy};
 
@@ -13,14 +15,27 @@ const BULLET_DAMAGE: f32 = 25.0;
 /// Where the gun sits in camera space when carried at the hip, and when aimed down its sights.
 const HIP_POSITION: Vec3 = Vec3::new(0.2, -0.2, -0.5);
 /// Centred, and low enough that the tops of the two sights land on the camera's axis.
-const SIGHT_TOP: f32 = 0.08;
 const ADS_POSITION: Vec3 = Vec3::new(0.0, -SIGHT_TOP, -0.5);
 /// The barrel's tip, in the gun's own space: the bullets start here.
-pub const MUZZLE_LOCAL: Vec3 = Vec3::new(0.0, 0.02, -0.5);
+pub const MUZZLE_LOCAL: Vec3 = Vec3::new(0.0, BORE_Y, MUZZLE_Z);
 /// How fast the gun moves between hip and sights (per second, exponential).
 const AIM_RATE: f32 = 14.0;
 /// When aimed the view zooms to this fraction of the field of view, and look speed drops.
 pub const ADS_FOV_SCALE: f32 = 0.72;
+/// Recoil. Each shot kicks the view up (and a little sideways, at random), by this much in
+/// radians, less when braced on the sights...
+const KICK_PITCH: f32 = 0.0085;
+const KICK_YAW: f32 = 0.0028;
+const ADS_KICK_SCALE: f32 = 0.6;
+/// ...and once the gun has been quiet this long, a good part of the climb comes back down:
+/// this fraction of it, at this rate (per second). The rest is yours to pull down.
+const KICK_RECOVERY_DELAY: f32 = 0.14;
+const KICK_RECOVERY_FRACTION: f32 = 0.65;
+const KICK_RECOVERY_RATE: f32 = 6.0;
+/// The gun model itself jolts back and tips up with each shot, then settles quickly.
+const GUN_KICK_DECAY: f32 = 16.0;
+const GUN_KICK_BACK: f32 = 0.032;
+const GUN_KICK_TIP: f32 = 0.045;
 /// A shot is aimed at whatever is under the crosshair, or this far off if nothing is.
 const FAR_AIM: f32 = 300.0;
 /// ...but never closer than this, so a muzzle just past a wall can't flip the aim around.
@@ -33,7 +48,7 @@ impl Plugin for WeaponPlugin {
         app.add_systems(Startup, spawn_gun.after(spawn_player))
             .add_systems(
                 Update,
-                (aim.before(fire), fire.before(toggle_cursor_grab), move_bullets),
+                (aim.before(fire), fire.before(toggle_cursor_grab), recover_view, move_bullets),
             );
     }
 }
@@ -49,6 +64,12 @@ pub struct Gun {
     pub last_shot_origin: Option<Vec3>,
     /// 0 at the hip, 1 fully on the sights, easing between.
     pub aim_blend: f32,
+    /// How far the view has been kicked up and across by recoil and not yet recovered (radians).
+    pub view_kick: Vec2,
+    /// Seconds since the last shot.
+    pub since_shot: f32,
+    /// The gun model's jolt, 1 right after a shot, decaying to 0.
+    pub gun_kick: f32,
 }
 
 /// The gun's transform in camera space, `blend` of the way from the hip to the sights.
@@ -56,18 +77,38 @@ pub fn gun_transform(blend: f32) -> Transform {
     Transform::from_translation(HIP_POSITION.lerp(ADS_POSITION, blend.clamp(0.0, 1.0)))
 }
 
-const SIGHT_SIZE: Vec3 = Vec3::new(0.012, 0.035, 0.012);
-
-/// The two sights, in the gun's space. Each is placed so its top is at height `SIGHT_TOP`,
-/// which is exactly how far the gun drops when aimed, so both tops end up on the camera axis.
-pub fn front_sight() -> Transform {
-    let scale = Vec3::new(0.7, 1.0, 0.7);
-    Transform::from_xyz(0.0, SIGHT_TOP - SIGHT_SIZE.y * scale.y * 0.5, MUZZLE_LOCAL.z + 0.01).with_scale(scale)
+/// The gun with its recoil jolt applied: shoved back toward the shoulder and tipped muzzle-up,
+/// about half as much when braced on the sights.
+pub fn gun_pose(blend: f32, kick: f32) -> Transform {
+    let k = kick * (1.0 - 0.5 * blend.clamp(0.0, 1.0));
+    let mut t = gun_transform(blend);
+    t.translation.z += GUN_KICK_BACK * k;
+    t.rotation = Quat::from_rotation_x(GUN_KICK_TIP * k);
+    t
 }
 
-pub fn rear_sight() -> Transform {
-    let scale = Vec3::new(1.4, 0.85, 1.4);
-    Transform::from_xyz(0.0, SIGHT_TOP - SIGHT_SIZE.y * scale.y * 0.5, -0.12).with_scale(scale)
+/// How much one shot kicks the view: (pitch up, yaw), in radians. The sideways part is a fixed
+/// pseudo-random wander per shot number, so it is repeatable.
+pub fn recoil_kick(shot: u32, aiming: bool) -> Vec2 {
+    let scale = if aiming { ADS_KICK_SCALE } else { 1.0 };
+    let mut h = shot.wrapping_mul(0x9E37_79B1) ^ 0x85EB_CA6B;
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2C1B_3C6D);
+    h ^= h >> 12;
+    let wander = ((h >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0;
+    // A little variation in the climb too.
+    let climb = 0.85 + 0.3 * (((h >> 3) & 0xFF) as f32 / 255.0);
+    Vec2::new(KICK_PITCH * climb, KICK_YAW * wander) * scale
+}
+
+/// How much of the unrecovered kick comes back in `dt` seconds, once the gun has been quiet.
+/// Returns (the part of the kick to remove from the bookkeeping, the part to bring the view back by).
+pub fn recover_kick(kick: Vec2, since_shot: f32, dt: f32) -> (Vec2, Vec2) {
+    if since_shot < KICK_RECOVERY_DELAY {
+        return (Vec2::ZERO, Vec2::ZERO);
+    }
+    let settled = kick * (1.0 - (-KICK_RECOVERY_RATE * dt).exp());
+    (settled, settled * KICK_RECOVERY_FRACTION)
 }
 
 /// Which way a bullet leaves the muzzle: straight at the point the crosshair is on, `distance`
@@ -122,13 +163,19 @@ pub fn spawn_gun(
         return;
     };
 
-    let body_mesh = meshes.add(Cuboid::new(0.1, 0.12, 0.4));
-    let barrel_mesh = meshes.add(Cuboid::new(0.05, 0.05, 0.3));
-    let sight_mesh = meshes.add(Cuboid::new(SIGHT_SIZE.x, SIGHT_SIZE.y, SIGHT_SIZE.z));
-    let gun_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.12, 0.12, 0.14),
+    // The Sterling, merged into three meshes by material (see gun_model.rs).
+    let (metal, plastic, dark) = gun_model::build();
+    let finish = |color: Color, roughness: f32, metallic: f32| StandardMaterial {
+        base_color: color,
+        perceptual_roughness: roughness,
+        metallic,
         ..default()
-    });
+    };
+    let parts = [
+        (meshes.add(metal.into_mesh()), materials.add(finish(Color::srgb(0.13, 0.135, 0.145), 0.45, 0.75))),
+        (meshes.add(plastic.into_mesh()), materials.add(finish(Color::srgb(0.035, 0.035, 0.04), 0.35, 0.0))),
+        (meshes.add(dark.into_mesh()), materials.add(finish(Color::srgb(0.008, 0.008, 0.01), 0.9, 0.0))),
+    ];
 
     commands.insert_resource(BulletAssets {
         mesh: meshes.add(Sphere::new(0.03)),
@@ -150,26 +197,17 @@ pub fn spawn_gun(
                     aiming: false,
                     last_shot_origin: None,
                     aim_blend: 0.0,
+                    view_kick: Vec2::ZERO,
+                    since_shot: 10.0,
+                    gun_kick: 0.0,
                 },
                 gun_transform(0.0),
                 Visibility::default(),
             ))
             .with_children(|gun| {
-                gun.spawn((
-                    Mesh3d(body_mesh),
-                    MeshMaterial3d(gun_material.clone()),
-                    Transform::default(),
-                ));
-                gun.spawn((
-                    Mesh3d(barrel_mesh),
-                    MeshMaterial3d(gun_material.clone()),
-                    Transform::from_xyz(0.0, 0.02, -0.35),
-                ));
-                // Iron sights: a post at the muzzle and a block over the breech, whose tops
-                // line up with the camera's axis when the gun is on its sights.
-                let (front, rear) = (front_sight(), rear_sight());
-                gun.spawn((Mesh3d(sight_mesh.clone()), MeshMaterial3d(gun_material.clone()), front));
-                gun.spawn((Mesh3d(sight_mesh), MeshMaterial3d(gun_material), rear));
+                for (mesh, material) in parts {
+                    gun.spawn((Mesh3d(mesh), MeshMaterial3d(material), Transform::default()));
+                }
             });
     });
 }
@@ -204,7 +242,11 @@ fn aim(
     if (gun.aim_blend - target).abs() < 0.002 {
         gun.aim_blend = target;
     }
-    *transform = gun_transform(gun.aim_blend);
+    gun.gun_kick *= (-GUN_KICK_DECAY * time.delta_secs()).exp();
+    if gun.gun_kick < 0.002 {
+        gun.gun_kick = 0.0;
+    }
+    *transform = gun_pose(gun.aim_blend, gun.gun_kick);
     blend.0 = gun.aim_blend;
 }
 
@@ -213,7 +255,7 @@ fn fire(
     time: Res<Time>,
     mouse: Res<ButtonInput<MouseButton>>,
     cursors: Query<&CursorOptions, With<PrimaryWindow>>,
-    camera: Query<&Transform, With<FpsCamera>>,
+    mut camera: Query<(&mut Transform, &mut FpsCamera)>,
     mut guns: Query<&mut Gun>,
     dummies: Query<&Transform, (With<TargetDummy>, Without<FpsCamera>)>,
     map: Res<TerrainMap>,
@@ -223,6 +265,7 @@ fn fire(
         return;
     };
     gun.cooldown = (gun.cooldown - time.delta_secs()).max(0.0);
+    gun.since_shot += time.delta_secs();
 
     if !mouse.pressed(MouseButton::Left) {
         gun.trigger_blocked = false;
@@ -239,12 +282,12 @@ fn fire(
     if gun.trigger_blocked || gun.cooldown > 0.0 {
         return;
     }
-    let Ok(cam) = camera.single() else {
+    let Ok((mut cam, mut view)) = camera.single_mut() else {
         return;
     };
 
     // The bullet leaves the end of the barrel, wherever the gun is right now (hip or sights).
-    let gun_in_world = cam.mul_transform(gun_transform(gun.aim_blend));
+    let gun_in_world = cam.mul_transform(gun_pose(gun.aim_blend, gun.gun_kick));
     let muzzle = gun_in_world.transform_point(MUZZLE_LOCAL);
     let (eye, forward) = (cam.translation, *cam.forward());
     let distance = what_is_under_crosshair(eye, forward, &dummies, &map);
@@ -253,6 +296,7 @@ fn fire(
     gun.cooldown = FIRE_INTERVAL;
     gun.shots_fired += 1;
     gun.last_shot_origin = Some(muzzle);
+    gun.since_shot = 0.0;
     commands.spawn((AudioPlayer(assets.shot_sound.clone()), PlaybackSettings::DESPAWN));
     commands.spawn((
         Bullet {
@@ -263,6 +307,25 @@ fn fire(
         MeshMaterial3d(assets.material.clone()),
         Transform::from_translation(muzzle),
     ));
+
+    // Recoil: the shot has left; now the gun jolts and the view climbs.
+    let kick = recoil_kick(gun.shots_fired, gun.aiming);
+    gun.gun_kick = (gun.gun_kick + 1.0).min(1.6);
+    gun.view_kick += kick;
+    view.nudge(&mut cam, kick.x, kick.y);
+}
+
+// Once the gun has been quiet a moment, most of the climb settles back by itself, like the
+// muzzle coming back down as the shooter recovers; what's left is for the player to pull down.
+fn recover_view(time: Res<Time>, mut guns: Query<&mut Gun>, mut camera: Query<(&mut Transform, &mut FpsCamera)>) {
+    let (Ok(mut gun), Ok((mut cam, mut view))) = (guns.single_mut(), camera.single_mut()) else {
+        return;
+    };
+    let (settled, bring_back) = recover_kick(gun.view_kick, gun.since_shot, time.delta_secs());
+    gun.view_kick -= settled;
+    if bring_back != Vec2::ZERO {
+        view.nudge(&mut cam, -bring_back.x, -bring_back.y);
+    }
 }
 
 // How far along the view the first thing is: a target dummy or the ground, else FAR_AIM.
@@ -357,17 +420,20 @@ mod tests {
     }
 
     fn top_of(sight: Transform) -> Vec3 {
-        sight.transform_point(Vec3::new(0.0, SIGHT_SIZE.y * 0.5, 0.0))
+        sight.transform_point(Vec3::new(0.0, 0.5, 0.0))
     }
 
     #[test]
     fn on_the_sights_both_sight_tops_sit_on_the_cameras_axis() {
-        for sight in [front_sight(), rear_sight()] {
-            let p = in_camera(1.0, top_of(sight));
-            assert!(p.x.abs() < 1e-4 && p.y.abs() < 1e-4, "sight top at ({}, {}) in camera space", p.x, p.y);
+        let front = in_camera(1.0, top_of(front_sight()));
+        assert!(front.x.abs() < 1e-4 && front.y.abs() < 1e-4, "front post top at ({}, {}) in camera space", front.x, front.y);
+        for upright in rear_sights() {
+            let p = in_camera(1.0, top_of(upright));
+            assert!(p.y.abs() < 1e-4, "rear upright top is {} off the line of sight", p.y);
+            assert!(p.x.abs() < 0.02, "rear upright is {} to the side", p.x);
+            // The rear sight is nearer the eye than the front, as it must be to line up.
+            assert!(p.z > front.z);
         }
-        // The rear sight is nearer the eye than the front, as it must be to line up.
-        assert!(in_camera(1.0, top_of(rear_sight())).z > in_camera(1.0, top_of(front_sight())).z);
     }
 
     #[test]
@@ -381,9 +447,9 @@ mod tests {
     #[test]
     fn the_front_sight_sits_on_the_barrel_at_the_muzzle() {
         let front = front_sight();
-        assert!((front.translation.z - MUZZLE_LOCAL.z).abs() < 0.02);
-        // Its foot is at (or just inside) the top of the barrel, which is 0.02 + 0.025 high.
-        let foot = front.transform_point(Vec3::new(0.0, -SIGHT_SIZE.y * 0.5, 0.0)).y;
+        assert!((front.translation.z - MUZZLE_LOCAL.z).abs() < 0.03, "the post stands just behind the muzzle");
+        // Its foot is on the top of the barrel jacket, which is 0.02 + 0.026 high.
+        let foot = front.transform_point(Vec3::new(0.0, -0.5, 0.0)).y;
         assert!((0.04..0.05).contains(&foot), "foot at {foot}");
     }
 
@@ -415,5 +481,53 @@ mod tests {
         assert_eq!(ray_hits_aabb(Vec3::new(0.0, 1.0, 0.0), Vec3::NEG_Z, min, max).map(|t| t.round()), Some(9.0));
         assert!(ray_hits_aabb(Vec3::new(5.0, 1.0, 0.0), Vec3::NEG_Z, min, max).is_none());
         assert!(ray_hits_aabb(Vec3::new(0.0, 1.0, 0.0), Vec3::Z, min, max).is_none(), "behind the ray");
+    }
+
+    #[test]
+    fn every_shot_kicks_the_view_up_and_less_on_the_sights() {
+        for shot in 1..200 {
+            let hip = recoil_kick(shot, false);
+            let ads = recoil_kick(shot, true);
+            assert!(hip.x > 0.006 && hip.x < 0.012, "pitch kick {}", hip.x);
+            assert!(hip.y.abs() <= KICK_YAW + 1e-6);
+            assert!((ads.x - hip.x * ADS_KICK_SCALE).abs() < 1e-6 && ads.x < hip.x);
+            assert_eq!(recoil_kick(shot, false), hip, "repeatable");
+        }
+        // Sideways wander goes both ways and averages out near nothing.
+        let sum: f32 = (1..400).map(|s| recoil_kick(s, false).y).sum();
+        assert!(sum.abs() < 0.2, "yaw drifts one way: {sum}");
+        assert!((1..50).any(|s| recoil_kick(s, false).y > 0.0) && (1..50).any(|s| recoil_kick(s, false).y < 0.0));
+    }
+
+    #[test]
+    fn the_climb_only_recovers_once_the_gun_has_gone_quiet_and_never_completely() {
+        let kick = Vec2::new(0.05, 0.01);
+        assert_eq!(recover_kick(kick, 0.05, 0.016), (Vec2::ZERO, Vec2::ZERO), "no recovery mid-burst");
+        // Run recovery for a few seconds, as the weapon does.
+        let (mut left, mut returned) = (kick, Vec2::ZERO);
+        for _ in 0..600 {
+            let (settled, back) = recover_kick(left, 1.0, 1.0 / 120.0);
+            left -= settled;
+            returned += back;
+        }
+        assert!(left.length() < 1e-3, "the bookkeeping settles to zero");
+        let fraction = returned.x / kick.x;
+        assert!((fraction - KICK_RECOVERY_FRACTION).abs() < 0.01, "{fraction} of the climb came back");
+        assert!(kick.x - returned.x > 0.01, "some climb is left for the player to pull down");
+    }
+
+    #[test]
+    fn the_gun_jolts_back_and_up_on_a_shot_and_less_on_the_sights() {
+        let (rest, hip, ads) = (gun_pose(0.0, 0.0), gun_pose(0.0, 1.0), gun_pose(1.0, 1.0));
+        assert_eq!(rest.translation, gun_transform(0.0).translation);
+        assert!(hip.translation.z > rest.translation.z, "shoved back toward the shoulder");
+        // Tipped muzzle-up: the muzzle (at -Z) rises.
+        assert!(hip.transform_point(MUZZLE_LOCAL).y > rest.transform_point(MUZZLE_LOCAL).y);
+        let hip_shove = hip.translation.z - rest.translation.z;
+        let ads_shove = ads.translation.z - gun_transform(1.0).translation.z;
+        assert!(ads_shove < hip_shove);
+        // Sight tops stay close to the line of sight even in the jolt.
+        let top = ads.transform_point(Vec3::new(0.0, SIGHT_TOP, MUZZLE_Z));
+        assert!(top.y.abs() < 0.03, "sight top {} off the line of sight under recoil", top.y);
     }
 }

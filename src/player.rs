@@ -60,6 +60,21 @@ pub struct FpsCamera {
     pub(crate) vertical_speed: f32,
 }
 
+impl FpsCamera {
+    /// Turns the view up by `pitch` and left by `yaw` radians, as recoil does, keeping the
+    /// camera's rotation in step.
+    pub fn nudge(&mut self, transform: &mut Transform, pitch: f32, yaw: f32) {
+        self.pitch = (self.pitch + pitch).clamp(-1.54, 1.54);
+        self.yaw -= yaw;
+        transform.rotation = Quat::from_euler(EulerRot::YXZ, self.yaw, self.pitch, 0.0);
+    }
+
+    /// Where the view is pointing: up from level in radians.
+    pub fn pitch(&self) -> f32 {
+        self.pitch
+    }
+}
+
 pub fn spawn_player(mut commands: Commands, map: Res<TerrainMap>) {
     let start = map.spawn_point();
     let eye = Vec3::new(start.x, map.height_at(start) + EYE_HEIGHT, start.y);

@@ -96,6 +96,29 @@ fn shot_from_hip(_world: &mut GameWorld) {
     assert!(right > 0.15 && up < -0.1 && ahead > 0.4, "muzzle at right {right}, up {up}, ahead {ahead}");
 }
 
+#[then("the view has kicked upward")]
+fn view_kicked(_world: &mut GameWorld) {
+    let kicked = wait_for(Duration::from_secs(2), || snapshot().camera_pitch > 0.003);
+    assert!(kicked, "view pitch is {}, expected recoil to lift it", snapshot().camera_pitch);
+}
+
+#[then("the view has climbed noticeably")]
+fn view_climbed(_world: &mut GameWorld) {
+    step_pause();
+    let pitch = snapshot().camera_pitch;
+    assert!(pitch > 0.02, "after a burst the view should be well up, but pitch is {pitch}");
+}
+
+#[then("the view has come most of the way back down")]
+fn view_settled(_world: &mut GameWorld) {
+    // After firing stops, about two thirds of the climb returns by itself.
+    let peak = snapshot().camera_pitch;
+    std::thread::sleep(Duration::from_secs(2));
+    let settled = snapshot().camera_pitch;
+    assert!(settled < peak * 0.6, "view went from {peak} to {settled}, expected it to settle");
+    assert!(settled > 0.0, "but not all the way back");
+}
+
 #[then("the shot started in line with the view")]
 fn shot_from_sights(_world: &mut GameWorld) {
     wait_for(Duration::from_secs(2), || snapshot().last_shot_origin.is_some());
@@ -115,13 +138,19 @@ fn hold_fire_for(_world: &mut GameWorld, seconds: f32) {
     hold_fire(Duration::from_secs_f32(seconds));
 }
 
-#[when("I hold fire until the target dummy is down")]
-fn hold_fire_until_down(_world: &mut GameWorld) {
+// With recoil a held burst climbs off the target (as it should), and a test can't pull the
+// view back down, so the dummy is taken down the way a careful shooter would: one shot at a
+// time, giving the view a moment to settle between them.
+#[when("I fire single shots until the target dummy is down")]
+fn fire_single_shots_until_down(_world: &mut GameWorld) {
     step_pause();
-    send(Command::Press(MouseButton::Left));
-    let down = wait_for(Duration::from_secs(10), || snapshot().dummy_health <= 0.0);
-    send(Command::Release(MouseButton::Left));
-    assert!(down, "target dummy was not destroyed within 10 seconds");
+    let mut shots = 0;
+    while snapshot().dummy_health > 0.0 && shots < 30 {
+        tap_fire();
+        shots += 1;
+        std::thread::sleep(Duration::from_millis(450));
+    }
+    assert!(snapshot().dummy_health <= 0.0, "target dummy was not destroyed with {shots} single shots");
 }
 
 #[then("the shot sound plays on the audio device")]

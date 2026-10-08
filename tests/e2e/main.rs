@@ -43,6 +43,8 @@ pub struct Snapshot {
     /// Whether the player has the gun raised to its sights, and how far it has got (0 to 1).
     pub aiming: bool,
     pub aim_blend: f32,
+    /// How far up the view is pointing, radians.
+    pub camera_pitch: f32,
     /// Where the last bullet started, relative to the camera (right, up, forward).
     pub last_shot_origin: Option<(f32, f32, f32)>,
 }
@@ -263,7 +265,9 @@ fn take_snapshot(world: &mut World) -> Snapshot {
         }
         _ => None,
     };
+    let camera_pitch = world.query::<&FpsCamera>().iter(world).next().map_or(0.0, |c| c.pitch());
     Snapshot {
+        camera_pitch,
         aiming,
         aim_blend,
         last_shot_origin,

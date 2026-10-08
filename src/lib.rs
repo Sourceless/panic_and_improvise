@@ -5,6 +5,7 @@ pub mod field_material;
 pub mod fill;
 pub mod grass;
 pub mod ground_textures;
+pub mod gun_model;
 pub mod look;
 pub mod map;
 pub mod mipmaps;

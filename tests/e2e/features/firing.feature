@@ -23,5 +23,14 @@ Feature: Firing the gun
     Then the target dummy has taken 25 damage
 
   Scenario: The target dummy respawns after being destroyed
-    When I hold fire until the target dummy is down
+    When I fire single shots until the target dummy is down
     Then the target dummy respawns within 3 seconds
+
+  Scenario: Firing kicks the view upward
+    When I fire once
+    Then the view has kicked upward
+
+  Scenario: A burst climbs, and then settles most of the way back
+    When I hold fire for 1 second
+    Then the view has climbed noticeably
+    And the view has come most of the way back down
