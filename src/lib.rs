@@ -1,4 +1,5 @@
 pub mod ballistics;
+pub mod building;
 pub mod cloud_material;
 pub mod collision;
 pub mod controls;
@@ -14,6 +15,7 @@ pub mod ground_textures;
 pub mod gun_model;
 pub mod look;
 pub mod map;
+pub mod meshbake;
 pub mod menu;
 pub mod mipmaps;
 pub mod muzzle_flash;

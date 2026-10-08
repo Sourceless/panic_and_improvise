@@ -29,6 +29,7 @@ impl Plugin for TerrainPlugin {
             crate::wind::WindPlugin,
             crate::cloud_shadows::CloudShadowPlugin,
             crate::grass::GrassPlugin,
+            crate::settlement::SettlementPlugin,
             MaterialPlugin::<TerrainMaterial>::default(),
             MaterialPlugin::<crate::field_material::FieldMaterial>::default(),
             MaterialPlugin::<crate::road_material::RoadMaterial>::default(),

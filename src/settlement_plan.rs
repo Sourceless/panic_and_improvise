@@ -1311,3 +1311,27 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod size_survey {
+    use super::*;
+    use crate::map::TerrainMap;
+    use crate::params::GenParams;
+
+    #[test]
+    #[ignore = "prints the sizes of every kind of building"]
+    fn what_sizes_are_the_buildings() {
+        let params = GenParams::default();
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
+        let roads = crate::roads::RoadNetwork::generate(&map, &params);
+        let plan = SettlementPlan::generate(&map, &roads);
+        let mut by_kind: std::collections::BTreeMap<String, Vec<(f32, f32, f32)>> = Default::default();
+        for b in plan.layouts.iter().flat_map(|l| &l.buildings) {
+            by_kind.entry(format!("{:?}", b.kind)).or_default().push((b.width, b.depth, b.wall_height));
+        }
+        for (kind, sizes) in by_kind {
+            let range = |f: fn(&(f32, f32, f32)) -> f32| (sizes.iter().map(f).fold(f32::MAX, f32::min), sizes.iter().map(f).fold(f32::MIN, f32::max));
+            eprintln!("{kind:14} n={:4} width {:?} depth {:?} wall {:?}", sizes.len(), range(|s| s.0), range(|s| s.1), range(|s| s.2));
+        }
+    }
+}

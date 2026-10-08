@@ -21,6 +21,9 @@ pub const STEP_UP: f32 = 0.5;
 pub const STEP_DOWN: f32 = 0.6;
 /// The most the top of something can be above the player's feet for them to climb it.
 pub const MANTLE_REACH: f32 = 1.8;
+/// How tall the body is, for passing under things: a solid whose underside is higher than this above
+/// the feet (a ceiling, a lintel) is walked beneath.
+pub const BODY_HEIGHT: f32 = 1.75;
 /// How far beyond the body a hand can reach out to grab an edge.
 const ARM: f32 = 0.35;
 /// How far past the edge of something a person standing on it can have their middle before they
@@ -204,20 +207,28 @@ fn closest_on_segment(a: Vec2, b: Vec2, p: Vec2) -> Vec2 {
 pub struct Solid {
     pub shape: Shape,
     pub top: [f32; 2],
+    /// How low it reaches. Most solids stand on the ground, so this is minus infinity; a floor, a
+    /// ceiling or a lintel hangs above it, and can be walked under.
+    pub bottom: f32,
     pub material: Material,
 }
 
 impl Solid {
     pub fn circle(centre: Vec2, radius: f32, top: f32) -> Self {
-        Solid { shape: Shape::Circle { centre, radius }, top: [top, top], material: Material::Stone }
+        Solid { shape: Shape::Circle { centre, radius }, top: [top, top], bottom: f32::NEG_INFINITY, material: Material::Stone }
     }
 
     pub fn wall(a: Vec2, b: Vec2, half_thickness: f32, top_a: f32, top_b: f32) -> Self {
-        Solid { shape: Shape::Wall { a, b, half_thickness }, top: [top_a, top_b], material: Material::Stone }
+        Solid { shape: Shape::Wall { a, b, half_thickness }, top: [top_a, top_b], bottom: f32::NEG_INFINITY, material: Material::Stone }
     }
 
     pub fn rect(centre: Vec2, half: Vec2, yaw: f32, top: f32) -> Self {
-        Solid { shape: Shape::Box { centre, half, yaw }, top: [top, top], material: Material::Stone }
+        Solid { shape: Shape::Box { centre, half, yaw }, top: [top, top], bottom: f32::NEG_INFINITY, material: Material::Stone }
+    }
+
+    /// The same solid, hanging `bottom` above the ground rather than standing on it.
+    pub fn from(self, bottom: f32) -> Self {
+        Solid { bottom, ..self }
     }
 
     /// The same solid, made of something else.
@@ -455,11 +466,16 @@ impl Colliders {
             let height_at = |t: f32| from.y + (to.y - from.y) * t;
             let entry = a.lerp(b, t_in);
             let top = solid.top_at(entry);
-            let hit = if height_at(t_in) <= top {
+            let hit = if height_at(t_in) <= top && height_at(t_in) >= solid.bottom {
                 // Goes in through the side.
                 let (_, n) = solid.shape.separation(entry);
                 Some((t_in, Vec3::new(n.x, 0.0, n.y)))
-            } else if height_at(t_out) < solid.top_at(a.lerp(b, t_out)) {
+            } else if height_at(t_in) < solid.bottom && height_at(t_out) > solid.bottom {
+                // Comes up under it, into its underside, before it is out the other side.
+                let rise = solid.bottom - height_at(t_in);
+                let climb = height_at(t_out) - height_at(t_in);
+                Some((t_in + (t_out - t_in) * (rise / climb.max(1e-6)).clamp(0.0, 1.0), -Vec3::Y))
+            } else if height_at(t_in) > top && height_at(t_out) < solid.top_at(a.lerp(b, t_out)) {
                 // Over the edge, but coming down onto the top before it is out the other side.
                 let drop = height_at(t_in) - top;
                 let fall = height_at(t_in) - height_at(t_out);
@@ -470,7 +486,13 @@ impl Colliders {
             if let Some((t, normal)) = hit {
                 if best.is_none_or(|b| t < b.t) {
                     let at = a.lerp(b, t);
-                    let y = if normal == Vec3::Y { solid.top_at(at) } else { height_at(t) };
+                    let y = if normal == Vec3::Y {
+                        solid.top_at(at)
+                    } else if normal == -Vec3::Y {
+                        solid.bottom
+                    } else {
+                        height_at(t)
+                    };
                     best = Some(SolidHit { t, point: Vec3::new(at.x, y, at.y), normal, material: solid.material });
                 }
             }
@@ -497,7 +519,8 @@ impl Colliders {
         for _ in 0..4 {
             let mut pushed = false;
             for solid in self.near(pos, radius) {
-                if solid.top_at(pos) <= feet + step {
+                // Low enough to step onto, or hung too high to touch.
+                if solid.top_at(pos) <= feet + step || solid.bottom >= feet + BODY_HEIGHT {
                     continue;
                 }
                 let (distance, normal) = solid.shape.separation(pos);
@@ -535,7 +558,7 @@ impl Colliders {
             let (distance, normal) = solid.shape.separation(p);
             let top = solid.top_at(p);
             // Within arm's reach, in front of them, and a height that can be got up to.
-            if distance > radius + ARM || normal.dot(facing) > -0.35 || top <= feet + step || top > floor + reach {
+            if distance > radius + ARM || normal.dot(facing) > -0.35 || top <= feet + step || top > floor + reach || solid.bottom > feet + step {
                 continue;
             }
             let land = solid.shape.standing_point(p);
@@ -956,5 +979,44 @@ mod tests {
         let whole = c.foliage_depth(Vec3::new(0.0, 5.0, 0.0), Vec3::new(0.0, 5.0, -40.0));
         let halves = c.foliage_depth(Vec3::new(0.0, 5.0, 0.0), Vec3::new(0.0, 5.0, -20.0)) + c.foliage_depth(Vec3::new(0.0, 5.0, -20.0), Vec3::new(0.0, 5.0, -40.0));
         assert!((whole - halves).abs() < 1e-3 && (whole - 8.0 * CANOPY_DENSITY).abs() < 1e-3, "{whole} {halves}");
+    }
+
+    // A ceiling: a slab hung above head height.
+    fn with_ceiling() -> Colliders {
+        let mut c = Colliders::default();
+        c.add(Solid::rect(Vec2::ZERO, Vec2::splat(5.0), 0.0, 3.2).from(3.0));
+        c
+    }
+
+    #[test]
+    fn a_ceiling_is_walked_under_and_a_lintel_too_low_is_not() {
+        let c = with_ceiling();
+        let p = Vec2::new(1.0, 1.0);
+        assert_eq!(c.resolve(p, PLAYER_RADIUS, 0.0, STEP_UP), p, "headroom to spare");
+        let mut low = Colliders::default();
+        low.add(Solid::rect(Vec2::ZERO, Vec2::splat(5.0), 0.0, 2.0).from(1.2));
+        assert_ne!(low.resolve(p, PLAYER_RADIUS, 0.0, STEP_UP), p, "a beam at 1.2 m is walked into");
+    }
+
+    #[test]
+    fn a_floor_above_is_stood_on_from_up_there_and_ignored_from_below() {
+        let c = with_ceiling();
+        let p = Vec2::new(1.0, 1.0);
+        assert_eq!(c.support(p, 0.0, STEP_UP), None);
+        assert_eq!(c.support(p, 3.2, STEP_UP), Some(3.2));
+        assert_eq!(c.mantle_target(p, Vec2::X, PLAYER_RADIUS, 0.0, 0.0, STEP_UP, MANTLE_REACH), None);
+    }
+
+    #[test]
+    fn a_bullet_passes_under_a_ceiling_but_is_stopped_by_its_underside_and_its_top() {
+        let c = with_ceiling();
+        assert!(c.segment_hit(Vec3::new(-8.0, 1.5, 0.0), Vec3::new(8.0, 1.5, 0.0)).is_none(), "under it");
+        let up = c.segment_hit(Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.5, 5.0, 0.0)).expect("hits the underside");
+        assert_eq!(up.normal, -Vec3::Y);
+        assert!((up.point.y - 3.0).abs() < 1e-3);
+        let down = c.segment_hit(Vec3::new(-0.5, 5.0, 0.0), Vec3::new(0.5, 1.0, 0.0)).expect("hits the top");
+        assert_eq!(down.normal, Vec3::Y);
+        let through_the_side = c.segment_hit(Vec3::new(-8.0, 3.1, 0.0), Vec3::new(8.0, 3.1, 0.0));
+        assert!(through_the_side.is_some(), "into the edge of the slab");
     }
 }

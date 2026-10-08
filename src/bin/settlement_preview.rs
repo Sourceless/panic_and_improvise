@@ -17,7 +17,7 @@ use fps_prototype::map::{Poi, PoiKind, TerrainMap};
 use fps_prototype::mipmaps::{MipQueue, MipmapPlugin};
 use fps_prototype::road_material::{RoadExtension, RoadMaterial};
 use fps_prototype::roads::{half_width, road_mesh, RoadKind, RoadRibbon};
-use fps_prototype::settlement::spawn_settlements;
+use fps_prototype::settlement::{spawn_settlements, SettlementPlugin};
 use fps_prototype::settlement_plan::{BuildingKind, Layout, SettlementPlan};
 
 #[derive(Resource)]
@@ -49,7 +49,7 @@ fn main() {
             }),
             ..default()
         }))
-        .add_plugins((MipmapPlugin, MaterialPlugin::<RoadMaterial>::default()))
+        .add_plugins((MipmapPlugin, SettlementPlugin, MaterialPlugin::<RoadMaterial>::default()))
         .insert_resource(Output(out, only))
         .insert_resource(ClearColor(Color::srgb(0.55, 0.68, 0.82)))
         .add_systems(Startup, setup)
@@ -155,6 +155,23 @@ fn setup(
         });
         if let Some(p) = candidate {
             views.push(at(name, Vec3::new(p.x, 27.0, p.y), c + Vec3::Y * 2.5, 0.85));
+        }
+    }
+    // Inside a few houses: standing at the back of the ground floor looking at the front door, then
+    // upstairs, then from a high corner looking down at the whole room.
+    let inside = |name, b: &fps_prototype::settlement_plan::Building, local: Vec3, look: Vec3| {
+        let turn = Quat::from_rotation_y(b.yaw);
+        let at = Vec3::new(b.centre.x, 20.12, b.centre.y);
+        View { name, camera: Transform::from_translation(at + turn * local).looking_at(at + turn * look, Vec3::Y), fov: 1.2 }
+    };
+    for (kind, label) in [(BuildingKind::House, "house"), (BuildingKind::Cottage, "cottage"), (BuildingKind::Terrace, "terrace"), (BuildingKind::Farmhouse, "farmhouse")] {
+        let found = plan.layouts.iter().flat_map(|l| &l.buildings).find(|b| b.kind == kind);
+        if let Some(b) = found {
+            let (w, d) = (b.width, b.depth);
+            views.push(inside(Box::leak(format!("{label}_door").into_boxed_str()), b, Vec3::new(-w * 0.2, 1.6, d * 0.3), Vec3::new(-w * 0.15, 1.2, -d * 0.5)));
+            views.push(inside(Box::leak(format!("{label}_back").into_boxed_str()), b, Vec3::new(w * 0.15, 1.6, -d * 0.3), Vec3::new(w * 0.2, 1.0, d * 0.5)));
+            views.push(inside(Box::leak(format!("{label}_up").into_boxed_str()), b, Vec3::new(-w * 0.2, 4.4, d * 0.3), Vec3::new(w * 0.1, 3.4, -d * 0.4)));
+            views.push(inside(Box::leak(format!("{label}_cut").into_boxed_str()), b, Vec3::new(w * 0.45, 3.0, d * 0.45), Vec3::new(-w * 0.1, 0.8, -d * 0.1)));
         }
     }
     commands.insert_resource(Views(views));
