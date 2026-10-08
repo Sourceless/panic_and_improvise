@@ -43,10 +43,7 @@ pub struct Impact {
 
 /// The way the ground faces at `p`: straight up on the flat, tipped on a slope.
 pub fn terrain_normal(map: &TerrainMap, p: Vec2) -> Vec3 {
-    const D: f32 = 0.5;
-    let dx = map.surface_height_at(p + Vec2::X * D) - map.surface_height_at(p - Vec2::X * D);
-    let dz = map.surface_height_at(p + Vec2::Y * D) - map.surface_height_at(p - Vec2::Y * D);
-    Vec3::new(-dx / (2.0 * D), 1.0, -dz / (2.0 * D)).normalize()
+    map.normal_at(p)
 }
 
 /// The height of whatever a bullet falling through `p` meets first: the water's surface where

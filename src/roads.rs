@@ -7,10 +7,23 @@ use bevy::prelude::*;
 
 use crate::map::{grid_pos, PoiKind, TerrainMap, CELL, HALF_SIZE};
 use crate::params::GenParams;
+use crate::road_material::{RoadExtension, RoadMaterial};
+use crate::terrain::TerrainTextures;
 
 const ROAD_LIFT: f32 = 0.25;
+/// Farm tracks lie a hair below main roads, so that where they join, the main road wins.
+const MINOR_SINK: f32 = 0.02;
 const MAJOR_HALF_WIDTH: f32 = 4.0;
 const MINOR_HALF_WIDTH: f32 = 2.2;
+/// The marked lines stop this far short of the end of a stretch of road that finishes at a
+/// junction: a centre line doesn't run through a junction, and nor does an edge line cross the
+/// mouth of a side road.
+const JUNCTION_CLEAR: f32 = 8.0;
+/// The edge line stops this far (beyond a side road's own half width) from where it joins.
+const MOUTH_MARGIN: f32 = 1.5;
+/// How many metres of road one repeat of the surface texture covers.
+const ASPHALT_TILE: f32 = 3.0;
+const TRACK_TILE: f32 = 2.5;
 
 // Major roads (between villages and the mill) tolerate more climbing and wider water
 // crossings than minor roads (farm tracks), which stick closer to flat, dry ground.
@@ -199,40 +212,120 @@ fn nearest_cell(map: &TerrainMap, p: Vec2) -> usize {
     iz * n + ix
 }
 
+pub fn half_width(kind: RoadKind) -> f32 {
+    if kind == RoadKind::Major { MAJOR_HALF_WIDTH } else { MINOR_HALF_WIDTH }
+}
+
+/// One stretch of road, laid out: its smooth centreline and, at each point, how far the road
+/// reaches to either side. Both the road's mesh and the clearance kept around it come from this,
+/// so they always agree.
+#[derive(Clone, Debug)]
+pub struct RoadRibbon {
+    pub kind: RoadKind,
+    pub points: Vec<Vec2>,
+    pub half_widths: Vec<f32>,
+    /// Whether the stretch begins / ends at a junction (as opposed to a dead end).
+    pub start_junction: bool,
+    pub end_junction: bool,
+}
+
 // Road edges form a tree of grid-cell steps. They're first chained into polylines that
-// break wherever roads meet or end, each polyline is relaxed and corner-cut (Chaikin) into a
-// smooth curve, and then a ribbon with mitred sides is laid along it. Vertex heights come
-// from the smooth, bilinearly interpolated terrain height rather than the grid vertex, and
-// are raised above any water for bridges.
-pub fn road_mesh(map: &TerrainMap, roads: &RoadNetwork, kind: RoadKind) -> Mesh {
-    let half_width = if kind == RoadKind::Major { MAJOR_HALF_WIDTH } else { MINOR_HALF_WIDTH };
-    let mut positions = Vec::new();
-    let mut indices = Vec::new();
-    let n = map.grid_size();
-    for chain in road_chains(roads, kind) {
-        let points = smooth_polyline(chain.iter().map(|&c| idx_to_pos(map, c)).collect());
-        if points.len() < 2 {
-            continue;
+// break wherever roads meet or end, and each polyline is relaxed and corner-cut (Chaikin) into a
+// smooth curve. The road then reaches `half_width` to either side, a little more on bends
+// so that it keeps its width.
+pub fn road_ribbons(map: &TerrainMap, roads: &RoadNetwork) -> Vec<RoadRibbon> {
+    let mut ribbons = Vec::new();
+    for kind in [RoadKind::Major, RoadKind::Minor] {
+        for chain in road_chains(roads, kind) {
+            let points = smooth_polyline(chain.cells.iter().map(|&c| idx_to_pos(map, c)).collect());
+            if points.len() < 2 {
+                continue;
+            }
+            let half_widths = (0..points.len())
+                .map(|i| {
+                    let (p, prev, next) = (points[i], points[i.saturating_sub(1)], points[(i + 1).min(points.len() - 1)]);
+                    // Widen a little on bends so the ribbon keeps its width, capped so a sharp
+                    // kink can't spike.
+                    let bend = if i > 0 && i + 1 < points.len() {
+                        let (d0, d1) = ((p - prev).normalize_or_zero(), (next - p).normalize_or_zero());
+                        (1.0 / ((1.0 + d0.dot(d1)) * 0.5).max(0.01).sqrt()).min(1.5)
+                    } else {
+                        1.0
+                    };
+                    half_width(kind) * bend
+                })
+                .collect();
+            ribbons.push(RoadRibbon { kind, points, half_widths, start_junction: chain.start_junction, end_junction: chain.end_junction });
         }
+    }
+    ribbons
+}
+
+/// The vertex colour of a road vertex, which carries what the road shader needs besides position:
+/// r is 1 where lane markings are painted and 0 where they aren't (near junctions), g the road's
+/// half width at the vertex in tens of metres, b is 1 for a farm track and 0 for tarmac, and a is
+/// 1 where the edge line runs and 0 where it is broken for the mouth of a side road.
+pub fn road_vertex_data(kind: RoadKind, painted: bool, edge_line: bool, half_width: f32) -> [f32; 4] {
+    [
+        if kind == RoadKind::Major && painted { 1.0 } else { 0.0 },
+        half_width / 10.0,
+        if kind == RoadKind::Minor { 1.0 } else { 0.0 },
+        if edge_line { 1.0 } else { 0.0 },
+    ]
+}
+
+/// Where roads meet: the end of every stretch that finishes at a junction, and how far the edge
+/// line of the road it runs into should stay broken either side (the side road's half width and
+/// a margin). The edge line of a through road does not cross the mouth of a side road.
+fn junction_mouths(ribbons: &[RoadRibbon]) -> Vec<(Vec2, f32)> {
+    let mut mouths = Vec::new();
+    for ribbon in ribbons {
+        if ribbon.start_junction {
+            mouths.push((ribbon.points[0], ribbon.half_widths[0] + MOUTH_MARGIN));
+        }
+        if ribbon.end_junction {
+            let last = ribbon.points.len() - 1;
+            mouths.push((ribbon.points[last], ribbon.half_widths[last] + MOUTH_MARGIN));
+        }
+    }
+    mouths
+}
+
+// A ribbon of the given kind, with vertex heights from the smooth bilinear terrain rather than
+// the grid vertex, raised above any water for bridges. UV 0 tiles the surface texture in world
+// metres; UV 1 is (metres across from the centre line, metres along the road), for the lane
+// markings; the normals follow the ground.
+pub fn road_mesh(map: &TerrainMap, ribbons: &[RoadRibbon], kind: RoadKind) -> Mesh {
+    let tile = if kind == RoadKind::Major { ASPHALT_TILE } else { TRACK_TILE };
+    let lift = if kind == RoadKind::Major { ROAD_LIFT } else { ROAD_LIFT - MINOR_SINK };
+    let n = map.grid_size();
+    let mouths = junction_mouths(ribbons);
+    let (mut positions, mut normals, mut uv0, mut uv1, mut colours, mut indices) = (vec![], vec![], vec![], vec![], vec![], vec![]);
+    for ribbon in ribbons.iter().filter(|r| r.kind == kind) {
+        let points = &ribbon.points;
+        let mut along = vec![0.0f32; points.len()];
+        for i in 1..points.len() {
+            along[i] = along[i - 1] + points[i].distance(points[i - 1]);
+        }
+        let total = *along.last().unwrap_or(&0.0);
         let base = positions.len() as u32;
         for (i, &p) in points.iter().enumerate() {
             let prev = points[i.saturating_sub(1)];
             let next = points[(i + 1).min(points.len() - 1)];
             let tangent = (next - prev).normalize_or_zero();
             let perp = Vec2::new(-tangent.y, tangent.x);
-            // Widen a little on bends so the ribbon keeps its width, capped so a sharp
-            // kink can't spike.
-            let bend = if i > 0 && i + 1 < points.len() {
-                let (d0, d1) = ((p - prev).normalize_or_zero(), (next - p).normalize_or_zero());
-                (1.0 / ((1.0 + d0.dot(d1)) * 0.5).max(0.01).sqrt()).min(1.5)
-            } else {
-                1.0
-            };
+            let hw = ribbon.half_widths[i];
+            let painted = !(ribbon.start_junction && along[i] < JUNCTION_CLEAR || ribbon.end_junction && total - along[i] < JUNCTION_CLEAR);
             for side in [-1.0_f32, 1.0] {
-                let q = p + perp * half_width * bend * side;
+                let q = p + perp * hw * side;
                 let cell = nearest_cell(map, q);
                 let ground = map.height_at(q).max(map.water_level(cell % n, cell / n).unwrap_or(f32::MIN));
-                positions.push([q.x, ground + ROAD_LIFT, q.y]);
+                positions.push([q.x, ground + lift, q.y]);
+                normals.push(map.normal_at(q).to_array());
+                uv0.push([q.x / tile, q.y / tile]);
+                uv1.push([side * hw, along[i]]);
+                let edge_line = !mouths.iter().any(|&(at, reach)| at.distance(p) < reach);
+                colours.push(road_vertex_data(kind, painted, edge_line, hw));
             }
         }
         for i in 0..points.len() as u32 - 1 {
@@ -240,16 +333,112 @@ pub fn road_mesh(map: &TerrainMap, roads: &RoadNetwork, kind: RoadKind) -> Mesh 
             indices.extend_from_slice(&[l0, r1, l1, l0, r0, r1]);
         }
     }
-    let normals = vec![[0.0, 1.0, 0.0]; positions.len()];
     Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uv0)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_1, uv1)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colours)
         .with_inserted_indices(Indices::U32(indices))
+}
+
+/// A spatial index of the roads' outlines, for keeping other things (walls, hedges) clear of them.
+pub struct RoadClearance {
+    edges: Vec<ClearEdge>,
+    buckets: HashMap<(i32, i32), Vec<u32>>,
+}
+
+struct ClearEdge {
+    a: Vec2,
+    b: Vec2,
+    ha: f32,
+    hb: f32,
+}
+
+/// Bucket side, metres. Edges are filed under every bucket within `REACH` of them, so a query
+/// only needs to look in its own bucket for anything within `REACH` of the point.
+const BUCKET: f32 = 16.0;
+const REACH: f32 = 9.0;
+
+impl RoadClearance {
+    pub fn new(ribbons: &[RoadRibbon]) -> Self {
+        let mut edges = Vec::new();
+        let mut buckets: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+        for ribbon in ribbons {
+            for i in 0..ribbon.points.len().saturating_sub(1) {
+                let id = edges.len() as u32;
+                let edge = ClearEdge { a: ribbon.points[i], b: ribbon.points[i + 1], ha: ribbon.half_widths[i], hb: ribbon.half_widths[i + 1] };
+                let (lo, hi) = (edge.a.min(edge.b) - Vec2::splat(REACH), edge.a.max(edge.b) + Vec2::splat(REACH));
+                for bz in (lo.y / BUCKET).floor() as i32..=(hi.y / BUCKET).floor() as i32 {
+                    for bx in (lo.x / BUCKET).floor() as i32..=(hi.x / BUCKET).floor() as i32 {
+                        buckets.entry((bx, bz)).or_default().push(id);
+                    }
+                }
+                edges.push(edge);
+            }
+        }
+        RoadClearance { edges, buckets }
+    }
+
+    /// How far `p` is outside the nearest road's edge, metres: negative if it is on a road, and
+    /// `f32::MAX` if no road is near (within about `REACH`).
+    pub fn clearance(&self, p: Vec2) -> f32 {
+        let Some(ids) = self.buckets.get(&((p.x / BUCKET).floor() as i32, (p.y / BUCKET).floor() as i32)) else {
+            return f32::MAX;
+        };
+        ids.iter()
+            .map(|&id| {
+                let e = &self.edges[id as usize];
+                let ab = e.b - e.a;
+                let t = if ab.length_squared() > 1e-9 { ((p - e.a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+                p.distance(e.a + ab * t) - (e.ha + (e.hb - e.ha) * t)
+            })
+            .fold(f32::MAX, f32::min)
+    }
+
+    /// The parts of the straight run `a` to `b` that are at least `margin` metres clear of every
+    /// road, as ranges of the way along it (0 to 1). Pieces shorter than `min_length` are dropped.
+    pub fn open_runs(&self, a: Vec2, b: Vec2, margin: f32, min_length: f32) -> Vec<(f32, f32)> {
+        const STEP: f32 = 0.4;
+        let length = a.distance(b);
+        // Nothing near enough to matter: the whole run is open. (Clearance changes by at most about
+        // two metres per metre moved, since a road's width varies along it.)
+        if self.clearance(a.lerp(b, 0.5)) > length + margin {
+            return vec![(0.0, 1.0)];
+        }
+        let steps = (length / STEP).ceil().max(1.0) as usize;
+        let mut runs = Vec::new();
+        let mut start: Option<usize> = None;
+        for i in 0..=steps {
+            let open = self.clearance(a.lerp(b, i as f32 / steps as f32)) > margin;
+            match (open, start) {
+                (true, None) => start = Some(i),
+                (false, Some(s)) => {
+                    runs.push((s, i - 1));
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(s) = start {
+            runs.push((s, steps));
+        }
+        runs.into_iter()
+            .map(|(s, e)| (s as f32 / steps as f32, e as f32 / steps as f32))
+            .filter(|(s, e)| (e - s) * length >= min_length || (*s == 0.0 && *e == 1.0))
+            .collect()
+    }
 }
 
 // Chains of cells for one road kind, each running between junctions / dead ends (a node
 // where roads of any kind meet or stop). Chains are sequences of cell indices.
-fn road_chains(roads: &RoadNetwork, kind: RoadKind) -> Vec<Vec<usize>> {
+struct Chain {
+    cells: Vec<usize>,
+    start_junction: bool,
+    end_junction: bool,
+}
+
+fn road_chains(roads: &RoadNetwork, kind: RoadKind) -> Vec<Chain> {
     let mut degree: HashMap<usize, usize> = HashMap::new();
     let mut adj: HashMap<usize, Vec<usize>> = HashMap::new();
     for &(a, b, k) in &roads.edges {
@@ -277,12 +466,14 @@ fn road_chains(roads: &RoadNetwork, kind: RoadKind) -> Vec<Vec<usize>> {
         }
         chain
     };
+    let junction = |c: usize| degree.get(&c).is_some_and(|&d| d >= 3);
     let mut nodes: Vec<usize> = adj.keys().copied().collect();
     nodes.sort_unstable();
     for &node in nodes.iter().filter(|&&c| is_break(c)) {
         for &nb in &adj[&node] {
             if !used.contains(&key(node, nb)) {
-                chains.push(walk(node, nb, &mut used));
+                let cells = walk(node, nb, &mut used);
+                chains.push(Chain { start_junction: junction(cells[0]), end_junction: junction(cells[cells.len() - 1]), cells });
             }
         }
     }
@@ -290,7 +481,8 @@ fn road_chains(roads: &RoadNetwork, kind: RoadKind) -> Vec<Vec<usize>> {
     for &node in &nodes {
         for &nb in &adj[&node] {
             if !used.contains(&key(node, nb)) {
-                chains.push(walk(node, nb, &mut used));
+                let cells = walk(node, nb, &mut used);
+                chains.push(Chain { start_junction: false, end_junction: false, cells });
             }
         }
     }
@@ -331,30 +523,189 @@ fn idx_to_pos(map: &TerrainMap, idx: usize) -> Vec2 {
     grid_pos(idx % n, idx / n)
 }
 
-/// Spawns the road ribbons (major roads grey, farm tracks tan).
+/// Spawns the road ribbons: tarmac with painted lines for the main roads, gravel tracks for the farms.
 pub fn spawn_roads(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    standard: &mut Assets<StandardMaterial>,
+    road_materials: &mut Assets<RoadMaterial>,
+    textures: &TerrainTextures,
     map: &TerrainMap,
     roads: &RoadNetwork,
 ) {
-    let major = standard.add(StandardMaterial {
-        base_color: Color::srgb(0.30, 0.29, 0.28),
-        perceptual_roughness: 0.95,
-        ..default()
-    });
-    let minor = standard.add(StandardMaterial {
-        base_color: Color::srgb(0.52, 0.42, 0.30),
-        perceptual_roughness: 1.0,
-        ..default()
-    });
+    let ribbons = road_ribbons(map, roads);
+    let mut material = |surface: &Handle<Image>, roughness: f32| {
+        road_materials.add(RoadMaterial {
+            base: StandardMaterial { base_color: Color::WHITE, perceptual_roughness: roughness, reflectance: 0.25, ..default() },
+            extension: RoadExtension { surface: surface.clone() },
+        })
+    };
+    let major = material(&textures.asphalt, 0.92);
+    let minor = material(&textures.track, 1.0);
     for (kind, material) in [(RoadKind::Major, major), (RoadKind::Minor, minor)] {
         commands.spawn((
             crate::terrain::TerrainRoot,
             bevy::light::NotShadowCaster,
-            Mesh3d(meshes.add(road_mesh(map, roads, kind))),
+            Mesh3d(meshes.add(road_mesh(map, &ribbons, kind))),
             MeshMaterial3d(material),
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A straight east-west road of the given kind, `length` long, centred on the origin.
+    fn straight(kind: RoadKind, length: f32, start_junction: bool, end_junction: bool) -> RoadRibbon {
+        let points: Vec<Vec2> = (0..=(length / 2.5) as usize).map(|i| Vec2::new(-length / 2.0 + i as f32 * 2.5, 0.0)).collect();
+        let half_widths = vec![half_width(kind); points.len()];
+        RoadRibbon { kind, points, half_widths, start_junction, end_junction }
+    }
+
+    #[test]
+    fn a_point_on_the_road_has_negative_clearance_and_the_edge_is_zero() {
+        let clearance = RoadClearance::new(&[straight(RoadKind::Major, 100.0, false, false)]);
+        assert!(clearance.clearance(Vec2::new(0.0, 0.0)) < -3.9);
+        assert!(clearance.clearance(Vec2::new(10.0, 3.0)) < 0.0, "inside the 4 m half width");
+        assert!(clearance.clearance(Vec2::new(10.0, MAJOR_HALF_WIDTH)).abs() < 1e-3, "right on the edge");
+        assert!((clearance.clearance(Vec2::new(10.0, 6.0)) - 2.0).abs() < 1e-3, "two metres off");
+        assert_eq!(clearance.clearance(Vec2::new(10.0, 200.0)), f32::MAX, "nothing near");
+    }
+
+    #[test]
+    fn a_wall_across_a_road_is_cut_to_leave_the_road_and_its_verge() {
+        let clearance = RoadClearance::new(&[straight(RoadKind::Major, 100.0, false, false)]);
+        // A wall running north-south across the road, 40 m long.
+        let runs = clearance.open_runs(Vec2::new(0.0, -20.0), Vec2::new(0.0, 20.0), 1.2, 0.8);
+        assert_eq!(runs.len(), 2, "one piece each side: {runs:?}");
+        let (end_of_first, start_of_second) = (runs[0].1 * 40.0 - 20.0, runs[1].0 * 40.0 - 20.0);
+        assert!((end_of_first + 5.2).abs() < 0.5, "first piece ends at the road's edge plus margin: {end_of_first}");
+        assert!((start_of_second - 5.2).abs() < 0.5, "second piece starts at the other side: {start_of_second}");
+    }
+
+    #[test]
+    fn a_wall_alongside_a_road_is_left_alone_but_one_on_it_is_removed() {
+        let clearance = RoadClearance::new(&[straight(RoadKind::Major, 100.0, false, false)]);
+        let beside = clearance.open_runs(Vec2::new(-10.0, 8.0), Vec2::new(10.0, 8.0), 1.2, 0.8);
+        assert_eq!(beside, vec![(0.0, 1.0)], "8 m off the centre line is clear");
+        let on_it = clearance.open_runs(Vec2::new(-10.0, 1.0), Vec2::new(10.0, 1.0), 1.2, 0.8);
+        assert!(on_it.is_empty(), "a wall lying along the road is gone: {on_it:?}");
+    }
+
+    #[test]
+    fn a_short_wall_nowhere_near_a_road_is_never_dropped_for_being_short() {
+        let clearance = RoadClearance::new(&[straight(RoadKind::Major, 100.0, false, false)]);
+        let runs = clearance.open_runs(Vec2::new(0.0, 30.0), Vec2::new(0.3, 30.0), 1.2, 0.8);
+        assert_eq!(runs, vec![(0.0, 1.0)]);
+    }
+
+    #[test]
+    fn a_track_is_narrower_than_a_main_road() {
+        let main = RoadClearance::new(&[straight(RoadKind::Major, 100.0, false, false)]);
+        let track = RoadClearance::new(&[straight(RoadKind::Minor, 100.0, false, false)]);
+        let p = Vec2::new(0.0, 3.0);
+        assert!(main.clearance(p) < 0.0 && track.clearance(p) > 0.0);
+    }
+
+    #[test]
+    fn the_road_mesh_has_what_the_shader_needs() {
+        let map = TerrainMap::flat(10.0);
+        let ribbon = straight(RoadKind::Major, 80.0, false, false);
+        let mesh = road_mesh(&map, &[ribbon.clone()], RoadKind::Major);
+        let attr = |a| mesh.attribute(a).expect("attribute");
+        let bevy::mesh::VertexAttributeValues::Float32x3(positions) = attr(Mesh::ATTRIBUTE_POSITION) else { panic!() };
+        let bevy::mesh::VertexAttributeValues::Float32x3(normals) = attr(Mesh::ATTRIBUTE_NORMAL) else { panic!() };
+        let bevy::mesh::VertexAttributeValues::Float32x2(uv0) = attr(Mesh::ATTRIBUTE_UV_0) else { panic!() };
+        let bevy::mesh::VertexAttributeValues::Float32x2(uv1) = attr(Mesh::ATTRIBUTE_UV_1) else { panic!() };
+        let bevy::mesh::VertexAttributeValues::Float32x4(colours) = attr(Mesh::ATTRIBUTE_COLOR) else { panic!() };
+        assert_eq!(positions.len(), ribbon.points.len() * 2);
+        for i in 0..positions.len() {
+            assert!((positions[i][1] - (10.0 + ROAD_LIFT)).abs() < 1e-4, "lifted off the ground");
+            assert!((normals[i][1] - 1.0).abs() < 1e-4, "faces up on flat ground");
+            // UV 0 tiles in world metres, UV 1 is metres across and along.
+            assert!((uv0[i][0] * ASPHALT_TILE - positions[i][0]).abs() < 1e-3);
+            assert!((uv1[i][0].abs() - MAJOR_HALF_WIDTH).abs() < 1e-4, "across: the road's half width either side");
+            assert_eq!(colours[i][0], 1.0, "painted all along a road with no junctions");
+            assert!((colours[i][1] * 10.0 - MAJOR_HALF_WIDTH).abs() < 1e-4);
+            assert_eq!(colours[i][2], 0.0, "tarmac, not a track");
+        }
+        // Left and right vertices of one cross-section are on opposite sides, and along only grows.
+        assert!(uv1[0][0] < 0.0 && uv1[1][0] > 0.0);
+        assert!(uv1.windows(2).step_by(2).all(|w| w[1][1] >= w[0][1]));
+        assert!((uv1.last().unwrap()[1] - 80.0).abs() < 0.01, "metres along the whole road");
+    }
+
+    #[test]
+    fn lane_markings_stop_short_of_a_junction_but_run_to_a_dead_end() {
+        let map = TerrainMap::flat(0.0);
+        let colours = |ribbon: RoadRibbon| {
+            let mesh = road_mesh(&map, &[ribbon], RoadKind::Major);
+            let bevy::mesh::VertexAttributeValues::Float32x4(c) = mesh.attribute(Mesh::ATTRIBUTE_COLOR).expect("colour") else { panic!() };
+            let bevy::mesh::VertexAttributeValues::Float32x2(uv1) = mesh.attribute(Mesh::ATTRIBUTE_UV_1).expect("uv1") else { panic!() };
+            c.iter().zip(uv1).map(|(c, uv)| (uv[1], c[0])).collect::<Vec<_>>()
+        };
+        let at_junction = colours(straight(RoadKind::Major, 80.0, true, true));
+        for &(along, painted) in &at_junction {
+            let near_end = along < JUNCTION_CLEAR || 80.0 - along < JUNCTION_CLEAR;
+            assert_eq!(painted == 0.0, near_end, "at {along} m");
+        }
+        assert!(at_junction.iter().any(|&(_, p)| p == 1.0), "but painted in the middle");
+        let dead_end = colours(straight(RoadKind::Major, 80.0, false, false));
+        assert!(dead_end.iter().all(|&(_, p)| p == 1.0));
+    }
+
+    #[test]
+    fn the_edge_line_is_broken_where_a_side_road_joins() {
+        let map = TerrainMap::flat(0.0);
+        // A main road along x, with a track joining it from the north at x = 0.
+        let main = straight(RoadKind::Major, 100.0, false, false);
+        let side = RoadRibbon {
+            kind: RoadKind::Minor,
+            points: (0..=10).map(|i| Vec2::new(0.0, 25.0 - i as f32 * 2.5)).collect(),
+            half_widths: vec![MINOR_HALF_WIDTH; 11],
+            start_junction: false,
+            end_junction: true,
+        };
+        let mesh = road_mesh(&map, &[main.clone(), side], RoadKind::Major);
+        let bevy::mesh::VertexAttributeValues::Float32x4(c) = mesh.attribute(Mesh::ATTRIBUTE_COLOR).expect("colour") else { panic!() };
+        let bevy::mesh::VertexAttributeValues::Float32x3(p) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") else { panic!() };
+        let reach = MINOR_HALF_WIDTH + MOUTH_MARGIN;
+        for (colour, pos) in c.iter().zip(p) {
+            let near_mouth = Vec2::new(pos[0], pos[2]).abs().x < reach - 0.5;
+            let far = Vec2::new(pos[0], pos[2]).abs().x > reach + 3.0;
+            if near_mouth {
+                assert_eq!(colour[3], 0.0, "edge line should be broken at x = {}", pos[0]);
+            }
+            if far {
+                assert_eq!(colour[3], 1.0, "edge line should run at x = {}", pos[0]);
+            }
+            assert_eq!(colour[0], 1.0, "the centre line runs on through (the main road has the priority)");
+        }
+        // And a road with no side roads has its edge line all the way.
+        let alone = road_mesh(&map, &[main], RoadKind::Major);
+        let bevy::mesh::VertexAttributeValues::Float32x4(c) = alone.attribute(Mesh::ATTRIBUTE_COLOR).expect("colour") else { panic!() };
+        assert!(c.iter().all(|c| c[3] == 1.0));
+    }
+
+    #[test]
+    fn a_track_is_never_painted_and_lies_a_little_below_the_main_road() {
+        let map = TerrainMap::flat(0.0);
+        let mesh = road_mesh(&map, &[straight(RoadKind::Minor, 40.0, false, false)], RoadKind::Minor);
+        let bevy::mesh::VertexAttributeValues::Float32x4(colours) = mesh.attribute(Mesh::ATTRIBUTE_COLOR).expect("colour") else { panic!() };
+        let bevy::mesh::VertexAttributeValues::Float32x3(positions) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") else { panic!() };
+        assert!(colours.iter().all(|c| c[0] == 0.0 && c[2] == 1.0));
+        assert!(positions.iter().all(|p| p[1] < ROAD_LIFT && p[1] > ROAD_LIFT - 0.1));
+    }
+
+    #[test]
+    fn the_lines_follow_the_british_standard() {
+        // The shader's pattern: marks of 3 m every 9 m (diagram 1008.1, over 40 mph) and lines 100 mm
+        // wide; the shader keeps its own copies of these, so they're stated here as the standard.
+        let shader = std::fs::read_to_string("assets/shaders/road.wgsl").expect("shader");
+        assert!(shader.contains("const MARK_LENGTH: f32 = 3.0;"));
+        assert!(shader.contains("const MARK_PERIOD: f32 = 9.0;"));
+        assert!(shader.contains("const LINE_HALF_WIDTH: f32 = 0.05;"));
+        // A road wide enough for a centre line (5.5 m) has one: the main roads are 8 m.
+        assert!(MAJOR_HALF_WIDTH * 2.0 >= 5.5);
     }
 }

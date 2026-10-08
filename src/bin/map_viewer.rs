@@ -277,6 +277,7 @@ fn regenerate(
     mut standard: ResMut<Assets<StandardMaterial>>,
     mut terrain: ResMut<Assets<TerrainMaterial>>,
     mut fields: ResMut<Assets<FieldMaterial>>,
+    mut road_materials: ResMut<Assets<fps_prototype::road_material::RoadMaterial>>,
     mut waters: ResMut<Assets<fps_prototype::water_material::WaterMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
@@ -288,7 +289,7 @@ fn regenerate(
         commands.entity(entity).despawn();
     }
     let map = TerrainMap::generate(viewer.seed, &params);
-    build_world(&mut commands, &mut meshes, &mut standard, &mut terrain, &mut fields, &mut waters, &mut images, &textures, &map, &params);
+    build_world(&mut commands, &mut meshes, &mut standard, &mut terrain, &mut fields, &mut road_materials, &mut waters, &mut images, &textures, &map, &params);
     commands.insert_resource(map);
 }
 

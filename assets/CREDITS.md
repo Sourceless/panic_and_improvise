@@ -15,6 +15,7 @@ CC0 1.0 (public domain). They are 1K colour maps, converted to JPG; the foliage 
 | forest_conifer.jpg | Ground077 |
 | forest_broadleaf.jpg | ScatteredLeaves009 |
 | gravel.jpg | Gravel041 |
+| asphalt.jpg | Asphalt004 |
 | sand.jpg | Ground054 |
 | bark_oak.jpg | Bark001 |
 | bark_birch.jpg | Bark004 |

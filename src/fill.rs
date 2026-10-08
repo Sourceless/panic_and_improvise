@@ -7,11 +7,11 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::collections::BinaryHeap;
 
-use crate::contour::{clip_to_terrain_triangle, triangulate, Contour, Smoothing, OPEN};
+use crate::contour::{clip_to_terrain_triangle, triangulate, Contour, Seg, Smoothing, OPEN};
 use crate::field_material::{FieldExtension, FieldMaterial};
 use crate::map::{fbm, grid_pos, TerrainMap, CELL, TILE_CELLS};
 use crate::params::GenParams;
-use crate::roads::RoadNetwork;
+use crate::roads::{road_ribbons, RoadClearance, RoadNetwork};
 use crate::terrain::{TerrainRoot, TerrainTextures};
 use crate::zones::{Zone, ZoneMap};
 
@@ -115,10 +115,32 @@ fn spawn_field_tiling(
     if !crate::world::skip("fields") {
         spawn_field_colour(commands, meshes, field_materials, textures, map, &labels, &contour, &styles);
     }
+    // Walls and hedges stop where a road is: the road's real outline (smoothed, and wider on bends
+    // than the grid cells it was traced through) is kept clear.
+    let clearance = RoadClearance::new(&road_ribbons(map, roads));
+    let wall_segs = clear_of_roads(&contour.segs, &clearance);
     if !crate::world::skip("boundaries") {
-        spawn_field_boundaries(commands, meshes, materials, textures, map, &contour);
+        spawn_field_boundaries(commands, meshes, materials, textures, map, &wall_segs);
     }
-    hedge_tree_points(&contour)
+    hedge_tree_points(&wall_segs)
+}
+
+/// How far walls and hedges stay from a road's edge, metres: a hedge reaches about 0.9 m from its
+/// centre line, and a verge is left.
+pub const WALL_ROAD_MARGIN: f32 = 1.2;
+/// A bit of wall shorter than this, left over between two roads or at one, isn't worth building.
+const MIN_WALL_PIECE: f32 = 0.8;
+
+/// The parts of the boundary segments that are clear of every road: a boundary that runs across a
+/// road is cut where the road is, leaving a gap the width of the road and its verges.
+pub fn clear_of_roads(segs: &[Seg], clearance: &RoadClearance) -> Vec<Seg> {
+    let mut kept = Vec::with_capacity(segs.len());
+    for seg in segs {
+        for (t0, t1) in clearance.open_runs(seg.a, seg.b, WALL_ROAD_MARGIN, MIN_WALL_PIECE) {
+            kept.push(Seg { a: seg.a.lerp(seg.b, t0), b: seg.a.lerp(seg.b, t1), pair: seg.pair });
+        }
+    }
+    kept
 }
 
 fn scatter_seeds(map: &TerrainMap, is_farmland: &[bool], params: &GenParams) -> Vec<usize> {
@@ -648,10 +670,8 @@ fn ground_cover(map: &TerrainMap, zones: &ZoneMap, labels: &[u32], styles: &[Fie
 
 // Spots along hedgerows (the first of the three boundary kinds) where an occasional full-size
 // tree stands, roughly one per 40 m of hedge.
-fn hedge_tree_points(contour: &Contour) -> Vec<Vec2> {
-    contour
-        .segs
-        .iter()
+fn hedge_tree_points(segs: &[Seg]) -> Vec<Vec2> {
+    segs.iter()
         .filter(|s| pair_hash(s.pair.0, s.pair.1) % 3 == 0)
         .filter(|s| {
             let m = (s.a + s.b) * 0.5;
@@ -696,14 +716,14 @@ fn spawn_field_boundaries(
     materials: &mut Assets<StandardMaterial>,
     textures: &TerrainTextures,
     map: &TerrainMap,
-    contour: &Contour,
+    segs: &[Seg],
 ) {
     // Each segment is already short (at most one grid cell across), and pins to the true
     // ground height at both of its own endpoints - the same trick road_mesh uses for its
     // ribbons - so it follows the terrain tightly without needing any further subdivision.
     // Split by tile, so frustum culling (including for shadows) can skip distant boundaries.
     let mut tiles: HashMap<(usize, usize, u32), WallBuf> = HashMap::new();
-    for seg in &contour.segs {
+    for seg in segs {
         let (ga, gb) = (map.height_at(seg.a), map.height_at(seg.b));
         let kind = pair_hash(seg.pair.0, seg.pair.1) % 3;
         let mid = (seg.a + seg.b) * 0.5;
@@ -977,6 +997,42 @@ mod tests {
             count(&resplit),
             "re-splitting found more regions than the first split produced"
         );
+    }
+
+    #[test]
+    fn no_wall_or_hedge_stands_on_a_road() {
+        use crate::roads::{road_ribbons, RoadClearance, RoadNetwork};
+        let (map, zones, params) = generate();
+        let is_farmland = farmland(&map, &zones);
+        let seeds = scatter_seeds(&map, &is_farmland, &params);
+        let owner = smooth_owners(&map, &is_farmland, claim_regions(&map, &is_farmland, &seeds, &params), SMOOTH_PASSES);
+        let owner = split_disconnected_regions(&map, &is_farmland, &owner);
+        let labels: Vec<u32> = owner.iter().map(|o| o.unwrap_or(OPEN)).collect();
+        let segs = Contour::build(map.grid_size(), &labels, map.seed, None, Smoothing::FIELD).segs;
+        let roads = RoadNetwork::generate(&map, &params);
+        let clearance = RoadClearance::new(&road_ribbons(&map, &roads));
+
+        // Sample along a segment every metre or so.
+        let worst = |segs: &[Seg]| {
+            segs.iter()
+                .flat_map(|s| {
+                    let steps = (s.a.distance(s.b)).ceil().max(1.0) as usize;
+                    (0..=steps).map(move |i| s.a.lerp(s.b, i as f32 / steps as f32))
+                })
+                .map(|p| clearance.clearance(p))
+                .fold(f32::MAX, f32::min)
+        };
+        // Without the fix there are walls on roads (this map has some)...
+        assert!(worst(&segs) < 0.0, "expected the raw boundaries to cross a road on this map: {}", worst(&segs));
+        // ...and with it, every part of every wall is a hedge's width and more from the road's edge.
+        let kept = clear_of_roads(&segs, &clearance);
+        let clearest = worst(&kept);
+        assert!(clearest > WALL_ROAD_MARGIN - 0.1, "a wall comes within {clearest} m of a road's edge");
+        assert!(kept.len() > segs.len() / 2, "and most walls are still there: {} of {}", kept.len(), segs.len());
+        // Hedge trees are planted only on what is left.
+        for p in hedge_tree_points(&kept) {
+            assert!(clearance.clearance(p) > WALL_ROAD_MARGIN - 0.1);
+        }
     }
 
     // Diagnostic, not an assertion: prints a spot where a road runs across farmland on both

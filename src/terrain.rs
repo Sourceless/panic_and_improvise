@@ -31,6 +31,7 @@ impl Plugin for TerrainPlugin {
             crate::grass::GrassPlugin,
             MaterialPlugin::<TerrainMaterial>::default(),
             MaterialPlugin::<crate::field_material::FieldMaterial>::default(),
+            MaterialPlugin::<crate::road_material::RoadMaterial>::default(),
             MaterialPlugin::<crate::water_material::WaterMaterial>::default(),
             MaterialPlugin::<crate::wind_material::WindMaterial>::default(),
             MaterialPlugin::<crate::cloud_material::CloudMaterial>::default(),
@@ -70,6 +71,9 @@ pub struct TerrainTextures {
     pub wood: Handle<Image>,
     /// Weathered stone for field walls.
     pub wall_stone: Handle<Image>,
+    /// The surface of main roads (tarmac) and of farm tracks (gravel).
+    pub asphalt: Handle<Image>,
+    pub track: Handle<Image>,
 }
 
 pub fn load_textures(
@@ -97,8 +101,10 @@ pub fn load_textures(
         hedge: load("textures/veg/hedge.jpg"),
         wood: load("textures/pbr/bark_conifer.jpg"),
         wall_stone: load("textures/stone_diffuse.jpg"),
+        asphalt: load("textures/pbr/asphalt.jpg"),
+        track: load("textures/pbr/gravel.jpg"),
     };
-    mips.0.extend([textures.hedge.clone(), textures.wood.clone(), textures.wall_stone.clone()]);
+    mips.0.extend([textures.hedge.clone(), textures.wood.clone(), textures.wall_stone.clone(), textures.asphalt.clone(), textures.track.clone()]);
     commands.insert_resource(textures);
 }
 
@@ -111,6 +117,7 @@ fn spawn_world(
     mut standard: ResMut<Assets<StandardMaterial>>,
     mut terrain: ResMut<Assets<TerrainMaterial>>,
     mut fields: ResMut<Assets<crate::field_material::FieldMaterial>>,
+    mut road_materials: ResMut<Assets<crate::road_material::RoadMaterial>>,
     mut waters: ResMut<Assets<crate::water_material::WaterMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
@@ -120,6 +127,7 @@ fn spawn_world(
         &mut standard,
         &mut terrain,
         &mut fields,
+        &mut road_materials,
         &mut waters,
         &mut images,
         &textures,

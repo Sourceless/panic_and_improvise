@@ -209,6 +209,14 @@ impl TerrainMap {
         (self.surface_height_at(p) < level - 0.001).then_some(level)
     }
 
+    /// The way the terrain faces at `p`: straight up on the flat, tipped on a slope.
+    pub fn normal_at(&self, p: Vec2) -> Vec3 {
+        const D: f32 = 0.5;
+        let dx = self.surface_height_at(p + Vec2::X * D) - self.surface_height_at(p - Vec2::X * D);
+        let dz = self.surface_height_at(p + Vec2::Y * D) - self.surface_height_at(p - Vec2::Y * D);
+        Vec3::new(-dx / (2.0 * D), 1.0, -dz / (2.0 * D)).normalize()
+    }
+
     pub fn vertex_height(&self, ix: usize, iz: usize) -> f32 {
         self.heights[iz * VERTS + ix]
     }

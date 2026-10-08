@@ -17,6 +17,7 @@ pub mod muzzle_flash;
 pub mod params;
 pub mod perf;
 pub mod player;
+pub mod road_material;
 pub mod roads;
 pub mod sound;
 pub mod settlement;

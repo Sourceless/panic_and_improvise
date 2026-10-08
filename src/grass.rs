@@ -1,10 +1,12 @@
 // Grass and ground cover close to the camera.
 //
 // Tufts of real-looking grass are grown on meadow, pasture, rough ground and verges within
-// about 50 m of the camera, and removed again as it moves away. Each 6 m square of ground gets
-// one merged mesh, so there are only ever a couple of hundred entities no matter how many
-// thousand tufts, and the blades sway in the same wind as the trees. Beyond that range the
-// field textures carry the look.
+// about 110 m of the camera, and removed again as it moves away. Each 6 m square of ground gets
+// one merged mesh, so there are only ever about a thousand entities no matter how many tens of
+// thousands of tufts, and the blades sway in the same wind as the trees. To reach that far the
+// grass thins with distance: near cells have every tuft, middle cells keep two in five, far cells
+// one in six, and the tufts that stay are bigger, so the ground still looks covered. Beyond that
+// range the field textures carry the look.
 
 use std::collections::HashMap;
 use std::f32::consts::TAU;
@@ -20,11 +22,68 @@ use crate::terrain::TerrainRoot;
 use crate::wind_material::{WindExtension, WindMaterial};
 
 const GRASS_CELL: f32 = 6.0;
-const STREAM_IN: f32 = 48.0;
-const STREAM_OUT: f32 = 60.0;
-const MAX_NEW_CELLS_PER_FRAME: usize = 4;
+/// Cells start to grow this far out, and are removed again at `STREAM_OUT`.
+const STREAM_IN: f32 = 112.0;
+const STREAM_OUT: f32 = 126.0;
+const MAX_NEW_CELLS_PER_FRAME: usize = 6;
 /// Candidate tuft positions tried per square metre (each is kept with the cover's density / this).
 const ATTEMPTS_PER_M2: f32 = 4.0;
+
+/// How a grass cell is built, by how far it is from the camera.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tier {
+    Near,
+    Mid,
+    Far,
+}
+
+impl Tier {
+    /// The fraction of a cell's tufts that are kept. The tufts of a thinner tier are always a
+    /// subset of a denser one's (the same random number decides each), so a cell changing tier
+    /// doesn't reshuffle its grass, it just gains or loses some tufts.
+    pub fn keep(self) -> f32 {
+        match self {
+            Tier::Near => 1.0,
+            Tier::Mid => 0.4,
+            Tier::Far => 0.16,
+        }
+    }
+
+    /// How much bigger each tuft is, to make up for there being fewer of them.
+    pub fn size(self) -> f32 {
+        match self {
+            Tier::Near => 1.0,
+            Tier::Mid => 1.35,
+            Tier::Far => 1.8,
+        }
+    }
+
+    /// Crossed quads per tuft: three read as round from any side, two do from afar.
+    pub fn quads(self) -> usize {
+        if self == Tier::Far { 2 } else { 3 }
+    }
+}
+
+const NEAR_LIMIT: f32 = 45.0;
+const MID_LIMIT: f32 = 80.0;
+/// A cell already in a tier stays in it this much further out, so that moving about a band's
+/// edge doesn't rebuild cells back and forth.
+const HYSTERESIS: f32 = 7.0;
+
+/// The tier a cell `distance` metres away should be in, given the tier it is in now, or `None`
+/// if it is too far for grass.
+pub fn tier_for(distance: f32, current: Option<Tier>) -> Option<Tier> {
+    let stay = |tier| if current == Some(tier) { HYSTERESIS } else { 0.0 };
+    if distance < NEAR_LIMIT + stay(Tier::Near) {
+        Some(Tier::Near)
+    } else if distance < MID_LIMIT + stay(Tier::Mid) {
+        Some(Tier::Mid)
+    } else if distance < STREAM_IN + stay(Tier::Far) {
+        Some(Tier::Far)
+    } else {
+        None
+    }
+}
 
 pub struct GrassPlugin;
 
@@ -103,10 +162,15 @@ struct GrassAssets {
     material: Handle<WindMaterial>,
 }
 
+struct GrassCell {
+    tier: Tier,
+    // None means the cell was checked and has no grass, so it isn't retried every frame.
+    entity: Option<Entity>,
+}
+
 #[derive(Resource, Default)]
 struct GrassState {
-    // None means the cell was checked and has no grass, so it isn't retried every frame.
-    cells: HashMap<(i32, i32), Option<Entity>>,
+    cells: HashMap<(i32, i32), GrassCell>,
 }
 
 fn load_grass(
@@ -185,7 +249,7 @@ fn pick_card(cover: Cover, roll: f32) -> (u32, f32, f32) {
     }
 }
 
-fn build_cell_mesh(map: &TerrainMap, cover: &GroundCover, cx: i32, cz: i32) -> Option<Mesh> {
+fn build_cell_mesh(map: &TerrainMap, cover: &GroundCover, cx: i32, cz: i32, tier: Tier) -> Option<Mesh> {
     let origin = Vec2::new(cx as f32, cz as f32) * GRASS_CELL;
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
@@ -205,6 +269,10 @@ fn build_cell_mesh(map: &TerrainMap, cover: &GroundCover, cx: i32, cz: i32) -> O
         if hash(cx, cz, k as u32 * 4 + 3) > density / ATTEMPTS_PER_M2 {
             continue;
         }
+        // Further out, fewer of them (the same ones every time, see `Tier::keep`).
+        if hash(cx, cz, k as u32 * 4 + 5) > tier.keep() {
+            continue;
+        }
         // Rest on the rendered ground: the terrain mesh's own surface, and above the field
         // fill (which is laid a little above the terrain) wherever there is any.
         let lift = if matches!(kind, Cover::Verge) { 0.0 } else { crate::fill::FIELD_LIFT };
@@ -219,14 +287,15 @@ fn build_cell_mesh(map: &TerrainMap, cover: &GroundCover, cx: i32, cz: i32) -> O
             continue;
         }
         let (card, height_scale, aspect) = pick_card(kind, hash(cx, cz, k as u32 * 9 + 300));
-        let height = (h_lo + (h_hi - h_lo) * hash(cx, cz, k as u32 * 4 + 4)) * height_scale;
+        let height = (h_lo + (h_hi - h_lo) * hash(cx, cz, k as u32 * 4 + 4)) * height_scale * tier.size();
         let half_width = height * aspect * 1.15;
         let (u0, u1) = (card as f32 * 0.25, card as f32 * 0.25 + 0.25);
         let yaw0 = hash(cx, cz, k as u32 * 7 + 100) * TAU;
         let tone = 0.75 + 0.4 * hash(cx, cz, k as u32 * 7 + 101);
-        // Three crossed quads read as a round tuft from any side.
-        for q in 0..3 {
-            let yaw = yaw0 + q as f32 * TAU / 6.0;
+        // Crossed quads read as a round tuft from any side.
+        let quads = tier.quads();
+        for q in 0..quads {
+            let yaw = yaw0 + q as f32 * TAU / (2 * quads) as f32;
             let along = Vec3::new(yaw.cos(), 0.0, yaw.sin()) * half_width;
             let base = Vec3::new(p.x, ground - 0.03, p.y);
             let top = base + Vec3::Y * height;
@@ -269,35 +338,38 @@ fn stream_grass(
     }
     let Some(camera) = cameras.iter().next() else { return };
     let here = Vec2::new(camera.translation().x, camera.translation().z);
+    let centre = |key: (i32, i32)| Vec2::new(key.0 as f32 + 0.5, key.1 as f32 + 0.5) * GRASS_CELL;
 
-    let stale: Vec<(i32, i32)> = state
-        .cells
-        .keys()
-        .copied()
-        .filter(|&(x, z)| (Vec2::new(x as f32 + 0.5, z as f32 + 0.5) * GRASS_CELL).distance(here) > STREAM_OUT)
-        .collect();
+    let stale: Vec<(i32, i32)> = state.cells.keys().copied().filter(|&key| centre(key).distance(here) > STREAM_OUT).collect();
     for key in stale {
-        if let Some(Some(entity)) = state.cells.remove(&key) {
+        if let Some(GrassCell { entity: Some(entity), .. }) = state.cells.remove(&key) {
             commands.entity(entity).despawn();
         }
     }
 
+    // Cells that are missing, or are in the wrong tier for how far away they now are.
     let reach = (STREAM_IN / GRASS_CELL).ceil() as i32;
     let (hx, hz) = ((here.x / GRASS_CELL).floor() as i32, (here.y / GRASS_CELL).floor() as i32);
-    let mut wanted: Vec<((i32, i32), f32)> = Vec::new();
+    let mut wanted: Vec<((i32, i32), Tier, f32)> = Vec::new();
     for dz in -reach..=reach {
         for dx in -reach..=reach {
             let key = (hx + dx, hz + dz);
-            let d = (Vec2::new(key.0 as f32 + 0.5, key.1 as f32 + 0.5) * GRASS_CELL).distance(here);
-            if d < STREAM_IN && !state.cells.contains_key(&key) {
-                wanted.push((key, d));
+            let d = centre(key).distance(here);
+            let current = state.cells.get(&key).map(|c| c.tier);
+            if let Some(tier) = tier_for(d, current) {
+                if current != Some(tier) {
+                    wanted.push((key, tier, d));
+                }
             }
         }
     }
     // Nearest first, and only a few per frame so moving never hitches.
-    wanted.sort_by(|a, b| a.1.total_cmp(&b.1));
-    for (key, _) in wanted.into_iter().take(MAX_NEW_CELLS_PER_FRAME) {
-        let entity = build_cell_mesh(&map, &cover, key.0, key.1).map(|mesh| {
+    wanted.sort_by(|a, b| a.2.total_cmp(&b.2));
+    for (key, tier, _) in wanted.into_iter().take(MAX_NEW_CELLS_PER_FRAME) {
+        if let Some(GrassCell { entity: Some(old), .. }) = state.cells.remove(&key) {
+            commands.entity(old).despawn();
+        }
+        let entity = build_cell_mesh(&map, &cover, key.0, key.1, tier).map(|mesh| {
             commands
                 .spawn((
                     TerrainRoot,
@@ -307,6 +379,115 @@ fn stream_grass(
                 ))
                 .id()
         });
-        state.cells.insert(key, entity);
+        state.cells.insert(key, GrassCell { tier, entity });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grass_reaches_much_further_than_it_did() {
+        assert!(STREAM_IN > 100.0, "was 48 m");
+        assert!(STREAM_OUT > STREAM_IN, "cells are only removed a little beyond where they start");
+        assert_eq!(tier_for(STREAM_IN + 1.0, None), None);
+        assert_eq!(tier_for(STREAM_IN - 1.0, None), Some(Tier::Far));
+    }
+
+    #[test]
+    fn the_nearer_the_denser() {
+        assert_eq!(tier_for(5.0, None), Some(Tier::Near));
+        assert_eq!(tier_for(60.0, None), Some(Tier::Mid));
+        assert_eq!(tier_for(100.0, None), Some(Tier::Far));
+        assert!(Tier::Near.keep() > Tier::Mid.keep() && Tier::Mid.keep() > Tier::Far.keep());
+        assert!(Tier::Near.size() < Tier::Mid.size() && Tier::Mid.size() < Tier::Far.size());
+    }
+
+    #[test]
+    fn a_cell_does_not_flip_tier_back_and_forth_at_a_boundary() {
+        // Just past the near limit, a near cell stays near, while a mid cell stays mid.
+        let d = NEAR_LIMIT + 2.0;
+        assert_eq!(tier_for(d, Some(Tier::Near)), Some(Tier::Near));
+        assert_eq!(tier_for(d, Some(Tier::Mid)), Some(Tier::Mid));
+        // But well past it, near gives way.
+        assert_eq!(tier_for(NEAR_LIMIT + HYSTERESIS + 1.0, Some(Tier::Near)), Some(Tier::Mid));
+        // Same at the mid / far boundary and the outer edge.
+        assert_eq!(tier_for(MID_LIMIT + 2.0, Some(Tier::Mid)), Some(Tier::Mid));
+        assert_eq!(tier_for(MID_LIMIT + 2.0, Some(Tier::Far)), Some(Tier::Far));
+        assert_eq!(tier_for(STREAM_IN + 2.0, Some(Tier::Far)), Some(Tier::Far));
+    }
+
+    fn lawn() -> (TerrainMap, GroundCover) {
+        let map = TerrainMap::flat(0.0);
+        let n = map.grid_size();
+        (map, GroundCover::new(n, vec![Cover::Meadow as u8; n * n]))
+    }
+
+    fn vertex_count(mesh: &Option<Mesh>) -> usize {
+        mesh.as_ref().map_or(0, Mesh::count_vertices)
+    }
+
+    #[test]
+    fn farther_cells_cost_much_less() {
+        let (map, cover) = lawn();
+        let near = vertex_count(&build_cell_mesh(&map, &cover, 3, 3, Tier::Near));
+        let mid = vertex_count(&build_cell_mesh(&map, &cover, 3, 3, Tier::Mid));
+        let far = vertex_count(&build_cell_mesh(&map, &cover, 3, 3, Tier::Far));
+        assert!(near > 0 && mid < near / 2 && far < mid / 2, "{near} {mid} {far}");
+    }
+
+    #[test]
+    fn a_thinner_cell_keeps_a_subset_of_the_tufts_of_a_denser_one() {
+        let (map, cover) = lawn();
+        let bases = |tier| {
+            let mesh = build_cell_mesh(&map, &cover, -4, 2, tier).expect("grass");
+            let bevy::mesh::VertexAttributeValues::Float32x3(p) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") else { panic!() };
+            // A tuft's first quad's first vertex is on the ground; the centre of its base is the
+            // midpoint of that quad's two bottom corners.
+            let per_tuft = tier.quads() * 4;
+            (0..p.len() / per_tuft)
+                .map(|t| {
+                    let (a, b) = (p[t * per_tuft], p[t * per_tuft + 1]);
+                    (((a[0] + b[0]) * 500.0).round() as i32, ((a[2] + b[2]) * 500.0).round() as i32)
+                })
+                .collect::<std::collections::HashSet<_>>()
+        };
+        let (near, mid, far) = (bases(Tier::Near), bases(Tier::Mid), bases(Tier::Far));
+        assert!(mid.is_subset(&near), "mid tufts are all near tufts");
+        assert!(far.is_subset(&mid), "far tufts are all mid tufts");
+        assert!(!far.is_empty());
+    }
+
+    #[test]
+    fn the_tufts_that_remain_are_bigger() {
+        let (map, cover) = lawn();
+        let height = |tier| {
+            let mesh = build_cell_mesh(&map, &cover, 5, 5, tier).expect("grass");
+            let bevy::mesh::VertexAttributeValues::Float32x3(p) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") else { panic!() };
+            let tall = p.iter().map(|v| v[1]).fold(0.0f32, f32::max);
+            let count = (p.len() / (tier.quads() * 4)) as f32;
+            (tall, count)
+        };
+        let (near_tallest, _) = height(Tier::Near);
+        let (far_tallest, far_count) = height(Tier::Far);
+        assert!(far_tallest > near_tallest * 1.3, "{far_tallest} vs {near_tallest}");
+        assert!(far_count > 0.0);
+    }
+
+    #[test]
+    fn the_whole_ring_costs_about_twice_what_the_old_one_did_for_over_twice_the_reach() {
+        // Triangles of a full ring of grass around the camera, at the densest cover (meadow), for
+        // the old 48 m reach (everything Near) and the new one.
+        let (map, cover) = lawn();
+        let tris = |tier| vertex_count(&build_cell_mesh(&map, &cover, 7, 7, tier)) / 4 * 2 * 3 / 3;
+        let ring = |inner: f32, outer: f32| std::f32::consts::PI * (outer * outer - inner * inner) / (GRASS_CELL * GRASS_CELL);
+        let old = ring(0.0, 48.0) * tris(Tier::Near) as f32;
+        let new = ring(0.0, NEAR_LIMIT) * tris(Tier::Near) as f32
+            + ring(NEAR_LIMIT, MID_LIMIT) * tris(Tier::Mid) as f32
+            + ring(MID_LIMIT, STREAM_IN) * tris(Tier::Far) as f32;
+        eprintln!("grass geometry around the camera: {old:.0} triangles before (48 m), {new:.0} now ({STREAM_IN} m): {:.2}x", new / old);
+        assert!(new < old * 2.6, "new {new:.0} vs old {old:.0}: more than 2.6x the geometry");
+        assert!(new > old, "and it does reach further");
     }
 }

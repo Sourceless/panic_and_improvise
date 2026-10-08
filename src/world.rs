@@ -8,6 +8,7 @@ use crate::field_material::FieldMaterial;
 use crate::fill::spawn_fill;
 use crate::map::TerrainMap;
 use crate::params::GenParams;
+use crate::road_material::RoadMaterial;
 use crate::roads::{spawn_roads, RoadNetwork};
 use crate::terrain::{spawn_terrain, TerrainMaterial, TerrainTextures};
 use crate::water_material::WaterMaterial;
@@ -21,6 +22,7 @@ pub fn build_world(
     standard: &mut Assets<StandardMaterial>,
     terrain: &mut Assets<TerrainMaterial>,
     fields: &mut Assets<FieldMaterial>,
+    road_materials: &mut Assets<RoadMaterial>,
     waters: &mut Assets<WaterMaterial>,
     images: &mut Assets<Image>,
     textures: &TerrainTextures,
@@ -30,7 +32,7 @@ pub fn build_world(
     let zones = ZoneMap::generate(map, params);
     let roads = RoadNetwork::generate(map, params);
     spawn_terrain(commands, meshes, standard, terrain, textures, map, &zones, waters, images);
-    spawn_roads(commands, meshes, standard, map, &roads);
+    spawn_roads(commands, meshes, road_materials, textures, map, &roads);
     spawn_fill(commands, meshes, standard, fields, textures, map, &zones, &roads, params);
     commands.insert_resource(zones);
     commands.insert_resource(roads);
