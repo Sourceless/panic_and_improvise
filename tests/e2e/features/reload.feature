@@ -78,3 +78,24 @@ Feature: The magazine, the bolt, and reloading
     Given I hold fire for 4 seconds
     When I pull the trigger 4 times quickly
     Then the gun has clicked 1 time
+
+  Scenario: Sprinting abandons a reload, and the magazine stays as it was
+    Given I fire 3 single shots
+    And I press R
+    And the gun is reloading
+    When I hold W
+    And I hold Shift
+    And I wait 1 second
+    Then the gun is not reloading
+    And the magazine has 27 rounds
+
+  Scenario: Reloading while sprinting drops the sprint and reloads
+    Given I fire 3 single shots
+    And I hold W
+    And I hold Shift
+    And I am moving faster than 8 metres per second
+    When I press R
+    Then the gun is reloading
+    When I wait 0.5 seconds
+    Then the gun is reloading
+    And I am moving slower than 8 metres per second

@@ -136,6 +136,9 @@ pub struct FpsCamera {
     /// A climb up onto something that is under way, and how many have been made.
     pub(crate) mantle: Option<MantleMove>,
     pub(crate) mantles: u32,
+    /// Set when a reload was asked for in the middle of a sprint: the sprint is dropped and stays off
+    /// until the sprint key is let go, so that the reload isn't abandoned by the sprint still held.
+    pub(crate) sprint_suppressed: bool,
 }
 
 /// A climb in progress: the player is carried from where they were to the top of what they climb.
@@ -222,7 +225,7 @@ pub fn spawn_player(mut commands: Commands, map: Res<TerrainMap>) {
         // The player's ears, for sounds placed in the world.
         bevy::audio::SpatialListener::new(0.2),
         Transform::from_translation(eye).looking_at(eye - Vec3::Z, Vec3::Y),
-        FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false, floor: map.height_at(start), mantle: None, mantles: 0 },
+        FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false, floor: map.height_at(start), mantle: None, mantles: 0, sprint_suppressed: false },
     ));
 }
 
@@ -415,7 +418,10 @@ fn player_movement(
         direction -= right;
     }
     // Sprinting is for running forward, not backpedalling.
-    let sprint_keys = held(Action::Sprint) && held(Action::Forward) && !held(Action::Back);
+    if !held(Action::Sprint) {
+        cam.sprint_suppressed = false;
+    }
+    let sprint_keys = held(Action::Sprint) && held(Action::Forward) && !held(Action::Back) && !cam.sprint_suppressed;
     // The jump key, from a crouch or prone, stands you up instead of jumping; and holding it
     // afterwards doesn't then also jump.
     let jump_key = held(Action::Jump);
@@ -616,7 +622,7 @@ mod tests {
             .add_systems(Update, player_movement);
         app.world_mut().spawn((
             Transform::from_xyz(0.0, ground + EYE_HEIGHT, 0.0),
-            FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0 },
+            FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false },
         ));
         // Every update advances the clock by exactly 1/60 s, whatever the real time taken.
         app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_secs_f32(1.0 / 60.0)));

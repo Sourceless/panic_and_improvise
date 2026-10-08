@@ -471,15 +471,31 @@ fn aim(
     controls: Res<Controls>,
     cursors: Query<&CursorOptions, With<PrimaryWindow>>,
     mut guns: Query<(&mut Gun, &mut Transform)>,
-    player: Query<&FpsCamera>,
+    mut player: Query<&mut FpsCamera>,
     mut blend: ResMut<AimBlend>,
 ) {
     let Ok((mut gun, mut transform)) = guns.single_mut() else {
         return;
     };
     let captured = cursors.single().is_ok_and(|c| c.grab_mode == CursorGrabMode::Locked);
+    // Sprinting and reloading don't mix. Asking for a reload in the middle of a sprint drops the sprint
+    // (it stays off until the sprint key is let go) and reloads; breaking into a sprint during a reload
+    // abandons the reload, the magazine staying as it was.
+    let reload_pressed = captured && controls.just_pressed(Action::Reload, &keys);
+    if let Ok(mut player) = player.single_mut() {
+        if reload_pressed {
+            player.sprint_suppressed = true;
+        }
+        let sprinting = controls.pressed(Action::Sprint, &keys) && controls.pressed(Action::Forward, &keys) && !controls.pressed(Action::Back, &keys) && !player.sprint_suppressed;
+        if sprinting {
+            gun.reload_queued = false;
+            if gun.reloading() {
+                gun.state = MECHANISM.cancel_reload(gun.state, gun.ammo);
+            }
+        }
+    }
     // Reloading is always something the player asks for: nothing reloads by itself.
-    if captured && controls.just_pressed(Action::Reload, &keys) {
+    if reload_pressed {
         gun.reload_queued = true;
     }
     gun.try_queued_reload();

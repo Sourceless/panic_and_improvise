@@ -334,6 +334,7 @@ fn moving_slower_than(_world: &mut GameWorld, limit: f32) {
     assert!(speed < limit && speed > 0.2, "moving at {speed} m/s");
 }
 
+#[given(regex = r"^I am moving faster than ([\d.]+) metres per second$")]
 #[then(regex = r"^I am moving faster than ([\d.]+) metres per second$")]
 fn moving_faster_than(_world: &mut GameWorld, limit: f32) {
     let fast = wait_for(Duration::from_secs(8), || snapshot().ground_speed > limit);

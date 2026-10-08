@@ -97,6 +97,16 @@ impl Mechanism {
         State::Reloading { elapsed: 0.0, total: self.reload_time + charge }
     }
 
+    /// A reload is abandoned (the player broke into a sprint): the magazine is as it was, and the gun
+    /// is left ready, or dry if there is nothing in it. Anything but a reload is left alone.
+    pub fn cancel_reload(&self, state: State, ammo: u32) -> State {
+        match state {
+            State::Reloading { .. } if ammo == 0 => State::Dry,
+            State::Reloading { .. } => State::Ready,
+            other => other,
+        }
+    }
+
     /// Time passes. Returns the new state, and whether a reload has just finished (so that the
     /// caller can fill the magazine). `trigger_held` matters only as a shot finishes cycling.
     pub fn tick(&self, state: State, ammo: u32, trigger_held: bool, dt: f32) -> (State, bool) {
@@ -232,6 +242,16 @@ mod tests {
         assert_eq!(STERLING.press_reload(reloading, 0, 30), reloading);
         let cycling = State::Cycling { left: 0.05 };
         assert_eq!(STERLING.press_reload(cycling, 3, 30), cycling, "not mid-shot");
+    }
+
+    #[test]
+    fn abandoning_a_reload_leaves_the_magazine_and_the_gun_as_it_was() {
+        let reloading = State::Reloading { elapsed: 1.0, total: 2.0 };
+        assert_eq!(STERLING.cancel_reload(reloading, 12), State::Ready);
+        assert_eq!(STERLING.cancel_reload(reloading, 0), State::Dry);
+        assert_eq!(STERLING.cancel_reload(State::Ready, 12), State::Ready);
+        let cycling = State::Cycling { left: 0.05 };
+        assert_eq!(STERLING.cancel_reload(cycling, 3), cycling);
     }
 
     #[test]
