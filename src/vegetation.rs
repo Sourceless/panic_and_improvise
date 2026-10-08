@@ -17,6 +17,7 @@ use bevy::image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamp
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
+use crate::collision::Shape;
 use crate::map::{fbm, TerrainMap, CELL, HALF_SIZE, MAP_SIZE};
 use crate::mipmaps::MipQueue;
 use crate::wind_material::{WindExtension, WindMaterial};
@@ -874,12 +875,49 @@ fn zone_at(map: &TerrainMap, zones: &ZoneMap, p: Vec2) -> Zone {
 /// How high a trunk is for collision: well above anything a person can climb.
 const TREE_SOLID_HEIGHT: f32 = 6.0;
 
+/// A tree stands this far clear of a structure's walls: its trunk, with room for its crown beside them.
+const TREE_CLEARANCE: f32 = 3.5;
+
+/// The footprints of everything built, grouped so the nearest few are quick to find.
+#[derive(Default)]
+pub struct Keepout {
+    buckets: HashMap<(i32, i32), Vec<Shape>>,
+}
+
+impl Keepout {
+    const BUCKET: f32 = 32.0;
+
+    pub fn new(shapes: impl IntoIterator<Item = (Vec2, Shape)>) -> Self {
+        let mut buckets: HashMap<(i32, i32), Vec<Shape>> = HashMap::new();
+        for (centre, shape) in shapes {
+            buckets.entry(Self::key(centre)).or_default().push(shape);
+        }
+        Keepout { buckets }
+    }
+
+    fn key(p: Vec2) -> (i32, i32) {
+        ((p.x / Self::BUCKET).floor() as i32, (p.y / Self::BUCKET).floor() as i32)
+    }
+
+    /// Whether a tree at `p` would stand in or against something built. (Nothing is bigger than a
+    /// bucket, so the neighbouring buckets are all there is to look in.)
+    pub fn blocks(&self, p: Vec2) -> bool {
+        let (kx, kz) = Self::key(p);
+        (-1..=1).any(|dz| {
+            (-1..=1).any(|dx| self.buckets.get(&(kx + dx, kz + dz)).is_some_and(|shapes| shapes.iter().any(|s| s.separation(p).0 < TREE_CLEARANCE)))
+        })
+    }
+}
+
 /// Decides where every tree and shrub goes. `hedge_points` are spots along hedgerows where an
 /// occasional full-size tree stands.
-pub fn plan_vegetation(map: &TerrainMap, zones: &ZoneMap, hedge_points: &[Vec2]) -> VegetationPlan {
+pub fn plan_vegetation(map: &TerrainMap, zones: &ZoneMap, hedge_points: &[Vec2], keepout: &Keepout) -> VegetationPlan {
     let mut plan = VegetationPlan::default();
     let seed = map.seed;
     let place = |plan: &mut VegetationPlan, species: Species, p: Vec2, a: i32, b: i32| {
+        if keepout.blocks(p) {
+            return;
+        }
         let size = 0.78 + 0.5 * hash2(a, b, 4);
         plan.add(Instance {
             species,
@@ -971,9 +1009,10 @@ pub fn spawn_vegetation(
     map: &TerrainMap,
     zones: &ZoneMap,
     hedge_points: &[Vec2],
+    keepout: &Keepout,
     colliders: &mut crate::collision::Colliders,
 ) {
-    let plan = plan_vegetation(map, zones, hedge_points);
+    let plan = plan_vegetation(map, zones, hedge_points, keepout);
     plan.add_colliders(colliders);
     // The blob dimensions come from the same generated variants the detailed trees use.
     let blob_dims: HashMap<Species, Vec<(Vec3, Vec3, f32)>> = Species::ALL
@@ -1137,8 +1176,8 @@ mod tests {
         let params = GenParams::default();
         let map = TerrainMap::generate(crate::MAP_SEED, &params);
         let zones = ZoneMap::generate(&map, &params);
-        let plan = plan_vegetation(&map, &zones, &[]);
-        let again = plan_vegetation(&map, &zones, &[]);
+        let plan = plan_vegetation(&map, &zones, &[], &Keepout::default());
+        let again = plan_vegetation(&map, &zones, &[], &Keepout::default());
         assert_eq!(plan.tree_count(), again.tree_count());
         assert!(plan.tree_count() > 10_000, "only {} trees", plan.tree_count());
         for (species, pos) in plan.instances() {
@@ -1159,8 +1198,8 @@ mod tests {
         let params = GenParams::default();
         let map = TerrainMap::generate(crate::MAP_SEED, &params);
         let zones = ZoneMap::generate(&map, &params);
-        let base = plan_vegetation(&map, &zones, &[]).tree_count();
+        let base = plan_vegetation(&map, &zones, &[], &Keepout::default()).tree_count();
         let points: Vec<Vec2> = (0..50).map(|i| Vec2::new(i as f32 * 20.0 - 500.0, 100.0)).collect();
-        assert_eq!(plan_vegetation(&map, &zones, &points).tree_count(), base + 50);
+        assert_eq!(plan_vegetation(&map, &zones, &points, &Keepout::default()).tree_count(), base + 50);
     }
 }

@@ -7,7 +7,8 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::collections::BinaryHeap;
 
-use crate::collision::{Colliders, Material, Solid};
+use crate::collision::{Colliders, Material, Shape, Solid};
+use crate::settlement_plan::SettlementPlan;
 use crate::contour::{clip_to_terrain_triangle, triangulate, Contour, Seg, Smoothing, OPEN};
 use crate::field_material::{FieldExtension, FieldMaterial};
 use crate::map::{fbm, grid_pos, TerrainMap, CELL, TILE_CELLS};
@@ -29,13 +30,23 @@ pub fn spawn_fill(
     zones: &ZoneMap,
     roads: &RoadNetwork,
     params: &GenParams,
+    plan: &SettlementPlan,
     colliders: &mut Colliders,
 ) {
     let hedge_points = spawn_field_tiling(commands, meshes, materials, field_materials, textures, map, zones, roads, params, colliders);
+    let sheds = shed_sites(map, zones);
     if !crate::world::skip("trees") {
-        crate::vegetation::spawn_vegetation(commands, meshes, materials, map, zones, &hedge_points, colliders);
+        // No tree grows through a house, a barn or a shed.
+        let built = plan
+            .layouts
+            .iter()
+            .flat_map(|l| &l.buildings)
+            .map(|b| (b.centre, b.shape()))
+            .chain(sheds.iter().map(|&(p, size)| (p, Shape::Box { centre: p, half: Vec2::new(size.x, size.z) * 0.5, yaw: 0.0 })));
+        let keepout = crate::vegetation::Keepout::new(built);
+        crate::vegetation::spawn_vegetation(commands, meshes, materials, map, zones, &hedge_points, &keepout, colliders);
     }
-    spawn_sheds(commands, meshes, materials, map, zones, colliders);
+    spawn_sheds(commands, meshes, materials, map, &sheds, colliders);
 }
 
 const SMOOTH_PASSES: u32 = 2;
@@ -727,6 +738,15 @@ fn spawn_field_boundaries(
     // ribbons - so it follows the terrain tightly without needing any further subdivision.
     // Split by tile, so frustum culling (including for shadows) can skip distant boundaries.
     let mut tiles: HashMap<(usize, usize, u32), WallBuf> = HashMap::new();
+    // A run of boundary ends where only one segment of its kind touches the point: a hedge there needs a
+    // closed end and a fence a last post. (Roads cut runs, and so does the edge of the fields.)
+    let key = |p: Vec2, kind: u32| ((p.x * 20.0).round() as i64, (p.y * 20.0).round() as i64, kind);
+    let mut touching: HashMap<(i64, i64, u32), u32> = HashMap::new();
+    for seg in segs {
+        let kind = pair_hash(seg.pair.0, seg.pair.1) % 3;
+        *touching.entry(key(seg.a, kind)).or_default() += 1;
+        *touching.entry(key(seg.b, kind)).or_default() += 1;
+    }
     for seg in segs {
         let (ga, gb) = (map.height_at(seg.a), map.height_at(seg.b));
         let kind = pair_hash(seg.pair.0, seg.pair.1) % 3;
@@ -740,9 +760,9 @@ fn spawn_field_boundaries(
         let (half_thickness, height, material) = boundary_solid(kind);
         colliders.add(Solid::wall(seg.a, seg.b, half_thickness, ga + height, gb + height).of(material));
         match kind {
-            0 => push_hedge_segment(buf, map, seg.a, ga, seg.b, gb),
+            0 => push_hedge_segment(buf, map, seg.a, ga, seg.b, gb, touching[&key(seg.a, kind)] == 1, touching[&key(seg.b, kind)] == 1),
             1 => push_box_segment(buf, seg.a, ga, seg.b, gb, 0.6, 0.0, 1.1, 1.6),
-            _ => push_fence_segment(buf, seg.a, ga, seg.b, gb),
+            _ => push_fence_segment(buf, seg.a, ga, seg.b, gb, touching[&key(seg.b, kind)] == 1),
         }
     }
     let textured = |tex: &Handle<Image>, tint: Color, roughness: f32| StandardMaterial {
@@ -817,12 +837,13 @@ fn push_box_segment(buf: &mut WallBuf, a: Vec2, ga: f32, b: Vec2, gb: f32, thick
 
 // Two thin rails along the segment, and a post at its start (the next segment's start is
 // this one's end, so a post every segment length, about 7 m).
-fn push_fence_segment(buf: &mut WallBuf, a: Vec2, ga: f32, b: Vec2, gb: f32) {
+fn push_fence_segment(buf: &mut WallBuf, a: Vec2, ga: f32, b: Vec2, gb: f32, last_post: bool) {
     for (y0, y1) in [(0.32, 0.42), (0.8, 0.9)] {
         push_box_segment(buf, a, ga, b, gb, 0.06, y0, y1, 1.0);
     }
     let dir = (b - a).normalize_or_zero();
-    for t in [0.0, 0.5] {
+    let posts: &[f32] = if last_post { &[0.0, 0.5, 1.0] } else { &[0.0, 0.5] };
+    for &t in posts {
         let p = a.lerp(b, t);
         let g = ga + (gb - ga) * t;
         push_box_segment(buf, p - dir * 0.07, g, p + dir * 0.07, g, 0.14, -0.1, 1.15, 1.0);
@@ -831,7 +852,8 @@ fn push_fence_segment(buf: &mut WallBuf, a: Vec2, ga: f32, b: Vec2, gb: f32) {
 
 // A hedge: a rounded, slightly irregular profile extruded between two points, textured with
 // real leaves (the texture repeats every 2 m).
-fn push_hedge_segment(buf: &mut WallBuf, map: &TerrainMap, a: Vec2, ga: f32, b: Vec2, gb: f32) {
+#[allow(clippy::too_many_arguments)]
+fn push_hedge_segment(buf: &mut WallBuf, map: &TerrainMap, a: Vec2, ga: f32, b: Vec2, gb: f32, cap_a: bool, cap_b: bool) {
     // (distance from the centreline, height) of the cross-section, left foot to right foot.
     const PROFILE: [(f32, f32); 9] = [
         (-0.6, 0.0), (-0.88, 0.55), (-0.78, 1.3), (-0.42, 1.78), (0.0, 1.92),
@@ -875,6 +897,38 @@ fn push_hedge_segment(buf: &mut WallBuf, map: &TerrainMap, a: Vec2, ga: f32, b: 
         let (a0, b0, a1, b1) = (base + i * 2, base + i * 2 + 1, base + i * 2 + 2, base + i * 2 + 3);
         buf.indices.extend_from_slice(&[a0, a1, b0, b0, a1, b1]);
     }
+    // A hedge that stops stops with a face of leaves, not a hollow tube.
+    let dir3 = Vec3::new(dir.x, 0.0, dir.y);
+    for (end, outward, wanted) in [(0usize, -dir3, cap_a), (1, dir3, cap_b)] {
+        if !wanted {
+            continue;
+        }
+        let ring: Vec<Vec3> = rings.iter().map(|(ends, _, _)| ends[end]).collect();
+        let centre = ring.iter().fold(Vec3::ZERO, |sum, p| sum + *p) / ring.len() as f32;
+        let first = buf.positions.len() as u32;
+        for p in ring.iter().chain(std::iter::once(&centre)) {
+            buf.positions.push(p.to_array());
+            buf.normals.push(outward.to_array());
+            buf.uvs.push([(p.x + p.z) * 0.37 / 2.0, p.y / 2.0]);
+        }
+        let hub = first + ring.len() as u32;
+        for i in 0..ring.len() as u32 - 1 {
+            let (p, q) = (ring[i as usize], ring[i as usize + 1]);
+            // Wound to face outward whichever way the ring runs.
+            if (p - centre).cross(q - centre).dot(outward) >= 0.0 {
+                buf.indices.extend_from_slice(&[hub, first + i, first + i + 1]);
+            } else {
+                buf.indices.extend_from_slice(&[hub, first + i + 1, first + i]);
+            }
+        }
+        // The foot of the profile closes the bottom of the cap against the ground.
+        let (p, q) = (ring[ring.len() - 1], ring[0]);
+        if (p - centre).cross(q - centre).dot(outward) >= 0.0 {
+            buf.indices.extend_from_slice(&[hub, first + ring.len() as u32 - 1, first]);
+        } else {
+            buf.indices.extend_from_slice(&[hub, first, first + ring.len() as u32 - 1]);
+        }
+    }
 }
 
 fn spawn_sheds(
@@ -882,7 +936,7 @@ fn spawn_sheds(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     map: &TerrainMap,
-    zones: &ZoneMap,
+    sheds: &[(Vec2, Vec3)],
     colliders: &mut Colliders,
 ) {
     let shed = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
@@ -890,6 +944,21 @@ fn spawn_sheds(
         base_color: Color::srgb(0.62, 0.62, 0.64),
         ..default()
     });
+    for &(p, size) in sheds {
+        let ground = map.height_at(p);
+        colliders.add(Solid::rect(p, Vec2::new(size.x, size.z) * 0.5, 0.0, ground + size.y).of(Material::Metal));
+        commands.spawn((
+            TerrainRoot,
+            Mesh3d(shed.clone()),
+            MeshMaterial3d(wall.clone()),
+            Transform::from_xyz(p.x, ground + size.y / 2.0, p.y).with_scale(size),
+        ));
+    }
+}
+
+/// Where the sheds of the industrial land stand, and how big (length, height, width) each is.
+fn shed_sites(map: &TerrainMap, zones: &ZoneMap) -> Vec<(Vec2, Vec3)> {
+    let mut sites = Vec::new();
     let steps = (crate::map::MAP_SIZE / SHED_SPACING) as usize;
     for iz in 0..steps {
         for ix in 0..steps {
@@ -906,16 +975,10 @@ fn spawn_sheds(
                 7.0 + hash01(ix, iz, 11) * 4.0,
                 14.0 + hash01(ix, iz, 12) * 12.0,
             );
-            let ground = map.height_at(p);
-            colliders.add(Solid::rect(p, Vec2::new(size.x, size.z) * 0.5, 0.0, ground + size.y).of(Material::Metal));
-            commands.spawn((
-                TerrainRoot,
-                Mesh3d(shed.clone()),
-                MeshMaterial3d(wall.clone()),
-                Transform::from_xyz(p.x, ground + size.y / 2.0, p.y).with_scale(size),
-            ));
+            sites.push((p, size));
         }
     }
+    sites
 }
 
 fn nearest_cell(map: &TerrainMap, p: Vec2) -> (usize, usize) {
@@ -1066,7 +1129,7 @@ mod tests {
         let owner = split_disconnected_regions(&map, &is_farmland, &owner);
         let labels: Vec<u32> = owner.iter().map(|o| o.unwrap_or(OPEN)).collect();
         let segs = Contour::build(map.grid_size(), &labels, map.seed, None, Smoothing::FIELD).segs;
-        let plan = crate::vegetation::plan_vegetation(&map, &zones, &[]);
+        let plan = crate::vegetation::plan_vegetation(&map, &zones, &[], &crate::vegetation::Keepout::default());
 
         let fill = |colliders: &mut Colliders| {
             plan.add_colliders(colliders);
@@ -1183,5 +1246,32 @@ mod tests {
         }
         let (range, p) = best.expect("no owned field cells found");
         println!("FIELD HOTSPOT target={:.0},{:.0} height_range_over_30m={:.1}", p.x, p.y, range);
+    }
+
+    fn ground_positions(plan: &crate::vegetation::VegetationPlan) -> Vec<Vec2> {
+        plan.instances().iter().map(|(_, p)| Vec2::new(p.x, p.z)).collect()
+    }
+
+    #[test]
+    fn no_tree_stands_in_or_against_a_building() {
+        let (map, zones, params) = generate();
+        let roads = RoadNetwork::generate(&map, &params);
+        let settlements = SettlementPlan::generate(&map, &roads);
+        let sheds = shed_sites(&map, &zones);
+        let shapes: Vec<(Vec2, Shape)> = settlements
+            .layouts
+            .iter()
+            .flat_map(|l| &l.buildings)
+            .map(|b| (b.centre, b.shape()))
+            .chain(sheds.iter().map(|&(p, size)| (p, Shape::Box { centre: p, half: Vec2::new(size.x, size.z) * 0.5, yaw: 0.0 })))
+            .collect();
+        let without = crate::vegetation::plan_vegetation(&map, &zones, &[], &crate::vegetation::Keepout::default());
+        let keepout = crate::vegetation::Keepout::new(shapes.iter().cloned());
+        let with = crate::vegetation::plan_vegetation(&map, &zones, &[], &keepout);
+        let inside = |trees: &[Vec2]| trees.iter().filter(|&&t| shapes.iter().any(|(c, s)| c.distance(t) < 60.0 && s.separation(t).0 < 0.5)).count();
+        let (before, after) = (inside(&ground_positions(&without)), inside(&ground_positions(&with)));
+        eprintln!("trees in buildings: {before} before, {after} after");
+        assert_eq!(after, 0);
+        assert!(with.tree_count() * 100 > without.tree_count() * 98, "far too many trees removed");
     }
 }

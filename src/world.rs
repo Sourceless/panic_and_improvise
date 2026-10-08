@@ -40,7 +40,7 @@ pub fn build_world(
     let mut colliders = Colliders::default();
     spawn_terrain(commands, meshes, standard, terrain, textures, map, &zones, waters, images, &plan, &mut colliders);
     spawn_roads(commands, meshes, road_materials, textures, map, &roads);
-    spawn_fill(commands, meshes, standard, fields, textures, map, &zones, &roads, params, &mut colliders);
+    spawn_fill(commands, meshes, standard, fields, textures, map, &zones, &roads, params, &plan, &mut colliders);
     commands.insert_resource(colliders);
     commands.insert_resource(plan);
     commands.insert_resource(zones);
