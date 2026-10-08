@@ -43,8 +43,10 @@ LeafSet019/022/023/024/027). Rerun the script to regenerate them.
 Vincent Sevedge on [OpenGameArt](https://opengameart.org/content/gunshot-sounds). The OpenGameArt
 page lists the pack as CC0, but the licence file inside the download says **Creative Commons
 Attribution 3.0** ("Copyright (c) 2009 Vincent Sevedge"), so it is credited here to be safe.
-`tools/make_shot_sounds.py` cuts three individual shots out of the recording and shapes them
-(high-pass, a synthesised low thump, soft clipping and a faster decay) for rapid fire.
+`tools/make_shot_sounds.py` cuts three individual shots out of the recording, removes the
+rumble below 40 Hz and shortens the room echo, and nothing more. The same script also builds
+`sounds/smg_synth/` entirely from filtered noise (original work, no licence issues), which can be
+tried with `FPS_SHOT_SOUNDS=smg_synth`.
 
 `sounds/gunshots/*.wav` are an earlier CC0 pack from OpenGameArt ("Gunshots") and are no longer
 used by the gun.
@@ -54,3 +56,8 @@ used by the gun.
 The gun model was drawn from public-domain US Navy museum photographs of a Sterling L2A3
 (Wikimedia Commons, "Submachine Gun, 9mm, L2A3, Sterling, British, S-N UF57A5347
 (NHHC 2002-11-2)"). The photographs are measurements only; none of their pixels are in the game.
+
+The magazine's size and position were measured from photographs of Sterling L2A2/L2A3 guns in
+the Royal Armouries' collection (collections.armouries.net, object numbers PR.1434 and the
+Sterling L2A1/L2A2 entries), viewed for reference only. They are the Royal Armouries' copyright
+and are not included in this repository or in the game.

@@ -1,24 +1,31 @@
 #!/usr/bin/env python3
-"""Builds the SMG shot sounds in assets/sounds/smg/ from a real recording.
+"""Builds the SMG shot sounds. Two sets are made so they can be compared by ear:
 
-Source: "Gunshot Sounds" by Vincent Sevedge on OpenGameArt (cz.wav, a CZ-52 pistol, four shots
-in one file; the pack's licence file says CC BY 3.0 - credited in assets/CREDITS.md).
+  assets/sounds/smg/        "clean": three real shots cut from a recording, barely touched
+  assets/sounds/smg_synth/  "synth": three shots built from filtered noise, no recording at all
 
-Each output is one shot cut from the recording and made punchier and shorter, as a submachine
-gun's rapid fire needs (the next shot arrives 0.12 s later, so the tail is kept to ~0.45 s):
-  * a steep high-pass removes the rumble and handling noise before the shot
-  * a synthesised low thump (a fast downward sine sweep) is mixed in for body
-  * soft clipping glues the crack and the thump together and adds bite
-  * a short fade-out ends the tail cleanly
+Source for the clean set: "Gunshot Sounds" by Vincent Sevedge on OpenGameArt (cz.wav, a CZ-52
+pistol, four shots in one file; the pack's licence file says CC BY 3.0, credited in
+assets/CREDITS.md). The synth set is original.
+
+The clean set is deliberately minimal: cut each shot at its crack, remove the rumble below
+40 Hz with a high-pass, shorten the recording's room echo with a gentle exponential decay, fade
+out cleanly and normalise. An earlier version also mixed in a synthesised low "thump" (a falling
+sine) and soft-clipped the result; a pure falling tone is what a laser zap sounds like, so both
+were removed.
+
 Usage: python3 tools/make_shot_sounds.py <path to cz.wav>
+Audition in the game with FPS_SHOT_SOUNDS=smg | smg_synth | old
 """
+import os
 import sys
 import wave
 
 import numpy as np
+from scipy import signal
 
-SOURCE_SHOTS = [2.83, 4.05, 5.54]   # onset of shots 2-4 in cz.wav, seconds (shot 1 has a slow low boom and is left out)
-OUT = "assets/sounds/smg"
+SOURCE_SHOTS = [2.83, 4.05, 5.54]   # onset of shots 2-4 in cz.wav, seconds (shot 1 has a slow low boom)
+SR = 48000
 
 
 def load(path):
@@ -29,26 +36,13 @@ def load(path):
     return sr, data
 
 
-def highpass(x, sr, cutoff):
-    # Simple one-pole high-pass applied twice (12 dB/oct).
-    a = np.exp(-2 * np.pi * cutoff / sr)
-    for _ in range(2):
-        y = np.zeros_like(x)
-        prev_x = prev_y = np.zeros(x.shape[1])
-        for i in range(len(x)):
-            prev_y = a * (prev_y + x[i] - prev_x)
-            prev_x = x[i]
-            y[i] = prev_y
-        x = y
-    return x
-
-
-def thump(sr, length, seed):
-    t = np.arange(int(length * sr)) / sr
-    freq = 55 + 95 * np.exp(-t * 38)             # sweeps down from ~150 Hz to 55 Hz
-    phase = 2 * np.pi * np.cumsum(freq) / sr
-    env = np.exp(-t * 26)
-    return np.sin(phase) * env
+def save(path, seg, sr):
+    pcm = (np.clip(seg, -1, 1) * 32767).astype(np.int16)
+    with wave.open(path, "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(pcm.tobytes())
 
 
 def find_crack(sr, data, onset):
@@ -57,47 +51,63 @@ def find_crack(sr, data, onset):
     m = np.abs(data).max(axis=1)
     lo, hi = int((onset - 0.03) * sr), int((onset + 0.15) * sr)
     window = m[lo:hi]
-    first = int(np.argmax(window > 0.3 * window.max()))
-    return (lo + first) / sr
+    return (lo + int(np.argmax(window > 0.3 * window.max()))) / sr
 
 
-def process(sr, data, onset, index):
-    start = int((find_crack(sr, data, onset) - 0.004) * sr)
-    n = int(0.40 * sr)
-    seg = data[start:start + n].copy()
-    seg = highpass(seg, sr, 70)
-    # The recording has a room echo; a submachine gun's fire needs a tight report, so the tail
-    # is pulled down after the first 40 ms (an exponential decay), keeping the crack intact.
+def clean(sr, data, onset):
+    start = int((find_crack(sr, data, onset) - 0.003) * sr)
+    seg = data[start:start + int(0.45 * sr)].copy()
+    sos = signal.butter(2, 40, "highpass", fs=sr, output="sos")
+    seg = signal.sosfilt(sos, seg, axis=0)
     t = np.arange(len(seg)) / sr
-    seg *= np.where(t < 0.04, 1.0, np.exp(-(t - 0.04) * 16))[:, None]
-    # Bring each shot to a common level before shaping.
-    seg /= max(abs(seg).max(), 1e-6)
-    body = thump(sr, 0.18, index)[:, None] * 0.55
-    seg[:len(body)] += body
-    # Soft clip (tanh) for glue and bite, then level.
-    seg = np.tanh(seg * 1.6) / np.tanh(1.6)
-    # Short fade in (no click) and a smooth fade out over the tail.
-    fade_in = int(0.002 * sr)
+    # Shorten the room echo a little after the first 60 ms; the crack and body are untouched.
+    seg *= np.where(t < 0.06, 1.0, np.exp(-(t - 0.06) * 7.0))[:, None]
+    fade_in = int(0.0015 * sr)
     seg[:fade_in] *= np.linspace(0, 1, fade_in)[:, None]
-    tail = int(0.12 * sr)
+    tail = int(0.15 * sr)
     seg[-tail:] *= (np.linspace(1, 0, tail) ** 2)[:, None]
-    seg *= 0.9 / max(abs(seg).max(), 1e-6)
-    return seg
+    return seg * (0.85 / max(abs(seg).max(), 1e-6))
+
+
+def band(noise, lo, hi, sr):
+    sos = signal.butter(2, [lo, hi], "bandpass", fs=sr, output="sos")
+    return signal.sosfilt(sos, noise)
+
+
+def synth(seed):
+    """A gunshot from noise alone: a sharp crack, a mid 'snap', a body, a low boom and a short
+    reverberant tail, each noise filtered into its own band and shaped by its own decay."""
+    n = int(0.45 * SR)
+    t = np.arange(n) / SR
+    out = np.zeros((n, 2))
+    for ch in range(2):
+        rng = np.random.default_rng(seed * 10 + ch)
+        white = rng.standard_normal(n)
+        crack = signal.sosfilt(signal.butter(2, 2500, "highpass", fs=SR, output="sos"), white) * np.exp(-t / 0.003)
+        snap = band(rng.standard_normal(n), 700, 5000, SR) * np.exp(-t / 0.012)
+        body = signal.sosfilt(signal.butter(2, 1100, "lowpass", fs=SR, output="sos"), rng.standard_normal(n)) * np.exp(-t / 0.035)
+        boom = signal.sosfilt(signal.butter(2, 240, "lowpass", fs=SR, output="sos"), rng.standard_normal(n)) * np.exp(-t / 0.09)
+        # A reverberant tail: noise convolved with a decaying noise burst, lowpassed.
+        ir_t = np.arange(int(0.3 * SR)) / SR
+        ir = rng.standard_normal(len(ir_t)) * np.exp(-ir_t / 0.07)
+        tail = signal.fftconvolve(snap + 0.5 * crack, ir)[:n] * 0.012
+        tail = signal.sosfilt(signal.butter(2, 4500, "lowpass", fs=SR, output="sos"), tail)
+        out[:, ch] = 0.9 * crack + 1.0 * snap + 1.1 * body + 1.4 * boom + tail
+    out *= 1.0 / max(abs(out).max(), 1e-6)
+    out = np.tanh(out * 1.25) / np.tanh(1.25)
+    fade = int(0.1 * SR)
+    out[-fade:] *= (np.linspace(1, 0, fade) ** 2)[:, None]
+    return out * 0.85
 
 
 def main():
-    import os
     sr, data = load(sys.argv[1])
-    os.makedirs(OUT, exist_ok=True)
+    os.makedirs("assets/sounds/smg", exist_ok=True)
+    os.makedirs("assets/sounds/smg_synth", exist_ok=True)
     for i, onset in enumerate(SOURCE_SHOTS, start=1):
-        seg = process(sr, data, onset, i)
-        pcm = (np.clip(seg, -1, 1) * 32767).astype(np.int16)
-        with wave.open(f"{OUT}/smg_shot_{i}.wav", "wb") as w:
-            w.setnchannels(2)
-            w.setsampwidth(2)
-            w.setframerate(sr)
-            w.writeframes(pcm.tobytes())
-        print(f"smg_shot_{i}.wav  {len(seg) / sr:.2f} s  peak {abs(seg).max():.2f}")
+        save(f"assets/sounds/smg/smg_shot_{i}.wav", clean(sr, data, onset), sr)
+        save(f"assets/sounds/smg_synth/smg_shot_{i}.wav", synth(i), SR)
+    print("wrote assets/sounds/smg and assets/sounds/smg_synth")
 
 
 if __name__ == "__main__":

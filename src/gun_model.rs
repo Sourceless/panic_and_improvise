@@ -261,22 +261,27 @@ pub fn build() -> (Parts, Parts, Parts) {
     plastic.add_box(centre, Vec3::new(0.029, 0.116, 0.040), tilt);
     plastic.add_box(Vec3::new(0.0, heel_y + 0.004, heel_z + 0.002), Vec3::new(0.0305, 0.014, 0.0475), tilt);
 
-    // --- Magazine housing on the left, and the magazine: a flat box, curving forward as it runs
-    // out sideways (measured about 190 mm long), with ribs and an end plate ---
+    // --- Magazine housing on the left, and the magazine: a flat stamped box, about 30 mm tall by
+    // 28 mm fore-and-aft, running out sideways and curving forward over its ~190 mm. Measured from
+    // Royal Armouries photographs of an L2A2/L2A3, where it is about as tall as the jacket tube
+    // and mounted low: the housing's centre sits about 10 mm below the bore axis. ---
     let mag_z = photo(828.0, 0.0).0 + 0.03;
-    metal.add_box(Vec3::new(-0.0335, BORE_Y + 0.001, mag_z), Vec3::new(0.032, 0.040, 0.034), NONE);
-    let (mut at, segments, seg_len) = (Vec3::new(-0.0495, BORE_Y, mag_z), 5, 0.038);
+    let mag_y = BORE_Y - 0.010;
+    const MAG_HEIGHT: f32 = 0.030;
+    const MAG_DEPTH: f32 = 0.028;
+    metal.add_box(Vec3::new(-0.0345, mag_y, mag_z), Vec3::new(0.030, MAG_HEIGHT + 0.004, MAG_DEPTH + 0.010), NONE);
+    let (mut at, segments, seg_len) = (Vec3::new(-0.0495, mag_y, mag_z), 5, 0.038);
     for k in 0..segments {
         let bend = 0.055 * (k as f32 + 0.5) * (k as f32 + 1.0) * 0.5;
         let toward = Vec3::new(-bend.cos(), 0.0, -bend.sin());
         let centre = at + toward * (seg_len * 0.5);
-        metal.add_box(centre, Vec3::new(seg_len + 0.002, 0.040, 0.025), Quat::from_rotation_y(-bend));
-        // A rib on the magazine's top face, as the stamped box has.
-        metal.add_box(centre + Vec3::Y * 0.0205, Vec3::new(seg_len * 0.55, 0.0016, 0.010), Quat::from_rotation_y(-bend));
+        metal.add_box(centre, Vec3::new(seg_len + 0.002, MAG_HEIGHT, MAG_DEPTH), Quat::from_rotation_y(-bend));
+        // The stamped ribs that run along the magazine's broad faces.
+        metal.add_box(centre + Vec3::Y * (MAG_HEIGHT * 0.5 + 0.0005), Vec3::new(seg_len * 0.55, 0.0016, 0.009), Quat::from_rotation_y(-bend));
         at += toward * seg_len;
     }
-    let end_bend = 0.055 * (segments as f32) * (segments as f32 + 1.0) * 0.5 * 0.0 + 0.055 * (segments as f32 - 0.5) * segments as f32 * 0.5;
-    metal.add_box(at + Vec3::new(-end_bend.cos(), 0.0, -end_bend.sin()) * 0.002, Vec3::new(0.006, 0.046, 0.030), Quat::from_rotation_y(-end_bend));
+    let end_bend = 0.055 * (segments as f32 - 0.5) * segments as f32 * 0.5;
+    metal.add_box(at + Vec3::new(-end_bend.cos(), 0.0, -end_bend.sin()) * 0.002, Vec3::new(0.006, MAG_HEIGHT + 0.004, MAG_DEPTH + 0.003), Quat::from_rotation_y(-end_bend));
 
     // --- Folding stock: two bars either side, level with the receiver at the hinge and dropping
     // away behind it (the real stock drop), two struts, and the butt plate across the back ---
@@ -400,6 +405,18 @@ mod tests {
         let tip_z = tip.iter().map(|p| p[2]).sum::<f32>() / tip.len() as f32;
         let root_z = photo(828.0, 0.0).0 + 0.03;
         assert!(tip_z < root_z - 0.03, "magazine end at z = {tip_z}, joined at {root_z}");
+    }
+
+    #[test]
+    fn the_magazine_is_no_taller_than_the_jacket_and_hangs_below_the_bore() {
+        // Royal Armouries photos: about 30 mm tall (the jacket tube is 35), centred below the axis.
+        let (metal, _, _) = build();
+        let far: Vec<&[f32; 3]> = metal.pos.iter().filter(|p| p[0] < -0.10).collect();
+        assert!(!far.is_empty());
+        let (lo, hi) = (far.iter().map(|p| p[1]).fold(f32::MAX, f32::min), far.iter().map(|p| p[1]).fold(f32::MIN, f32::max));
+        assert!((hi - lo) < 0.036, "the magazine is {} m tall", hi - lo);
+        assert!((hi - lo) > 0.026, "...but not paper-thin ({} m)", hi - lo);
+        assert!((lo + hi) * 0.5 < BORE_Y - 0.004, "centre {} should be below the bore axis ({BORE_Y})", (lo + hi) * 0.5);
     }
 
     #[test]

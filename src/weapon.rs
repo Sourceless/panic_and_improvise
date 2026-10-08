@@ -240,7 +240,13 @@ pub fn spawn_gun(
         (meshes.add(dark.into_mesh()), materials.add(finish(Color::srgb(0.008, 0.008, 0.01), 0.9, 0.0))),
     ];
 
-    let shot_sounds: Vec<Handle<AudioSource>> = (1..=3).map(|i| asset_server.load(format!("sounds/smg/smg_shot_{i}.wav"))).collect();
+    // The shot sounds. FPS_SHOT_SOUNDS picks another set to compare by ear: `smg` (the default,
+    // real recordings), `smg_synth` (built from noise), or `old` (the original single pistol shot).
+    let shot_sounds: Vec<Handle<AudioSource>> = match std::env::var("FPS_SHOT_SOUNDS").as_deref() {
+        Ok("old") => vec![asset_server.load("sounds/gunshots/pistol_shot.wav")],
+        Ok(set) if !set.is_empty() => (1..=3).map(|i| asset_server.load(format!("sounds/{set}/smg_shot_{i}.wav"))).collect(),
+        _ => (1..=3).map(|i| asset_server.load(format!("sounds/smg/smg_shot_{i}.wav"))).collect(),
+    };
     commands.insert_resource(BulletAssets {
         mesh: meshes.add(Sphere::new(0.03)),
         material: materials.add(StandardMaterial {
@@ -384,7 +390,7 @@ fn fire(
     // A different recording each time, a little faster or slower, so a burst doesn't sound like
     // one sample on repeat.
     let take = (gun.random() * assets.shot_sounds.len() as f32) as usize % assets.shot_sounds.len();
-    let (pitch, loudness) = (0.94 + 0.12 * gun.random(), 0.9 + 0.1 * gun.random());
+    let (pitch, loudness) = (0.97 + 0.06 * gun.random(), 0.9 + 0.1 * gun.random());
     commands.spawn((
         AudioPlayer(assets.shot_sounds[take].clone()),
         PlaybackSettings { speed: pitch, volume: bevy::audio::Volume::Linear(loudness), ..PlaybackSettings::DESPAWN },
