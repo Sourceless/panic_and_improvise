@@ -473,6 +473,7 @@ fn aim(
     mut guns: Query<(&mut Gun, &mut Transform)>,
     mut player: Query<&mut FpsCamera>,
     mut blend: ResMut<AimBlend>,
+    mut was_airborne: Local<bool>,
 ) {
     let Ok((mut gun, mut transform)) = guns.single_mut() else {
         return;
@@ -487,6 +488,14 @@ fn aim(
             player.sprint_suppressed = true;
         }
         let sprinting = controls.pressed(Action::Sprint, &keys) && controls.pressed(Action::Forward, &keys) && !controls.pressed(Action::Back, &keys) && !player.sprint_suppressed;
+        // Leaving the ground (a jump, or a climb up onto something) abandons a reload as well.
+        let airborne = player.airborne();
+        let jumped = airborne && !*was_airborne;
+        *was_airborne = airborne;
+        if jumped {
+            gun.reload_queued = false;
+            gun.state = MECHANISM.cancel_reload(gun.state, gun.ammo);
+        }
         if sprinting {
             gun.reload_queued = false;
             if gun.reloading() {

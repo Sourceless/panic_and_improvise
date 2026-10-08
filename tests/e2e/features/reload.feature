@@ -99,3 +99,11 @@ Feature: The magazine, the bolt, and reloading
     When I wait 0.5 seconds
     Then the gun is reloading
     And I am moving slower than 8 metres per second
+
+  Scenario: Jumping abandons a reload
+    Given I fire 3 single shots
+    And I press R
+    And the gun is reloading
+    When I press Space
+    Then the gun is not reloading
+    And the magazine has 27 rounds

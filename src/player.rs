@@ -26,6 +26,13 @@ const AIM_SLOWDOWN: f32 = 0.4;
 /// How much the look sensitivity falls at full zoom, tracking the narrower field of view.
 const ADS_LOOK_SCALE: f32 = 0.7;
 const EYE_HEIGHT: f32 = 1.8;
+/// Crouching in to a sprint starts a slide: a burst a little faster than the sprint that the ground
+/// takes away at `SLIDE_DECEL` metres per second squared, over about a second and a few metres. It
+/// ends, crouched, once down to walking pace. Only a fast enough run can start one.
+const SLIDE_SPEED: f32 = 11.5;
+const SLIDE_DECEL: f32 = 9.0;
+const SLIDE_MIN_SPEED: f32 = MOVE_SPEED * 1.4;
+const SLIDE_END_SPEED: f32 = MOVE_SPEED * 0.55 + 0.2;
 /// How fast (per second, exponentially) the eye settles to a new stance's height.
 const STANCE_EASE: f32 = 9.0;
 
@@ -139,6 +146,8 @@ pub struct FpsCamera {
     /// Set when a reload was asked for in the middle of a sprint: the sprint is dropped and stays off
     /// until the sprint key is let go, so that the reload isn't abandoned by the sprint still held.
     pub(crate) sprint_suppressed: bool,
+    /// A slide is under way: the player is carried along the way they were running, slowing.
+    pub(crate) sliding: bool,
 }
 
 /// A climb in progress: the player is carried from where they were to the top of what they climb.
@@ -225,7 +234,7 @@ pub fn spawn_player(mut commands: Commands, map: Res<TerrainMap>) {
         // The player's ears, for sounds placed in the world.
         bevy::audio::SpatialListener::new(0.2),
         Transform::from_translation(eye).looking_at(eye - Vec3::Z, Vec3::Y),
-        FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false, floor: map.height_at(start), mantle: None, mantles: 0, sprint_suppressed: false },
+        FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false, floor: map.height_at(start), mantle: None, mantles: 0, sprint_suppressed: false, sliding: false },
     ));
 }
 
@@ -326,6 +335,8 @@ pub struct MoveIntent {
     /// How far the gun is on its sights, 0 to 1: aiming is slower than walking.
     pub aim: f32,
     pub stance: Stance,
+    /// Sliding: no steering, and the ground takes the speed away.
+    pub slide: bool,
 }
 
 /// The player's movement state, apart from where they are.
@@ -357,12 +368,20 @@ pub fn step_movement(mut state: MoveState, intent: MoveIntent, dt: f32) -> MoveS
     } else {
         MOVE_SPEED * (1.0 - AIM_SLOWDOWN * intent.aim) * intent.stance.speed_scale()
     };
-    let target = intent.direction * speed;
-    let response = if grounded { GROUND_RESPONSE } else { AIR_RESPONSE };
-    state.velocity = state.velocity.lerp(target, 1.0 - (-response * dt).exp());
-    // Settle fully rather than creeping toward zero forever.
-    if intent.direction == Vec2::ZERO && state.velocity.length() < 0.02 {
-        state.velocity = Vec2::ZERO;
+    if intent.slide {
+        // Carried the way they were going, at a speed only friction changes (none in the air).
+        if grounded {
+            let slowed = (state.velocity.length() - SLIDE_DECEL * dt).max(0.0);
+            state.velocity = state.velocity.normalize_or_zero() * slowed;
+        }
+    } else {
+        let target = intent.direction * speed;
+        let response = if grounded { GROUND_RESPONSE } else { AIR_RESPONSE };
+        state.velocity = state.velocity.lerp(target, 1.0 - (-response * dt).exp());
+        // Settle fully rather than creeping toward zero forever.
+        if intent.direction == Vec2::ZERO && state.velocity.length() < 0.02 {
+            state.velocity = Vec2::ZERO;
+        }
     }
 
     if grounded && intent.jump && intent.stance.can_sprint_or_jump() {
@@ -421,7 +440,14 @@ fn player_movement(
     if !held(Action::Sprint) {
         cam.sprint_suppressed = false;
     }
-    let sprint_keys = held(Action::Sprint) && held(Action::Forward) && !held(Action::Back) && !cam.sprint_suppressed;
+    let running = held(Action::Sprint) && held(Action::Forward) && !held(Action::Back) && !cam.sprint_suppressed;
+    // Crouching in to a sprint slides. (The slide is the crouch, so the sprint doesn't stand it up.)
+    let on_the_ground = cam.air_height <= 0.0 && cam.vertical_speed <= 0.0;
+    if running && tapped(Action::Crouch) && cam.stance == Stance::Stand && !cam.sliding && on_the_ground && cam.mantle.is_none() && cam.velocity.length() > SLIDE_MIN_SPEED {
+        cam.sliding = true;
+        cam.velocity = cam.velocity.normalize_or_zero() * SLIDE_SPEED;
+    }
+    let sprint_keys = running && !cam.sliding;
     // The jump key, from a crouch or prone, stands you up instead of jumping; and holding it
     // afterwards doesn't then also jump.
     let jump_key = held(Action::Jump);
@@ -433,6 +459,10 @@ fn player_movement(
         cam.jump_spent_standing = false;
     }
     cam.stance = next_stance(cam.stance, tapped(Action::Crouch), tapped(Action::Prone), stands_up, sprint_keys);
+    // A slide ends when the player stands or goes prone, leaves the ground, or is down to a crouch walk.
+    if cam.sliding && (cam.stance != Stance::Crouch || !on_the_ground || cam.velocity.length() <= SLIDE_END_SPEED) {
+        cam.sliding = false;
+    }
     // The eye eases to its new height (a crouch takes a moment).
     let target_eye = cam.stance.eye_height();
     cam.eye_height += (target_eye - cam.eye_height) * (1.0 - (-STANCE_EASE * time.delta_secs()).exp());
@@ -445,6 +475,7 @@ fn player_movement(
         jump: jump_key && !cam.jump_spent_standing,
         aim: aim.0,
         stance: cam.stance,
+        slide: cam.sliding,
     };
     let here = Vec2::new(transform.translation.x, transform.translation.z);
 
@@ -536,6 +567,37 @@ mod tests {
     }
 
     #[test]
+    fn a_slide_carries_on_the_way_it_was_going_slowing_and_cannot_be_steered() {
+        let sliding = MoveIntent { slide: true, direction: -Vec2::Y, stance: Stance::Crouch, ..default() };
+        let start = MoveState { velocity: Vec2::X * SLIDE_SPEED, ..default() };
+        let after = run(start, sliding, 0.5);
+        assert!(after.velocity.x > 0.0 && after.velocity.x < SLIDE_SPEED - 3.0, "slows: {:?}", after.velocity);
+        assert!(after.velocity.y.abs() < 1e-4, "keeps its heading whatever the keys say: {:?}", after.velocity);
+        let later = run(start, sliding, 3.0);
+        assert_eq!(later.velocity, Vec2::ZERO, "friction takes it all in the end");
+    }
+
+    #[test]
+    fn a_slide_in_the_air_loses_no_speed() {
+        let sliding = MoveIntent { slide: true, stance: Stance::Crouch, ..default() };
+        let start = MoveState { velocity: Vec2::X * SLIDE_SPEED, air_height: 2.0, vertical_speed: 1.0 };
+        let after = step_movement(start, sliding, DT);
+        assert_eq!(after.velocity, start.velocity);
+    }
+
+    #[test]
+    fn a_slide_takes_about_a_second_and_a_few_metres() {
+        let sliding = MoveIntent { slide: true, stance: Stance::Crouch, ..default() };
+        let (mut s, mut t, mut distance) = (MoveState { velocity: Vec2::X * SLIDE_SPEED, ..default() }, 0.0, 0.0);
+        while s.velocity.length() > SLIDE_END_SPEED {
+            s = step_movement(s, sliding, DT);
+            distance += s.velocity.length() * DT;
+            t += DT;
+        }
+        assert!((0.7..1.3).contains(&t) && (4.0..9.0).contains(&distance), "{t} s, {distance} m");
+    }
+
+    #[test]
     fn standing_still_stays_still() {
         let s = run(MoveState::default(), MoveIntent::default(), 1.0);
         assert_eq!(s, MoveState::default());
@@ -622,7 +684,7 @@ mod tests {
             .add_systems(Update, player_movement);
         app.world_mut().spawn((
             Transform::from_xyz(0.0, ground + EYE_HEIGHT, 0.0),
-            FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false },
+            FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false },
         ));
         // Every update advances the clock by exactly 1/60 s, whatever the real time taken.
         app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_secs_f32(1.0 / 60.0)));
