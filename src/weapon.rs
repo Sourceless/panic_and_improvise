@@ -240,8 +240,8 @@ pub fn spawn_gun(
         (meshes.add(dark.into_mesh()), materials.add(finish(Color::srgb(0.008, 0.008, 0.01), 0.9, 0.0))),
     ];
 
-    // The shot sounds. FPS_SHOT_SOUNDS picks another set to compare by ear: `smg` (the default,
-    // real recordings), `smg_synth` (built from noise), or `old` (the original single pistol shot).
+    // The shot sounds: real recordings of a 9 mm Carl Gustav M45 submachine gun. FPS_SHOT_SOUNDS=old
+    // plays the original single pistol shot instead, for comparison.
     let shot_sounds: Vec<Handle<AudioSource>> = match std::env::var("FPS_SHOT_SOUNDS").as_deref() {
         Ok("old") => vec![asset_server.load("sounds/gunshots/pistol_shot.wav")],
         Ok(set) if !set.is_empty() => (1..=3).map(|i| asset_server.load(format!("sounds/{set}/smg_shot_{i}.wav"))).collect(),

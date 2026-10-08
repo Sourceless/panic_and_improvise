@@ -39,17 +39,14 @@ LeafSet019/022/023/024/027). Rerun the script to regenerate them.
 
 ## Sounds
 
-`sounds/smg/smg_shot_*.wav` are derived from the CZ-52 recording in the "Gunshot Sounds" pack by
-Vincent Sevedge on [OpenGameArt](https://opengameart.org/content/gunshot-sounds). The OpenGameArt
-page lists the pack as CC0, but the licence file inside the download says **Creative Commons
-Attribution 3.0** ("Copyright (c) 2009 Vincent Sevedge"), so it is credited here to be safe.
-`tools/make_shot_sounds.py` cuts three individual shots out of the recording, removes the
-rumble below 40 Hz and shortens the room echo, and nothing more. The same script also builds
-`sounds/smg_synth/` entirely from filtered noise (original work, no licence issues), which can be
-tried with `FPS_SHOT_SOUNDS=smg_synth`.
+`sounds/smg/smg_shot_*.wav` are cut from [The Free Firearm Sound Library](https://opengameart.org/content/the-free-firearm-sound-library):
+real close-miked recordings of a Carl Gustav M45 ("Swedish K") 9 mm submachine gun. The library
+is released as **CC0** ("no rights reserved") by its creators. `tools/make_shot_sounds.py` cuts
+three single shots, resamples them to 48 kHz and applies a 30 Hz high-pass and a fade; nothing
+else is done to them.
 
 `sounds/gunshots/*.wav` are an earlier CC0 pack from OpenGameArt ("Gunshots") and are no longer
-used by the gun.
+used by the gun, except as the `FPS_SHOT_SOUNDS=old` comparison.
 
 ## Reference photographs
 
