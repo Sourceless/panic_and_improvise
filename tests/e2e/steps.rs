@@ -330,9 +330,9 @@ fn tracers_only_far_out(_world: &mut GameWorld) {
     let mut seen_bullet = false;
     let deadline = Instant::now() + Duration::from_millis(800);
     while Instant::now() < deadline {
-        for (travelled, visible) in snapshot().bullets {
+        for bullet in snapshot().bullets {
             seen_bullet = true;
-            assert!(!visible || travelled >= 15.0, "a tracer showed after only {travelled} m");
+            assert!(!bullet.visible || bullet.travelled >= 15.0, "a tracer showed after only {} m", bullet.travelled);
         }
         looked += 1;
     }
@@ -341,6 +341,60 @@ fn tracers_only_far_out(_world: &mut GameWorld) {
 
 #[then("a tracer shows once the bullet is well out")]
 fn tracer_shows(_world: &mut GameWorld) {
-    let shown = wait_for(Duration::from_secs(3), || snapshot().bullets.iter().any(|&(_, visible)| visible));
+    let shown = wait_for(Duration::from_secs(3), || snapshot().bullets.iter().any(|b| b.visible));
     assert!(shown, "no tracer ever appeared");
+}
+
+#[given(regex = r"^the wind blows (east|west) at ([\d.]+) metres per second$")]
+fn wind_blows(_world: &mut GameWorld, toward: String, speed: f32) {
+    // Heading counts from +X (east) toward +Z (south).
+    let heading = if toward == "east" { 0.0 } else { std::f32::consts::PI };
+    send(Command::SetWind { heading, speed });
+    step_pause();
+}
+
+/// A bullet in flight that has gone at least `metres`, read before it lands.
+fn bullet_past(metres: f32) -> Option<crate::BulletInfo> {
+    let mut found = None;
+    wait_for(Duration::from_secs(3), || {
+        found = snapshot().bullets.into_iter().find(|b| b.travelled >= metres);
+        found.is_some()
+    });
+    found
+}
+
+#[then(regex = r"^the bullet leaves at between (\d+) and (\d+) metres per second$")]
+fn muzzle_velocity(_world: &mut GameWorld, low: f32, high: f32) {
+    let mut first = None;
+    wait_for(Duration::from_secs(3), || {
+        first = snapshot().bullets.into_iter().next();
+        first.is_some()
+    });
+    let bullet = first.expect("no bullet in flight");
+    assert!(bullet.speed > low && bullet.speed < high, "first seen at {} m/s ({} m out)", bullet.speed, bullet.travelled);
+}
+
+#[then(regex = r"^the bullet has slowed to between (\d+) and (\d+) metres per second after (\d+) metres$")]
+fn slowed(_world: &mut GameWorld, low: f32, high: f32, metres: f32) {
+    let bullet = bullet_past(metres).expect("the bullet never got that far");
+    assert!(bullet.speed > low && bullet.speed < high, "{} m/s after {} m", bullet.speed, bullet.travelled);
+}
+
+#[then(regex = r"^the bullet is falling after (\d+) metres$")]
+fn falling(_world: &mut GameWorld, metres: f32) {
+    let bullet = bullet_past(metres).expect("the bullet never got that far");
+    assert!(bullet.velocity.y < -1.0, "still moving up/level at {} m/s after {} m", bullet.velocity.y, bullet.travelled);
+}
+
+#[then(regex = r"^the bullet is being blown (east|west) after (\d+) metres$")]
+fn blown(_world: &mut GameWorld, toward: String, metres: f32) {
+    let bullet = bullet_past(metres).expect("the bullet never got that far");
+    let sideways = if toward == "east" { bullet.velocity.x } else { -bullet.velocity.x };
+    assert!(sideways > 1.5, "only {sideways} m/s {toward}ward after {} m", bullet.travelled);
+}
+
+#[then(regex = r"^the bullet is not being blown sideways after (\d+) metres$")]
+fn not_blown(_world: &mut GameWorld, metres: f32) {
+    let bullet = bullet_past(metres).expect("the bullet never got that far");
+    assert!(bullet.velocity.x.abs() < 1.5, "moving sideways at {} m/s after {} m", bullet.velocity.x, bullet.travelled);
 }

@@ -2,14 +2,22 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use crate::gun_model::{self, BORE_Y, MUZZLE_Z, REAR_PEEP_Z, SIGHT_LINE};
+use crate::ballistics::{self, Cartridge, Flight, NINE_PARA};
+use crate::wind::Wind;
 use crate::player::{spawn_player, toggle_cursor_grab, AimBlend, FpsCamera, Stance};
 pub use crate::gun_model::sight_points;
 use crate::map::TerrainMap;
 use crate::target::{dummy_aabb, TargetDummy};
 
 const FIRE_INTERVAL: f32 = 0.12;
-const BULLET_SPEED: f32 = 300.0;
-const BULLET_LIFETIME: f32 = 2.0;
+/// A bullet that hasn't hit anything by now is long gone.
+const BULLET_LIFETIME: f32 = 5.0;
+/// The range the Sterling's sights are zeroed for: a shot crosses the line of sight here.
+pub const ZERO_DISTANCE: f32 = 20.0;
+/// How finely a bullet's flight is stepped, seconds (a frame is cut into steps this long or shorter).
+const FLIGHT_STEP: f32 = 0.002;
+/// The ammunition the gun fires.
+pub const CARTRIDGE: Cartridge = NINE_PARA;
 const BULLET_DAMAGE: f32 = 25.0;
 /// Tracers appear after the bullet has flown this far (metres), and are this long.
 const TRACER_START: f32 = 15.0;
@@ -54,16 +62,14 @@ const BLOOM_MAX: f32 = 0.03;
 const BLOOM_DECAY: f32 = 5.5; // per second
 /// How much of the movement and bloom penalty is left when fully on the sights.
 const ADS_PENALTY_LEFT: f32 = 0.25;
-/// A shot is aimed at whatever is under the crosshair, or this far off if nothing is.
-const FAR_AIM: f32 = 300.0;
-/// ...but never closer than this, so a muzzle just past a wall can't flip the aim around.
-const NEAR_AIM: f32 = 4.0;
 
 pub struct WeaponPlugin;
 
 impl Plugin for WeaponPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_gun.after(spawn_player))
+        // The wind that bullets drift in (the terrain plugin's, when that is loaded too).
+        app.init_resource::<Wind>()
+            .add_systems(Startup, spawn_gun.after(spawn_player))
             .add_systems(
                 Update,
                 (aim.before(fire), fire.before(toggle_cursor_grab), recover_view, animate_flash, move_bullets),
@@ -183,34 +189,6 @@ pub fn scatter_direction(aim: Vec3, half_angle: f32, u: f32, v: f32) -> Vec3 {
     (aim + right * (radius * theta.cos()) + up * (radius * theta.sin())).normalize()
 }
 
-/// Which way a bullet leaves the muzzle: straight at the point the crosshair is on, `distance`
-/// metres along the view. (The muzzle is off to one side, so firing parallel to the view
-/// would land the shot to the side of where you aim.)
-pub fn launch_direction(muzzle: Vec3, eye: Vec3, view_forward: Vec3, distance: f32) -> Vec3 {
-    let target = eye + view_forward * distance.max(NEAR_AIM);
-    (target - muzzle).normalize_or(view_forward)
-}
-
-/// How far along a ray the box is first entered, if it is.
-pub fn ray_hits_aabb(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
-    let (mut t_min, mut t_max) = (0.0f32, f32::MAX);
-    for i in 0..3 {
-        if dir[i].abs() < 1e-8 {
-            if origin[i] < min[i] || origin[i] > max[i] {
-                return None;
-            }
-        } else {
-            let (a, b) = ((min[i] - origin[i]) / dir[i], (max[i] - origin[i]) / dir[i]);
-            t_min = t_min.max(a.min(b));
-            t_max = t_max.min(a.max(b));
-            if t_min > t_max {
-                return None;
-            }
-        }
-    }
-    Some(t_min)
-}
-
 #[derive(Component)]
 pub struct Bullet {
     velocity: Vec3,
@@ -223,6 +201,16 @@ impl Bullet {
     /// How far the bullet has flown, metres.
     pub fn travelled(&self) -> f32 {
         self.travelled
+    }
+
+    /// Its velocity, m/s.
+    pub fn velocity(&self) -> Vec3 {
+        self.velocity
+    }
+
+    /// How fast the bullet is going, m/s.
+    pub fn speed(&self) -> f32 {
+        self.velocity.length()
     }
 }
 
@@ -374,8 +362,6 @@ fn fire(
     cursors: Query<&CursorOptions, With<PrimaryWindow>>,
     mut camera: Query<(&mut Transform, &mut FpsCamera)>,
     mut guns: Query<&mut Gun>,
-    dummies: Query<&Transform, (With<TargetDummy>, Without<FpsCamera>)>,
-    map: Res<TerrainMap>,
     assets: Res<BulletAssets>,
 ) {
     let Ok(mut gun) = guns.single_mut() else {
@@ -407,8 +393,8 @@ fn fire(
     let gun_in_world = cam.mul_transform(gun_pose(gun.aim_blend, gun.gun_kick));
     let muzzle = gun_in_world.transform_point(MUZZLE_LOCAL);
     let (eye, forward) = (cam.translation, *cam.forward());
-    let distance = what_is_under_crosshair(eye, forward, &dummies, &map);
-    let direction = launch_direction(muzzle, eye, forward, distance);
+    // The barrel points where the bullet must start to cross the line of sight at the zero range.
+    let direction = ballistics::zeroed_direction(&CARTRIDGE, muzzle, eye, forward, ZERO_DISTANCE);
 
     // Where the shot actually goes: anywhere inside the gun's cone of inaccuracy.
     let half_angle = current_spread(&gun, &view);
@@ -438,7 +424,7 @@ fn fire(
     gun.flash_size = (0.8 + 0.4 * gun.random()) * (1.0 - 0.45 * gun.aim_blend);
     commands.spawn((
         Bullet {
-            velocity: direction_shot * BULLET_SPEED,
+            velocity: direction_shot * CARTRIDGE.muzzle_velocity,
             age: 0.0,
             travelled: 0.0,
         },
@@ -488,62 +474,58 @@ fn recover_view(time: Res<Time>, mut guns: Query<&mut Gun>, mut camera: Query<(&
     }
 }
 
-// How far along the view the first thing is: a target dummy or the ground, else FAR_AIM.
-fn what_is_under_crosshair(eye: Vec3, forward: Vec3, dummies: &Query<&Transform, (With<TargetDummy>, Without<FpsCamera>)>, map: &TerrainMap) -> f32 {
-    let mut nearest = FAR_AIM;
-    for transform in dummies {
-        let (min, max) = dummy_aabb(transform.translation);
-        if let Some(t) = ray_hits_aabb(eye, forward, min, max) {
-            nearest = nearest.min(t);
-        }
-    }
-    // March the terrain in steps, finer than its 10 m cells.
-    let mut t = 2.0;
-    while t < nearest {
-        let p = eye + forward * t;
-        if p.y < map.height_at(Vec2::new(p.x, p.z)) {
-            nearest = t;
-            break;
-        }
-        t += 2.0;
-    }
-    nearest
-}
-
 fn move_bullets(
     mut commands: Commands,
     time: Res<Time>,
+    wind: Res<Wind>,
     mut bullets: Query<(Entity, &mut Transform, &mut Bullet, &mut Visibility)>,
     mut dummies: Query<(&Transform, &mut TargetDummy), Without<Bullet>>,
     map: Res<TerrainMap>,
 ) {
     let dt = time.delta_secs();
+    // The air moves with the wind, which drags the bullet along with it.
+    let air = Vec3::new(wind.direction().x, 0.0, wind.direction().y) * wind.speed;
+    // A frame is many metres of flight, so it is stepped in small pieces.
+    let steps = (dt / FLIGHT_STEP).ceil().max(1.0) as usize;
+    let h = dt / steps as f32;
     for (entity, mut transform, mut bullet, mut visibility) in &mut bullets {
-        let start = transform.translation;
-        let end = start + bullet.velocity * dt;
-        bullet.age += dt;
+        let mut flight = Flight { position: transform.translation, velocity: bullet.velocity };
+        let mut finished = false;
+        for _ in 0..steps {
+            let start = flight.position;
+            flight = ballistics::step(&CARTRIDGE, flight, air, h);
+            bullet.age += h;
+            bullet.travelled += (flight.position - start).length();
 
-        let mut hit = false;
-        for (dummy_transform, mut dummy) in &mut dummies {
-            if dummy.health <= 0.0 {
-                continue;
+            for (dummy_transform, mut dummy) in &mut dummies {
+                if dummy.health <= 0.0 {
+                    continue;
+                }
+                let (min, max) = dummy_aabb(dummy_transform.translation);
+                if segment_hits_aabb(start, flight.position, min, max) {
+                    dummy.take_hit(BULLET_DAMAGE);
+                    finished = true;
+                    break;
+                }
             }
-            let (min, max) = dummy_aabb(dummy_transform.translation);
-            if segment_hits_aabb(start, end, min, max) {
-                dummy.take_hit(BULLET_DAMAGE);
-                hit = true;
+            let ground = map.height_at(Vec2::new(flight.position.x, flight.position.z));
+            if finished || bullet.age > BULLET_LIFETIME || flight.position.y < ground {
+                finished = true;
                 break;
             }
         }
-
-        transform.translation = end;
-        bullet.travelled += (end - start).length();
+        if finished {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        bullet.velocity = flight.velocity;
+        transform.translation = flight.position;
+        // The tracer points the way the bullet is going, which turns downward as it falls.
+        if let Ok(heading) = Dir3::new(flight.velocity) {
+            transform.look_to(heading, Vec3::Y);
+        }
         if tracer_visible(bullet.travelled) && *visibility == Visibility::Hidden {
             *visibility = Visibility::Inherited;
-        }
-        let ground = map.height_at(Vec2::new(end.x, end.z));
-        if hit || bullet.age > BULLET_LIFETIME || end.y < ground {
-            commands.entity(entity).despawn();
         }
     }
 }
@@ -606,33 +588,23 @@ mod tests {
     }
 
     #[test]
-    fn shots_converge_on_the_crosshair_from_the_off_centre_muzzle() {
+    fn the_zero_is_twenty_metres() {
+        assert_eq!(ZERO_DISTANCE, 20.0);
+    }
+
+    #[test]
+    fn the_barrel_is_pointed_to_cross_the_line_of_sight_at_the_zero() {
+        // From the hip, the muzzle is off to one side and below; from the sights it is nearly on
+        // the line of sight. Either way a shot crosses the line of sight at the zero range.
         let (eye, forward) = (Vec3::new(10.0, 5.0, 3.0), Vec3::NEG_Z);
-        let muzzle = eye + Vec3::new(0.2, -0.18, -0.5);
-        for distance in [5.0, 20.0, 120.0] {
-            let dir = launch_direction(muzzle, eye, forward, distance);
-            let target = eye + forward * distance;
-            // Flying along `dir` from the muzzle gets to the point under the crosshair.
-            let along = (target - muzzle).dot(dir);
-            let miss = (muzzle + dir * along - target).length();
-            assert!(miss < 1e-3, "missed by {miss} at {distance} m");
+        for muzzle in [eye + Vec3::new(0.2, -0.18, -0.5), eye + Vec3::new(0.0, -0.04, -0.5)] {
+            let dir = ballistics::zeroed_direction(&CARTRIDGE, muzzle, eye, forward, ZERO_DISTANCE);
+            let target = eye + forward * ZERO_DISTANCE;
+            let line = (target - muzzle).normalize();
+            let flight = ballistics::point_at_range(&CARTRIDGE, muzzle, dir, line, (target - muzzle).length());
+            let miss = (flight.position - target).length();
+            assert!(miss < 0.005, "missed the zero point by {miss}");
         }
-    }
-
-    #[test]
-    fn a_target_right_in_front_of_the_muzzle_cannot_flip_the_shot_backwards() {
-        let (eye, forward) = (Vec3::ZERO, Vec3::NEG_Z);
-        let muzzle = Vec3::new(0.2, -0.2, -1.0);
-        let dir = launch_direction(muzzle, eye, forward, 0.1);
-        assert!(dir.dot(forward) > 0.9, "{dir:?}");
-    }
-
-    #[test]
-    fn rays_find_boxes_and_miss_them() {
-        let (min, max) = (Vec3::new(-1.0, 0.0, -11.0), Vec3::new(1.0, 2.0, -9.0));
-        assert_eq!(ray_hits_aabb(Vec3::new(0.0, 1.0, 0.0), Vec3::NEG_Z, min, max).map(|t| t.round()), Some(9.0));
-        assert!(ray_hits_aabb(Vec3::new(5.0, 1.0, 0.0), Vec3::NEG_Z, min, max).is_none());
-        assert!(ray_hits_aabb(Vec3::new(0.0, 1.0, 0.0), Vec3::Z, min, max).is_none(), "behind the ray");
     }
 
     #[test]

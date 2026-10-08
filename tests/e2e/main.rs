@@ -27,6 +27,8 @@ pub enum Command {
     ReleaseKey(KeyCode),
     TapKey(KeyCode),
     RemoveDummies,
+    /// The wind blows toward `heading` (radians from +X toward +Z) at `speed` m/s.
+    SetWind { heading: f32, speed: f32 },
     Press(MouseButton),
     Release(MouseButton),
     Tap(MouseButton),
@@ -34,6 +36,17 @@ pub enum Command {
     LoadRoom,
     Snapshot(Sender<Snapshot>),
     Quit { failed: bool },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BulletInfo {
+    /// How far it has flown, metres.
+    pub travelled: f32,
+    /// Whether its tracer is showing.
+    pub visible: bool,
+    pub speed: f32,
+    /// Its velocity (world axes: x east, y up, z south), m/s.
+    pub velocity: Vec3,
 }
 
 #[derive(Debug, Clone)]
@@ -64,8 +77,8 @@ pub struct Snapshot {
     pub airborne: bool,
     /// The gun's current inaccuracy (radians, half-angle), as the crosshair shows it.
     pub spread: f32,
-    /// Bullets in flight: how far each has flown and whether its tracer is showing.
-    pub bullets: Vec<(f32, bool)>,
+    /// Bullets in flight.
+    pub bullets: Vec<BulletInfo>,
 }
 
 static GAME: OnceLock<Sender<Command>> = OnceLock::new();
@@ -230,6 +243,9 @@ fn drive(world: &mut World) {
             }
             // A tap lasts one frame: input is cleared at the start of the next.
             Command::TapKey(key) => world.resource_mut::<ButtonInput<KeyCode>>().press(key),
+            Command::SetWind { heading, speed } => {
+                *world.resource_mut::<fps_prototype::wind::Wind>() = fps_prototype::wind::Wind { heading, speed };
+            }
             Command::RemoveDummies => {
                 let dummies: Vec<Entity> = world.query_filtered::<Entity, With<TargetDummy>>().iter(world).collect();
                 for dummy in dummies {
@@ -273,6 +289,7 @@ fn load_room(world: &mut World) {
     world.resource_mut::<HeldButtons>().0.clear();
     world.resource_mut::<HeldKeys>().0.clear();
     world.resource_mut::<ButtonInput<KeyCode>>().reset_all();
+    *world.resource_mut::<fps_prototype::wind::Wind>() = Default::default();
     set_cursor(world, true);
     world.run_system_once(spawn_player).expect("spawn player");
     world.run_system_once(spawn_gun).expect("spawn gun");
@@ -329,7 +346,12 @@ fn take_snapshot(world: &mut World) -> Snapshot {
     let bullets = world
         .query::<(&Bullet, &Visibility)>()
         .iter(world)
-        .map(|(bullet, visibility)| (bullet.travelled(), *visibility != Visibility::Hidden))
+        .map(|(bullet, visibility)| BulletInfo {
+            travelled: bullet.travelled(),
+            visible: *visibility != Visibility::Hidden,
+            speed: bullet.speed(),
+            velocity: bullet.velocity(),
+        })
         .collect();
     Snapshot {
         stance,
