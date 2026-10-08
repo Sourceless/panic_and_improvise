@@ -3,6 +3,7 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use crate::gun_model::{self, BORE_Y, MUZZLE_Z, REAR_PEEP_Z, SIGHT_LINE};
 use crate::ballistics::{self, Cartridge, Flight, NINE_PARA};
+use crate::collision::Colliders;
 use crate::gun_state::{Bolt, Mechanism, State, STERLING};
 use crate::impact::{segment_aabb_hit, surface_hit, Impact, Surface};
 use crate::sound::play_after;
@@ -690,6 +691,7 @@ fn move_bullets(
     mut bullets: Query<(Entity, &mut Transform, &mut Bullet, &mut Visibility)>,
     mut dummies: Query<(Entity, &Transform, &mut TargetDummy), Without<Bullet>>,
     map: Res<TerrainMap>,
+    colliders: Option<Res<Colliders>>,
     mut impacts: MessageWriter<Impact>,
 ) {
     let dt = time.delta_secs();
@@ -722,6 +724,13 @@ fn move_bullets(
                         let position = start.lerp(flight.position, t);
                         landing = Some((distance, Impact { position, normal, surface: Surface::Target, speed, target: Some(target) }));
                     }
+                }
+            }
+            // ...or a tree, a wall, a hedge, a building.
+            if let Some(hit) = colliders.as_ref().and_then(|c| c.segment_hit(start, flight.position)) {
+                let distance = hit.t * start.distance(flight.position);
+                if landing.as_ref().is_none_or(|(d, _)| distance < *d) {
+                    landing = Some((distance, Impact { position: hit.point, normal: hit.normal, surface: Surface::Solid(hit.material), speed, target: None }));
                 }
             }
             if let Some((_, impact)) = landing {

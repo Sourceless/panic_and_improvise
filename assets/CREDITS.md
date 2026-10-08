@@ -57,8 +57,9 @@ of the thumps; the reload is slowed slightly in the game):
 | --- | --- |
 | `sounds/gun/reload_*.wav` | [Handgun Reload Sound Effect](https://opengameart.org/content/handgun-reload-sound-effect) |
 | `sounds/gun/dry_click_*.wav` | [Gun Reload Sound Effects](https://opengameart.org/content/gun-reload-sound-effects) (clipload1, clipload2) |
-| `sounds/impact/dirt_1,2.wav`, `target_1.wav` | [75 CC0 breaking / falling / hit sfx](https://opengameart.org/content/75-cc0-breaking-falling-hit-sfx) |
+| `sounds/impact/dirt_1,2.wav`, `target_1.wav`, `stone_*.wav` | [75 CC0 breaking / falling / hit sfx](https://opengameart.org/content/75-cc0-breaking-falling-hit-sfx) |
 | `sounds/impact/dirt_3.wav`, `target_2.wav` | [Thwack Sounds](https://opengameart.org/content/thwack-sounds) |
+| `sounds/impact/metal_*.wav` | [Metal Impact Sounds](https://opengameart.org/content/metal-impact-sounds) (clink2, clink3) |
 
 All of these are listed on OpenGameArt as CC0; the Thwack Sounds archive includes a CC0 licence file.
 

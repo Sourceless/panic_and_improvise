@@ -27,6 +27,8 @@ pub enum Command {
     ReleaseKey(KeyCode),
     TapKey(KeyCode),
     RemoveDummies,
+    /// Put something solid in the test room.
+    AddSolid(fps_prototype::collision::Solid),
     /// The wind blows toward `heading` (radians from +X toward +Z) at `speed` m/s.
     SetWind { heading: f32, speed: f32 },
     Press(MouseButton),
@@ -95,6 +97,11 @@ pub struct Snapshot {
     /// Placed (impact) sounds playing right now.
     pub thumps_playing: usize,
     pub sound_log: fps_prototype::weapon::SoundLog,
+    /// Where the player is (x, z), how high their feet are, and how many climbs they have made.
+    pub player: (f32, f32),
+    pub feet: f32,
+    pub mantles: u32,
+    pub mantling: bool,
 }
 
 static GAME: OnceLock<Sender<Command>> = OnceLock::new();
@@ -282,6 +289,7 @@ fn drive(world: &mut World) {
             Command::SetWind { heading, speed } => {
                 *world.resource_mut::<fps_prototype::wind::Wind>() = fps_prototype::wind::Wind { heading, speed };
             }
+            Command::AddSolid(solid) => world.resource_mut::<fps_prototype::collision::Colliders>().add(solid),
             Command::RemoveDummies => {
                 let dummies: Vec<Entity> = world.query_filtered::<Entity, With<TargetDummy>>().iter(world).collect();
                 for dummy in dummies {
@@ -326,6 +334,16 @@ fn load_room(world: &mut World) {
     world.resource_mut::<HeldKeys>().0.clear();
     world.resource_mut::<ButtonInput<KeyCode>>().reset_all();
     *world.resource_mut::<fps_prototype::wind::Wind>() = Default::default();
+    world.resource_mut::<fps_prototype::collision::Colliders>().clear();
+    *world.resource_mut::<fps_prototype::impact::ImpactStats>() = Default::default();
+    // What earlier bullets left behind goes too: holes, flying chips, dust.
+    let leftovers: Vec<Entity> = world
+        .query_filtered::<Entity, Or<(With<fps_prototype::impact::BulletHole>, With<fps_prototype::impact::Chipping>, With<fps_prototype::impact::Dust>)>>()
+        .iter(world)
+        .collect();
+    for entity in leftovers {
+        world.despawn(entity);
+    }
     set_cursor(world, true);
     world.run_system_once(spawn_player).expect("spawn player");
     world.run_system_once(spawn_gun).expect("spawn gun");
@@ -416,7 +434,16 @@ fn take_snapshot(world: &mut World) -> Snapshot {
         .filter(|sink| !sink.empty() && !sink.is_paused())
         .count();
     let sound_log = world.query::<&Gun>().iter(world).next().map(|g| g.sound_log).unwrap_or_default();
+    let (player, feet, mantles, mantling) = world
+        .query::<(&Transform, &FpsCamera)>()
+        .iter(world)
+        .next()
+        .map_or(((0.0, 0.0), 0.0, 0, false), |(t, c)| ((t.translation.x, t.translation.z), c.feet(), c.mantles(), c.mantling()));
     Snapshot {
+        player,
+        feet,
+        mantles,
+        mantling,
         impacts,
         holes_live,
         holes_on_target,

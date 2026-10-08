@@ -540,3 +540,150 @@ fn pull_quickly(_world: &mut GameWorld, times: u32) {
         std::thread::sleep(Duration::from_millis(120));
     }
 }
+
+// ---- collision ------------------------------------------------------------------------------
+
+use fps_prototype::collision::{Material, Solid};
+
+/// A wall across the way, 3 m ahead of where the player starts, running 40 m across.
+fn wall_ahead(half_thickness: f32, height: f32, material: Material) {
+    let across = bevy::prelude::Vec2::new(20.0, 0.0);
+    let at = bevy::prelude::Vec2::new(0.0, -3.0);
+    send(Command::AddSolid(Solid::wall(at - across, at + across, half_thickness, height, height).of(material)));
+    step_pause();
+}
+
+#[given(regex = r"^there is a ([\d.]+) metre high wall ahead$")]
+fn stone_wall_ahead(_world: &mut GameWorld, height: f32) {
+    wall_ahead(0.3, height, Material::Stone);
+}
+
+#[given(regex = r"^there is a ([\d.]+) metre high hedge ahead$")]
+fn hedge_ahead(_world: &mut GameWorld, height: f32) {
+    wall_ahead(0.6, height, Material::Leaves);
+}
+
+#[given(regex = r"^there is a ([\d.]+) metre high fence ahead$")]
+fn fence_ahead(_world: &mut GameWorld, height: f32) {
+    wall_ahead(0.12, height, Material::Wood);
+}
+
+#[given("there is a tree trunk ahead")]
+fn trunk_ahead(_world: &mut GameWorld) {
+    send(Command::AddSolid(Solid::circle(bevy::prelude::Vec2::new(0.0, -3.0), 0.5, 8.0).of(Material::Wood)));
+    step_pause();
+}
+
+#[given(regex = r"^there is a platform ([\d.]+) metres high ahead$")]
+fn platform_ahead(_world: &mut GameWorld, height: f32) {
+    send(Command::AddSolid(Solid::rect(bevy::prelude::Vec2::new(0.0, -5.0), bevy::prelude::Vec2::new(3.0, 3.0), 0.0, height)));
+    step_pause();
+}
+
+#[when(regex = r"^I wait ([\d.]+) seconds?$")]
+#[given(regex = r"^I wait ([\d.]+) seconds?$")]
+fn wait_seconds(_world: &mut GameWorld, seconds: f32) {
+    std::thread::sleep(Duration::from_secs_f32(seconds));
+}
+
+#[then("I am still on this side of it")]
+fn this_side(_world: &mut GameWorld) {
+    // The obstacles are 3 m ahead; being stopped by one is being short of its middle line.
+    let (_, z) = snapshot().player;
+    assert!(z > -3.0, "got through: now at z = {z}");
+    assert!(z < 0.0, "never moved? z = {z}");
+}
+
+#[then(regex = r"^I stopped ([\d.]+) metres short of its middle$")]
+fn stopped_short(_world: &mut GameWorld, metres: f32) {
+    let (_, z) = snapshot().player;
+    let gap = z - -3.0;
+    assert!((gap - metres).abs() < 0.12, "stopped {gap} m from the line the obstacle is on, not {metres}");
+}
+
+#[then("I am on the far side of it")]
+fn far_side(_world: &mut GameWorld) {
+    let across = wait_for(Duration::from_secs(4), || snapshot().player.1 < -3.9);
+    assert!(across, "still on this side: z = {}", snapshot().player.1);
+}
+
+#[then("I am on the ground")]
+fn on_the_ground(_world: &mut GameWorld) {
+    let down = wait_for(Duration::from_secs(4), || snapshot().feet.abs() < 0.03);
+    assert!(down, "feet at {} m", snapshot().feet);
+}
+
+#[then(regex = r"^I have climbed (at least|exactly) (\d+) times?$")]
+fn climbed(_world: &mut GameWorld, how: String, times: u32) {
+    let got = snapshot().mantles;
+    let ok = if how == "exactly" { got == times } else { got >= times };
+    assert!(ok, "climbed {got} times");
+}
+
+#[then(regex = r"^my feet are at least ([\d.]+) metres up$")]
+fn feet_up(_world: &mut GameWorld, metres: f32) {
+    let up = wait_for(Duration::from_secs(4), || snapshot().feet >= metres);
+    assert!(up, "feet only {} m up", snapshot().feet);
+}
+
+#[then(regex = r"^my feet are ([\d.]+) metres up$")]
+fn feet_exactly(_world: &mut GameWorld, metres: f32) {
+    let feet = snapshot().feet;
+    assert!((feet - metres).abs() < 0.05, "feet are {feet} m up, not {metres}");
+}
+
+#[then(regex = r"^I am past z of (-?[\d.]+)$")]
+fn past_z(_world: &mut GameWorld, z: f32) {
+    let ok = wait_for(Duration::from_secs(5), || snapshot().player.1 < z);
+    assert!(ok, "only got to z = {}", snapshot().player.1);
+}
+
+#[given("there is a metal shed ahead")]
+fn shed_ahead(_world: &mut GameWorld) {
+    send(Command::AddSolid(Solid::rect(bevy::prelude::Vec2::new(0.0, -6.0), bevy::prelude::Vec2::new(4.0, 3.0), 0.0, 5.0).of(Material::Metal)));
+    step_pause();
+}
+
+// ---- what bullets do to solid things ---------------------------------------------------------
+
+fn material_named(name: &str) -> Material {
+    match name {
+        "stone" => Material::Stone,
+        "wood" => Material::Wood,
+        "leaves" => Material::Leaves,
+        "metal" => Material::Metal,
+        other => panic!("no material called {other}"),
+    }
+}
+
+#[then(regex = r"^a bullet hole appears in the (stone|wood|leaves|metal)$")]
+fn hole_in_solid(_world: &mut GameWorld, name: String) {
+    use fps_prototype::impact::Surface;
+    let ok = wait_for(Duration::from_secs(4), || snapshot().holes_live > 0);
+    let state = snapshot();
+    assert!(ok, "no bullet hole appeared ({} impacts)", state.impacts.impacts);
+    let (surface, normal) = state.impacts.last.expect("an impact");
+    assert_eq!(surface, Surface::Solid(material_named(&name)));
+    assert!(normal.z > 0.9, "the face shot at looks back at the shooter: {normal:?}");
+}
+
+#[then(regex = r"^the bullet landed ([\d.]+) metres short of the middle line$")]
+fn landed_short(_world: &mut GameWorld, metres: f32) {
+    let at = snapshot().impacts.last_position.expect("an impact");
+    let gap = at.z - -3.0;
+    assert!((gap - metres).abs() < 0.08, "landed {gap} m from the middle line, not {metres}");
+}
+
+#[then("the bullet landed on the shed")]
+fn landed_on_shed(_world: &mut GameWorld) {
+    let at = snapshot().impacts.last_position.expect("an impact");
+    assert!((at.z - -3.0).abs() < 0.05, "front of the shed is at z = -3, not {}", at.z);
+}
+
+#[then("nothing was hit beyond it")]
+fn nothing_beyond(_world: &mut GameWorld) {
+    std::thread::sleep(Duration::from_millis(600));
+    let state = snapshot();
+    assert_eq!(state.dummy_hits, 0, "the target dummy behind it was hit");
+    assert_eq!(state.impacts.impacts, 1, "{} impacts", state.impacts.impacts);
+}

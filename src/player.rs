@@ -2,6 +2,7 @@ use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
 
+use crate::collision::{settle, Colliders, PLAYER_RADIUS, STEP_DOWN, STEP_UP, MANTLE_REACH};
 use crate::map::TerrainMap;
 use crate::MAP_HALF_SIZE;
 
@@ -126,6 +127,40 @@ pub struct FpsCamera {
     pub(crate) eye_height: f32,
     /// Set when the jump key was used to stand up, so that holding it doesn't also jump.
     pub(crate) jump_spent_standing: bool,
+    /// The height of whatever the player is over: the ground, or the top of a wall they stand on.
+    /// `air_height` is measured from it.
+    pub(crate) floor: f32,
+    /// A climb up onto something that is under way, and how many have been made.
+    pub(crate) mantle: Option<MantleMove>,
+    pub(crate) mantles: u32,
+}
+
+/// A climb in progress: the player is carried from where they were to the top of what they climb.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MantleMove {
+    from: Vec2,
+    from_feet: f32,
+    to: Vec2,
+    to_feet: f32,
+    progress: f32,
+    duration: f32,
+}
+
+impl MantleMove {
+    /// Where the player is, and how high their feet are, `progress` of the way through. They go up
+    /// first (hauling themselves onto the edge) and then across.
+    fn at(&self, progress: f32) -> (Vec2, f32) {
+        let smooth = |x: f32| {
+            let x = x.clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
+        };
+        (self.from.lerp(self.to, smooth((progress - 0.25) / 0.75)), self.from_feet + (self.to_feet - self.from_feet) * smooth(progress / 0.65))
+    }
+}
+
+/// How long it takes to climb up `height` metres.
+pub fn mantle_duration(height: f32) -> f32 {
+    0.4 + 0.3 * height.max(0.0)
 }
 
 impl FpsCamera {
@@ -140,6 +175,20 @@ impl FpsCamera {
     /// How fast the player is moving along the ground, metres per second.
     pub fn speed(&self) -> f32 {
         self.velocity.length()
+    }
+
+    /// How high the player's feet are, absolute (above whatever is under them, plus how high that is).
+    pub fn feet(&self) -> f32 {
+        self.floor + self.air_height
+    }
+
+    /// How many climbs the player has made, and whether one is going on now.
+    pub fn mantles(&self) -> u32 {
+        self.mantles
+    }
+
+    pub fn mantling(&self) -> bool {
+        self.mantle.is_some()
     }
 
     pub fn stance(&self) -> Stance {
@@ -170,7 +219,7 @@ pub fn spawn_player(mut commands: Commands, map: Res<TerrainMap>) {
         // The player's ears, for sounds placed in the world.
         bevy::audio::SpatialListener::new(0.2),
         Transform::from_translation(eye).looking_at(eye - Vec3::Z, Vec3::Y),
-        FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false },
+        FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false, floor: map.height_at(start), mantle: None, mantles: 0 },
     ));
 }
 
@@ -322,12 +371,17 @@ fn player_movement(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     terrain: Res<TerrainMap>,
+    colliders: Option<Res<Colliders>>,
     aim: Res<AimBlend>,
     mut query: Query<(&mut Transform, &mut FpsCamera)>,
 ) {
     let Ok((mut transform, mut cam)) = query.single_mut() else {
         return;
     };
+    let dt = time.delta_secs();
+    // With no solids in the world (a bare test app, say) there is just the ground.
+    let nothing = Colliders::default();
+    let colliders: &Colliders = colliders.as_deref().unwrap_or(&nothing);
 
     let forward = Vec2::new(-cam.yaw.sin(), -cam.yaw.cos());
     let right = Vec2::new(cam.yaw.cos(), -cam.yaw.sin());
@@ -371,22 +425,62 @@ fn player_movement(
         aim: aim.0,
         stance: cam.stance,
     };
+    let here = Vec2::new(transform.translation.x, transform.translation.z);
+
+    // A climb that is under way carries the player until it's done; nothing else moves them.
+    if let Some(mut climb) = cam.mantle {
+        climb.progress = (climb.progress + dt / climb.duration).min(1.0);
+        let (at, feet) = climb.at(climb.progress);
+        if climb.progress >= 1.0 {
+            cam.mantle = None;
+            cam.floor = climb.to_feet;
+            cam.air_height = 0.0;
+            cam.vertical_speed = 0.0;
+        } else {
+            cam.mantle = Some(climb);
+            cam.air_height = (feet - cam.floor).max(0.0);
+        }
+        cam.velocity = Vec2::ZERO;
+        transform.translation = Vec3::new(at.x, cam.floor + cam.air_height + cam.eye_height, at.y);
+        return;
+    }
+
+    // Holding jump while moving into something low enough to reach hauls the player up onto it:
+    // a wall, a hedge, a fence too high to just jump. (A low enough one is jumped or stepped over.)
+    let feet = cam.floor + cam.air_height;
+    if jump_key && cam.stance == Stance::Stand && !cam.jump_spent_standing {
+        if let Some(target) = colliders.mantle_target(here, direction, PLAYER_RADIUS, feet, cam.floor, STEP_UP, MANTLE_REACH) {
+            cam.mantle = Some(MantleMove { from: here, from_feet: feet, to: target.land, to_feet: target.top, progress: 0.0, duration: mantle_duration(target.top - feet) });
+            cam.mantles += 1;
+            cam.velocity = Vec2::ZERO;
+            return;
+        }
+    }
+
     let state = step_movement(
         MoveState { velocity: cam.velocity, air_height: cam.air_height, vertical_speed: cam.vertical_speed },
         intent,
-        time.delta_secs(),
+        dt,
     );
-    cam.velocity = state.velocity;
-    cam.air_height = state.air_height;
-    cam.vertical_speed = state.vertical_speed;
 
-    let mut pos = Vec2::new(transform.translation.x, transform.translation.z) + state.velocity * time.delta_secs();
-    pos = pos.clamp(Vec2::splat(-MAP_HALF_SIZE), Vec2::splat(MAP_HALF_SIZE));
-    transform.translation.x = pos.x;
-    transform.translation.z = pos.y;
+    // Move, and get out of whatever that moved the player into.
+    let wanted = (here + state.velocity * dt).clamp(Vec2::splat(-MAP_HALF_SIZE), Vec2::splat(MAP_HALF_SIZE));
+    let feet = cam.floor + state.air_height;
+    let pos = colliders.resolve(wanted, PLAYER_RADIUS, feet, STEP_UP).clamp(Vec2::splat(-MAP_HALF_SIZE), Vec2::splat(MAP_HALF_SIZE));
+    cam.velocity = if pos.distance_squared(wanted) > 1e-8 {
+        // Blocked: keep only the movement that happened (so a wall takes the speed out of a run).
+        ((pos - here) / dt.max(1e-4)).clamp_length_max(state.velocity.length())
+    } else {
+        state.velocity
+    };
 
-    let ground = terrain.height_at(pos);
-    transform.translation.y = ground + cam.air_height + cam.eye_height;
+    // What is underfoot there, and how high the feet are above it now.
+    let floor = terrain.height_at(pos).max(colliders.support(pos, feet, STEP_UP).unwrap_or(f32::MIN));
+    let (air_height, grounded) = settle(feet, state.grounded(), floor, STEP_DOWN);
+    cam.floor = floor;
+    cam.air_height = air_height;
+    cam.vertical_speed = if grounded { 0.0 } else { state.vertical_speed };
+    transform.translation = Vec3::new(pos.x, floor + air_height + cam.eye_height, pos.y);
 }
 
 /// Widens the view a little while sprinting, which makes speed read on screen.
@@ -505,7 +599,7 @@ mod tests {
             .add_systems(Update, player_movement);
         app.world_mut().spawn((
             Transform::from_xyz(0.0, ground + EYE_HEIGHT, 0.0),
-            FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false },
+            FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0 },
         ));
         // Every update advances the clock by exactly 1/60 s, whatever the real time taken.
         app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_secs_f32(1.0 / 60.0)));
@@ -630,5 +724,30 @@ mod tests {
             assert_eq!(next_stance(from, false, false, true, false), Stand, "jump from {from:?}");
         }
         assert_eq!(next_stance(Stand, false, false, false, false), Stand);
+    }
+
+    #[test]
+    fn a_climb_goes_up_first_and_then_across() {
+        let climb = MantleMove { from: Vec2::new(0.0, 0.0), from_feet: 0.0, to: Vec2::new(0.0, -1.0), to_feet: 1.1, progress: 0.0, duration: 0.7 };
+        assert_eq!(climb.at(0.0), (Vec2::ZERO, 0.0));
+        let (end_at, end_feet) = climb.at(1.0);
+        assert!((end_at - Vec2::new(0.0, -1.0)).length() < 1e-5 && (end_feet - 1.1).abs() < 1e-5);
+        // Partway: well up, not yet across.
+        let (mid_at, mid_feet) = climb.at(0.4);
+        assert!(mid_feet > 0.6 * 1.1, "already well up by 40% through: {mid_feet}");
+        assert!(mid_at.length() < 0.35, "but little of the way across: {mid_at:?}");
+        // Always moving the right way, never past either end.
+        let mut last = (0.0, f32::MIN);
+        for i in 0..=100 {
+            let (at, feet) = climb.at(i as f32 / 100.0);
+            assert!(-at.y >= last.0 - 1e-6 && feet >= last.1 - 1e-6 && feet <= 1.1 + 1e-5 && -at.y <= 1.0 + 1e-5);
+            last = (-at.y, feet);
+        }
+    }
+
+    #[test]
+    fn higher_things_take_longer_to_climb() {
+        assert!(mantle_duration(1.8) > mantle_duration(1.0) && mantle_duration(1.0) > mantle_duration(0.6));
+        assert!(mantle_duration(1.8) < 1.2, "but a climb is never a long wait");
     }
 }

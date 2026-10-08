@@ -5,7 +5,7 @@
 //! here. The geometry (where exactly the bullet hit, which way the surface faces, which way chips
 //! fly) is in plain functions so it can be tested without a running game.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::audio::AudioSource;
@@ -13,6 +13,7 @@ use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
+use crate::collision::Material;
 use crate::map::TerrainMap;
 use crate::player::FpsCamera;
 use crate::sound::{arrival_delay, play_after};
@@ -24,6 +25,8 @@ pub enum Surface {
     Ground,
     Water,
     Target,
+    /// A tree, a wall, a hedge, a fence, a building: something solid in the world.
+    Solid(Material),
 }
 
 /// A bullet has landed.
@@ -185,25 +188,189 @@ pub fn push_bounded(queue: &mut VecDeque<Entity>, entity: Entity, limit: usize) 
 
 // ---- assets ---------------------------------------------------------------------------------
 
+/// How a bullet hole looks on each kind of surface.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum HoleStyle {
+    Soil,
+    Wood,
+    Stone,
+    Leaves,
+    Metal,
+}
+
+impl HoleStyle {
+    const ALL: [HoleStyle; 5] = [HoleStyle::Soil, HoleStyle::Wood, HoleStyle::Stone, HoleStyle::Leaves, HoleStyle::Metal];
+
+    /// The colour (0 to 255) of the ragged ring round the hole, and of the hole itself.
+    fn colours(self) -> ([f32; 3], [f32; 3]) {
+        match self {
+            // Churned earth, dark.
+            HoleStyle::Soil => ([58.0, 42.0, 30.0], [12.0, 9.0, 7.0]),
+            // Pale splintered wood round a dark hole.
+            HoleStyle::Wood => ([150.0, 105.0, 62.0], [20.0, 12.0, 6.0]),
+            // Chipped, pale stone.
+            HoleStyle::Stone => ([190.0, 188.0, 180.0], [35.0, 34.0, 32.0]),
+            // Torn leaves.
+            HoleStyle::Leaves => ([40.0, 62.0, 28.0], [10.0, 16.0, 8.0]),
+            // Bright bare metal where the paint has gone.
+            HoleStyle::Metal => ([200.0, 200.0, 205.0], [15.0, 15.0, 18.0]),
+        }
+    }
+}
+
+/// What kind of bits fly off.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ChipKind {
+    Soil,
+    Sand,
+    Splinter,
+    Stone,
+    Leaf,
+    Spark,
+    Droplet,
+}
+
+/// Which recordings a thump is picked from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ThumpKind {
+    Dirt,
+    Target,
+    Stone,
+    Metal,
+}
+
+/// Everything about what a bullet does on one kind of surface.
+#[derive(Clone, Copy, Debug)]
+pub struct Look {
+    pub hole: Option<HoleStyle>,
+    /// How wide the hole is, metres (low, high).
+    pub hole_size: (f32, f32),
+    pub chip: ChipKind,
+    /// How many bits fly off (low, high).
+    pub chips: (f32, f32),
+    /// How many puffs of dust, and what colour.
+    pub puffs: usize,
+    pub dust: Color,
+    pub thump: ThumpKind,
+    /// How fast the recording is played (low, high), and how loud.
+    pub pitch: (f32, f32),
+    pub volume: f32,
+}
+
+/// What a bullet does when it lands on `surface`, at height `y` (low ground by the shore is sand).
+pub fn look(surface: Surface, y: f32) -> Look {
+    let sandy = y < 2.5;
+    match surface {
+        Surface::Ground => Look {
+            hole: Some(HoleStyle::Soil),
+            hole_size: (0.1, 0.15),
+            chip: if sandy { ChipKind::Sand } else { ChipKind::Soil },
+            chips: (9.0, 15.0),
+            puffs: 3,
+            dust: if sandy { Color::srgba(0.75, 0.68, 0.52, 0.45) } else { Color::srgba(0.45, 0.38, 0.3, 0.45) },
+            thump: ThumpKind::Dirt,
+            pitch: (0.88, 1.1),
+            volume: 1.0,
+        },
+        Surface::Water => Look {
+            hole: None,
+            hole_size: (0.0, 0.0),
+            chip: ChipKind::Droplet,
+            chips: (8.0, 13.0),
+            puffs: 3,
+            dust: Color::srgba(0.85, 0.9, 0.95, 0.35),
+            thump: ThumpKind::Dirt,
+            pitch: (0.6, 0.72),
+            volume: 0.55,
+        },
+        Surface::Target => Look {
+            hole: Some(HoleStyle::Wood),
+            hole_size: (0.07, 0.1),
+            chip: ChipKind::Splinter,
+            chips: (5.0, 9.0),
+            puffs: 1,
+            dust: Color::srgba(0.45, 0.38, 0.3, 0.45),
+            thump: ThumpKind::Target,
+            pitch: (0.92, 1.08),
+            volume: 1.0,
+        },
+        Surface::Solid(Material::Wood) => Look {
+            hole: Some(HoleStyle::Wood),
+            hole_size: (0.06, 0.1),
+            chip: ChipKind::Splinter,
+            chips: (6.0, 10.0),
+            puffs: 1,
+            dust: Color::srgba(0.55, 0.45, 0.3, 0.4),
+            thump: ThumpKind::Target,
+            // Lower than the target dummy: a deeper, heavier knock.
+            pitch: (0.78, 0.9),
+            volume: 1.0,
+        },
+        Surface::Solid(Material::Stone) => Look {
+            hole: Some(HoleStyle::Stone),
+            hole_size: (0.08, 0.12),
+            chip: ChipKind::Stone,
+            chips: (8.0, 13.0),
+            puffs: 2,
+            dust: Color::srgba(0.78, 0.77, 0.73, 0.5),
+            thump: ThumpKind::Stone,
+            pitch: (0.92, 1.08),
+            volume: 1.0,
+        },
+        Surface::Solid(Material::Leaves) => Look {
+            hole: Some(HoleStyle::Leaves),
+            hole_size: (0.07, 0.1),
+            chip: ChipKind::Leaf,
+            chips: (8.0, 14.0),
+            puffs: 0,
+            dust: Color::NONE,
+            // A bullet into foliage barely makes a sound: the dirt thump, small and high.
+            thump: ThumpKind::Dirt,
+            pitch: (1.2, 1.4),
+            volume: 0.4,
+        },
+        Surface::Solid(Material::Metal) => Look {
+            hole: Some(HoleStyle::Metal),
+            hole_size: (0.05, 0.08),
+            chip: ChipKind::Spark,
+            chips: (6.0, 10.0),
+            puffs: 0,
+            dust: Color::NONE,
+            thump: ThumpKind::Metal,
+            pitch: (0.95, 1.1),
+            volume: 1.0,
+        },
+    }
+}
+
 #[derive(Resource)]
 pub struct ImpactAssets {
     hole_mesh: Handle<Mesh>,
-    hole_material: Handle<StandardMaterial>,
+    hole_materials: HashMap<HoleStyle, Handle<StandardMaterial>>,
     chip_mesh: Handle<Mesh>,
     soil: Vec<Handle<StandardMaterial>>,
-    sand: Handle<StandardMaterial>,
-    splinter: Handle<StandardMaterial>,
-    droplet: Handle<StandardMaterial>,
+    chip_materials: HashMap<ChipKind, Handle<StandardMaterial>>,
     dust_mesh: Handle<Mesh>,
     pub dirt_sounds: Vec<Handle<AudioSource>>,
     pub target_sounds: Vec<Handle<AudioSource>>,
+    pub stone_sounds: Vec<Handle<AudioSource>>,
+    pub metal_sounds: Vec<Handle<AudioSource>>,
     rng: Rng,
     holes: VecDeque<Entity>,
 }
 
 impl ImpactAssets {
     pub fn sounds(&self) -> impl Iterator<Item = &Handle<AudioSource>> {
-        self.dirt_sounds.iter().chain(&self.target_sounds)
+        self.dirt_sounds.iter().chain(&self.target_sounds).chain(&self.stone_sounds).chain(&self.metal_sounds)
+    }
+
+    fn thumps(&self, kind: ThumpKind) -> &[Handle<AudioSource>] {
+        match kind {
+            ThumpKind::Dirt => &self.dirt_sounds,
+            ThumpKind::Target => &self.target_sounds,
+            ThumpKind::Stone => &self.stone_sounds,
+            ThumpKind::Metal => &self.metal_sounds,
+        }
     }
 }
 
@@ -244,10 +411,11 @@ pub struct Dust {
     material: Handle<StandardMaterial>,
 }
 
-/// The picture of a bullet hole, drawn in code: a dark hole in a ragged ring of churned earth that
-/// fades out into the ground around it.
-fn hole_image() -> Image {
+/// The picture of a bullet hole, drawn in code: a dark hole in a ragged ring of churned material
+/// that fades out into the surface around it.
+fn hole_image(style: HoleStyle) -> Image {
     const N: usize = 64;
+    let (ring, core) = style.colours();
     let hash = |x: i32, y: i32| -> f32 {
         let mut h = (x as u32).wrapping_mul(0x9E37_79B1) ^ (y as u32).wrapping_mul(0x85EB_CA6B);
         h ^= h >> 15;
@@ -260,20 +428,20 @@ fn hole_image() -> Image {
         for x in 0..N {
             let (u, v) = ((x as f32 + 0.5) / N as f32 * 2.0 - 1.0, (y as f32 + 0.5) / N as f32 * 2.0 - 1.0);
             let r = (u * u + v * v).sqrt();
-            // A ragged edge: the radius of the disturbed earth varies with the angle.
+            // A ragged edge: the radius of the disturbed material varies with the angle.
             let angle = v.atan2(u);
             let ragged = 0.55 + 0.30 * hash((angle * 5.0).floor() as i32, 7) + 0.1 * (angle * 3.0).sin();
             let grain = hash(x as i32, y as i32);
             let (colour, alpha) = if r < 0.10 {
-                ([12.0, 9.0, 7.0], 1.0)
+                (core, 1.0)
             } else if r < ragged {
                 let fade = 1.0 - ((r - 0.10) / (ragged - 0.10)).clamp(0.0, 1.0);
                 let shade = 0.65 + 0.7 * grain;
-                ([58.0 * shade, 42.0 * shade, 30.0 * shade], (fade * 1.3).min(1.0) * 0.92)
+                ([ring[0] * shade, ring[1] * shade, ring[2] * shade], (fade * 1.3).min(1.0) * 0.92)
             } else {
                 ([0.0, 0.0, 0.0], 0.0)
             };
-            data.extend_from_slice(&[colour[0] as u8, colour[1] as u8, colour[2] as u8, (alpha * 255.0) as u8]);
+            data.extend_from_slice(&[colour[0].min(255.0) as u8, colour[1].min(255.0) as u8, colour[2].min(255.0) as u8, (alpha * 255.0) as u8]);
         }
     }
     Image::new(
@@ -293,18 +461,41 @@ fn load_assets(
     mut images: ResMut<Assets<Image>>,
 ) {
     let matte = |colour: Color| StandardMaterial { base_color: colour, perceptual_roughness: 1.0, reflectance: 0.05, ..default() };
-    let hole_texture = images.add(hole_image());
+    let hole_materials = HoleStyle::ALL
+        .iter()
+        .map(|&style| {
+            let texture = images.add(hole_image(style));
+            let material = materials.add(StandardMaterial {
+                base_color_texture: Some(texture),
+                alpha_mode: AlphaMode::Blend,
+                perceptual_roughness: 1.0,
+                reflectance: 0.02,
+                // The hole is laid a centimetre off the surface; this keeps it from fighting with it.
+                depth_bias: 4.0,
+                ..default()
+            });
+            (style, material)
+        })
+        .collect();
+    let chip_materials = [
+        (ChipKind::Sand, matte(Color::srgb(0.68, 0.6, 0.42))),
+        (ChipKind::Splinter, matte(Color::srgb(0.72, 0.58, 0.38))),
+        (ChipKind::Stone, matte(Color::srgb(0.62, 0.61, 0.58))),
+        (ChipKind::Leaf, matte(Color::srgb(0.22, 0.38, 0.1))),
+        // Sparks glow: lit by nothing, bright enough to bloom.
+        (ChipKind::Spark, StandardMaterial { base_color: Color::linear_rgb(30.0, 16.0, 3.0), unlit: true, ..default() }),
+        (
+            ChipKind::Droplet,
+            StandardMaterial { base_color: Color::srgba(0.85, 0.92, 0.96, 0.8), alpha_mode: AlphaMode::Blend, perceptual_roughness: 0.2, ..default() },
+        ),
+    ]
+    .into_iter()
+    .map(|(kind, material)| (kind, materials.add(material)))
+    .collect();
+    let sounds = |name: &str, count: usize| -> Vec<Handle<AudioSource>> { (1..=count).map(|i| asset_server.load(format!("sounds/impact/{name}_{i}.wav"))).collect() };
     commands.insert_resource(ImpactAssets {
         hole_mesh: meshes.add(Rectangle::new(1.0, 1.0)),
-        hole_material: materials.add(StandardMaterial {
-            base_color_texture: Some(hole_texture),
-            alpha_mode: AlphaMode::Blend,
-            perceptual_roughness: 1.0,
-            reflectance: 0.02,
-            // The hole is laid a centimetre off the surface; this keeps it from fighting with it.
-            depth_bias: 4.0,
-            ..default()
-        }),
+        hole_materials,
         chip_mesh: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
         soil: vec![
             materials.add(matte(Color::srgb(0.20, 0.14, 0.09))),
@@ -312,17 +503,12 @@ fn load_assets(
             materials.add(matte(Color::srgb(0.16, 0.12, 0.08))),
             materials.add(matte(Color::srgb(0.25, 0.27, 0.12))),
         ],
-        sand: materials.add(matte(Color::srgb(0.68, 0.6, 0.42))),
-        splinter: materials.add(matte(Color::srgb(0.72, 0.58, 0.38))),
-        droplet: materials.add(StandardMaterial {
-            base_color: Color::srgba(0.85, 0.92, 0.96, 0.8),
-            alpha_mode: AlphaMode::Blend,
-            perceptual_roughness: 0.2,
-            ..default()
-        }),
+        chip_materials,
         dust_mesh: meshes.add(Sphere::new(1.0).mesh().ico(1).expect("icosphere")),
-        dirt_sounds: (1..=3).map(|i| asset_server.load(format!("sounds/impact/dirt_{i}.wav"))).collect(),
-        target_sounds: (1..=2).map(|i| asset_server.load(format!("sounds/impact/target_{i}.wav"))).collect(),
+        dirt_sounds: sounds("dirt", 3),
+        target_sounds: sounds("target", 2),
+        stone_sounds: sounds("stone", 2),
+        metal_sounds: sounds("metal", 2),
         rng: Rng(0x2545_F491),
         holes: VecDeque::new(),
     });
@@ -358,6 +544,7 @@ fn spawn_impacts(
         stats.impacts += 1;
         stats.last = Some((impact.surface, impact.normal));
         stats.last_position = Some(impact.position);
+        let look = look(impact.surface, impact.position.y);
         let mut rng = assets.rng;
         // Mix the position in, so repeated impacts on one spot still differ.
         rng.0 ^= (impact.position.x * 1000.0) as i32 as u32 ^ ((impact.position.z * 1000.0) as i32 as u32).rotate_left(11);
@@ -365,20 +552,15 @@ fn spawn_impacts(
             rng.0 = 0x2545_F491;
         }
 
-        // The bullet hole (not in water).
-        if impact.surface != Surface::Water {
-            let size = if impact.surface == Surface::Target { rng.range(0.07, 0.1) } else { rng.range(0.1, 0.15) };
+        // The bullet hole.
+        if let Some(style) = look.hole {
+            let size = rng.range(look.hole_size.0, look.hole_size.1);
             let rotation = lay_flat(impact.normal, rng.range(0.0, std::f32::consts::TAU));
             let world = Transform { translation: impact.position + impact.normal * HOLE_LIFT, rotation, scale: Vec3::new(size, size, 1.0) };
-            let hole = (
-                BulletHole,
-                Mesh3d(assets.hole_mesh.clone()),
-                MeshMaterial3d(assets.hole_material.clone()),
-                NotShadowCaster,
-            );
+            let hole = (BulletHole, Mesh3d(assets.hole_mesh.clone()), MeshMaterial3d(assets.hole_materials[&style].clone()), NotShadowCaster);
             let parent = impact.target.and_then(|t| globals.get(t).ok().map(|g| (t, *g)));
             let entity = match parent {
-                // A hole in an object moves with it.
+                // A hole in an object that moves goes with it.
                 Some((target, global)) => {
                     let into_local = global.affine().inverse();
                     let local = Transform {
@@ -402,26 +584,25 @@ fn spawn_impacts(
             stats.holes += 1;
         }
 
-        // Chips of dirt, splinters of the target, or drops of water.
-        let (count, material) = match impact.surface {
-            Surface::Ground => {
-                let sandy = impact.position.y < 2.5;
-                let material = if sandy { assets.sand.clone() } else { assets.soil[(rng.next() * assets.soil.len() as f32) as usize % assets.soil.len()].clone() };
-                (rng.range(9.0, 15.0) as usize, material)
-            }
-            Surface::Target => (rng.range(5.0, 9.0) as usize, assets.splinter.clone()),
-            Surface::Water => (rng.range(8.0, 13.0) as usize, assets.droplet.clone()),
+        // Bits flying off.
+        let count = rng.range(look.chips.0, look.chips.1) as usize;
+        let material = match look.chip {
+            ChipKind::Soil => assets.soil[(rng.next() * assets.soil.len() as f32) as usize % assets.soil.len()].clone(),
+            kind => assets.chip_materials[&kind].clone(),
         };
         // A faster bullet throws things harder (a bullet from far off lands slowly).
         let energy = (impact.speed / 350.0).clamp(0.4, 1.2);
-        for chip in chips(impact.normal, energy, count, &mut rng) {
+        // Sparks fly fast and are gone almost at once.
+        let (pace, span) = if look.chip == ChipKind::Spark { (1.5, 0.3) } else { (1.0, 1.0) };
+        for chip in chips(impact.normal, energy * pace, count, &mut rng) {
             if chip_count >= MAX_CHIPS {
                 break;
             }
             chip_count += 1;
             stats.chips += 1;
+            let life = chip.life * span;
             commands.spawn((
-                Chipping { velocity: chip.velocity, life: chip.life, total: chip.life, size: chip.size },
+                Chipping { velocity: chip.velocity, life, total: life, size: chip.size },
                 Mesh3d(assets.chip_mesh.clone()),
                 MeshMaterial3d(material.clone()),
                 Transform::from_translation(impact.position + impact.normal * 0.02)
@@ -431,50 +612,40 @@ fn spawn_impacts(
             ));
         }
 
-        // A puff of dust (or mist off the water) that swells, drifts with the wind and thins out.
-        if impact.surface != Surface::Target || rng.next() < 0.5 {
-            let colour = match impact.surface {
-                Surface::Water => Color::srgba(0.85, 0.9, 0.95, 0.35),
-                _ if impact.position.y < 2.5 => Color::srgba(0.75, 0.68, 0.52, 0.45),
-                _ => Color::srgba(0.45, 0.38, 0.3, 0.45),
-            };
-            for _ in 0..(if impact.surface == Surface::Target { 1 } else { 3 }) {
-                if dust_count >= MAX_DUST {
-                    break;
-                }
-                dust_count += 1;
-                stats.puffs += 1;
-                let material = materials.add(StandardMaterial { base_color: colour, alpha_mode: AlphaMode::Blend, unlit: false, perceptual_roughness: 1.0, ..default() });
-                let total = rng.range(0.7, 1.3);
-                let size = rng.range(0.07, 0.12);
-                commands.spawn((
-                    Dust {
-                        velocity: impact.normal * rng.range(0.4, 1.0) + breeze * 0.25 + Vec3::new(rng.range(-0.3, 0.3), 0.0, rng.range(-0.3, 0.3)),
-                        life: total,
-                        total,
-                        size,
-                        opacity: colour.alpha(),
-                        material: material.clone(),
-                    },
-                    Mesh3d(assets.dust_mesh.clone()),
-                    MeshMaterial3d(material),
-                    Transform::from_translation(impact.position + impact.normal * 0.05).with_scale(Vec3::splat(size)),
-                    NotShadowCaster,
-                ));
+        // Puffs of dust (or mist off the water) that swell, drift with the wind and thin out.
+        let puffs = if impact.surface == Surface::Target && rng.next() < 0.5 { 0 } else { look.puffs };
+        for _ in 0..puffs {
+            if dust_count >= MAX_DUST {
+                break;
             }
+            dust_count += 1;
+            stats.puffs += 1;
+            let material = materials.add(StandardMaterial { base_color: look.dust, alpha_mode: AlphaMode::Blend, unlit: false, perceptual_roughness: 1.0, ..default() });
+            let total = rng.range(0.7, 1.3);
+            let size = rng.range(0.07, 0.12);
+            commands.spawn((
+                Dust {
+                    velocity: impact.normal * rng.range(0.4, 1.0) + breeze * 0.25 + Vec3::new(rng.range(-0.3, 0.3), 0.0, rng.range(-0.3, 0.3)),
+                    life: total,
+                    total,
+                    size,
+                    opacity: look.dust.alpha(),
+                    material: material.clone(),
+                },
+                Mesh3d(assets.dust_mesh.clone()),
+                MeshMaterial3d(material),
+                Transform::from_translation(impact.position + impact.normal * 0.05).with_scale(Vec3::splat(size)),
+                NotShadowCaster,
+            ));
         }
 
         // The thump, placed where it happened, and arriving after the time sound takes to travel.
-        let (sounds, speed, volume) = match impact.surface {
-            Surface::Target => (&assets.target_sounds, rng.range(0.92, 1.08), 1.0),
-            Surface::Ground => (&assets.dirt_sounds, rng.range(0.88, 1.1), 1.0),
-            // Water: the dirt thump, lower and softer.
-            Surface::Water => (&assets.dirt_sounds, rng.range(0.6, 0.72), 0.55),
-        };
+        let sounds = assets.thumps(look.thump);
         if !sounds.is_empty() {
             let pick = sounds[(rng.next() * sounds.len() as f32) as usize % sounds.len()].clone();
+            let speed = rng.range(look.pitch.0, look.pitch.1);
             let distance = listener.single().map_or(0.0, |ear| ear.translation.distance(impact.position));
-            play_after(&mut commands, arrival_delay(distance), pick, speed, volume, Some(impact.position));
+            play_after(&mut commands, arrival_delay(distance), pick, speed, look.volume, Some(impact.position));
             stats.thumps += 1;
         }
         assets.rng = rng;
@@ -683,7 +854,7 @@ mod tests {
 
     #[test]
     fn the_bullet_hole_picture_has_a_dark_centre_and_clear_edges() {
-        let image = hole_image();
+        let image = hole_image(HoleStyle::Soil);
         let data = image.data.as_ref().expect("pixels");
         let pixel = |x: usize, y: usize| &data[(y * 64 + x) * 4..(y * 64 + x) * 4 + 4];
         let centre = pixel(32, 32);
@@ -692,5 +863,49 @@ mod tests {
         assert_eq!(pixel(63, 31)[3], 0, "and at the edges");
         let ring = pixel(32 + 12, 32);
         assert!(ring[3] > 60, "churned earth round the hole: {ring:?}");
+    }
+
+    #[test]
+    fn every_surface_but_water_leaves_a_hole() {
+        for surface in [Surface::Ground, Surface::Target, Surface::Solid(Material::Wood), Surface::Solid(Material::Stone), Surface::Solid(Material::Leaves), Surface::Solid(Material::Metal)] {
+            let look = look(surface, 50.0);
+            assert!(look.hole.is_some(), "{surface:?}");
+            assert!(look.hole_size.0 > 0.0 && look.hole_size.1 >= look.hole_size.0);
+        }
+        assert!(look(Surface::Water, 0.0).hole.is_none());
+    }
+
+    #[test]
+    fn each_material_throws_its_own_kind_of_bits_and_makes_its_own_sound() {
+        let of = |m| look(Surface::Solid(m), 50.0);
+        assert_eq!(of(Material::Wood).chip, ChipKind::Splinter);
+        assert_eq!(of(Material::Stone).chip, ChipKind::Stone);
+        assert_eq!(of(Material::Leaves).chip, ChipKind::Leaf);
+        assert_eq!(of(Material::Metal).chip, ChipKind::Spark);
+        assert_eq!(of(Material::Stone).thump, ThumpKind::Stone);
+        assert_eq!(of(Material::Metal).thump, ThumpKind::Metal);
+        // The holes differ too, so a wall doesn't look like a tree.
+        let styles: std::collections::HashSet<_> = [Material::Wood, Material::Stone, Material::Leaves, Material::Metal].into_iter().map(|m| of(m).hole).collect();
+        assert_eq!(styles.len(), 4);
+        // Foliage is quiet.
+        assert!(of(Material::Leaves).volume < of(Material::Stone).volume * 0.6);
+    }
+
+    #[test]
+    fn low_ground_by_the_shore_throws_sand() {
+        assert_eq!(look(Surface::Ground, 1.0).chip, ChipKind::Sand);
+        assert_eq!(look(Surface::Ground, 30.0).chip, ChipKind::Soil);
+    }
+
+    #[test]
+    fn the_hole_pictures_differ_by_surface() {
+        let ring = |style| {
+            let image = hole_image(style);
+            let data = image.data.expect("pixels");
+            let at = (32 * 64 + 32 + 12) * 4;
+            [data[at], data[at + 1], data[at + 2]]
+        };
+        assert_ne!(ring(HoleStyle::Stone), ring(HoleStyle::Soil));
+        assert!(ring(HoleStyle::Stone)[0] > ring(HoleStyle::Soil)[0] * 2, "stone scars are pale, soil dark");
     }
 }

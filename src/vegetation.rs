@@ -96,6 +96,21 @@ impl Species {
         }
     }
 
+    /// The radius of the trunk near the ground, metres (before the tree's own size is applied),
+    /// as the models are grown; it is what a person bumps into.
+    pub fn trunk_radius(self) -> f32 {
+        match self {
+            Species::Oak => 0.5,
+            Species::Beech => 0.38,
+            Species::Birch => 0.17,
+            Species::Maple => 0.3,
+            Species::Apple => 0.16,
+            Species::Spruce => 0.27,
+            Species::Pine => 0.25,
+            Species::Hawthorn | Species::Gorse => 0.0,
+        }
+    }
+
     fn is_bush(self) -> bool {
         matches!(self, Species::Hawthorn | Species::Gorse)
     }
@@ -811,6 +826,17 @@ impl VegetationPlan {
         self.chunks.values().flatten().map(|i| (i.species, i.pos)).collect()
     }
 
+    /// Every tree's trunk is solid (a person walks round it, and can't climb it); shrubs are not,
+    /// as they are pushed through.
+    pub fn add_colliders(&self, colliders: &mut crate::collision::Colliders) {
+        for tree in self.chunks.values().flatten().filter(|t| !t.species.is_bush()) {
+            colliders.add(
+                crate::collision::Solid::circle(Vec2::new(tree.pos.x, tree.pos.z), tree.species.trunk_radius() * tree.scale * 1.15, tree.pos.y + TREE_SOLID_HEIGHT)
+                    .of(crate::collision::Material::Wood),
+            );
+        }
+    }
+
     pub fn tree_count(&self) -> usize {
         self.chunks.values().map(Vec::len).sum()
     }
@@ -831,6 +857,9 @@ fn zone_at(map: &TerrainMap, zones: &ZoneMap, p: Vec2) -> Zone {
     let iz = (((p.y + HALF_SIZE) / CELL).round().max(0.0) as usize).min(n - 1);
     zones.zone_at(ix, iz)
 }
+
+/// How high a trunk is for collision: well above anything a person can climb.
+const TREE_SOLID_HEIGHT: f32 = 6.0;
 
 /// Decides where every tree and shrub goes. `hedge_points` are spots along hedgerows where an
 /// occasional full-size tree stands.
@@ -929,8 +958,10 @@ pub fn spawn_vegetation(
     map: &TerrainMap,
     zones: &ZoneMap,
     hedge_points: &[Vec2],
+    colliders: &mut crate::collision::Colliders,
 ) {
     let plan = plan_vegetation(map, zones, hedge_points);
+    plan.add_colliders(colliders);
     // The blob dimensions come from the same generated variants the detailed trees use.
     let blob_dims: HashMap<Species, Vec<(Vec3, Vec3, f32)>> = Species::ALL
         .iter()

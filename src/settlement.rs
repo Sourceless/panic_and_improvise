@@ -4,6 +4,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
 
+use crate::collision::{Colliders, Solid};
 use crate::map::{PoiKind, TerrainMap};
 
 #[derive(Component)]
@@ -23,10 +24,31 @@ struct Palette {
     unit_gable: Handle<Mesh>,
 }
 
+/// The solid footprint of a part, for collision: a part without one (a roof, a cone, a wheel)
+/// can't be bumped into.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Footprint {
+    /// A rectangular block this big (width, height, depth), before it is turned.
+    Block(Vec3),
+    Cylinder { radius: f32, height: f32 },
+}
+
 struct Part {
     mesh: Handle<Mesh>,
     material: Handle<StandardMaterial>,
     transform: Transform,
+    solid: Option<Footprint>,
+}
+
+/// The solid a part makes in the world, given where its settlement stands (`origin`: its ground
+/// point) and the part's own transform, relative to that.
+fn solid_for(origin: Vec3, transform: &Transform, footprint: Footprint) -> Solid {
+    let centre = Vec2::new(origin.x + transform.translation.x, origin.z + transform.translation.z);
+    let yaw = transform.rotation.to_euler(EulerRot::YXZ).0;
+    match footprint {
+        Footprint::Block(size) => Solid::rect(centre, Vec2::new(size.x, size.z) * 0.5, yaw, origin.y + transform.translation.y + size.y * 0.5),
+        Footprint::Cylinder { radius, height } => Solid::circle(centre, radius, origin.y + transform.translation.y + height * 0.5),
+    }
 }
 
 pub fn spawn_settlements(
@@ -34,6 +56,7 @@ pub fn spawn_settlements(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     map: &TerrainMap,
+    colliders: &mut Colliders,
 ) {
     let mut colour = |r: f32, g: f32, b: f32| {
         materials.add(StandardMaterial {
@@ -82,7 +105,11 @@ pub fn spawn_settlements(
             PoiKind::Farm => farm(meshes, &palette, &mut rng),
             PoiKind::Mill => mill(meshes, &palette),
         };
+        let origin = Vec3::new(poi.position.x, ground, poi.position.y);
         for part in parts {
+            if let Some(footprint) = part.solid {
+                colliders.add(solid_for(origin, &part.transform, footprint));
+            }
             let child = commands
                 .spawn((
                     Mesh3d(part.mesh),
@@ -161,11 +188,11 @@ fn village(
 fn church(meshes: &mut Assets<Mesh>, palette: &Palette) -> Vec<Part> {
     let mut parts = Vec::new();
     let nave = Vec3::new(7.0, 6.0, 14.0);
-    push(&mut parts, meshes.add(Cuboid::new(nave.x, nave.y, nave.z)), palette.stone.clone(), Transform::from_xyz(0.0, nave.y / 2.0, 0.0));
+    push_solid(&mut parts, meshes.add(Cuboid::new(nave.x, nave.y, nave.z)), palette.stone.clone(), Transform::from_xyz(0.0, nave.y / 2.0, 0.0), Footprint::Block(nave));
     let roof = meshes.add(gable(nave.z, nave.x, 3.5));
     push(&mut parts, roof, palette.slate.clone(), Transform::from_xyz(0.0, nave.y, 0.0).with_rotation(Quat::from_rotation_y(FRAC_PI_2)));
     let tower_pos = Vec3::new(0.0, 8.0, -9.0);
-    push(&mut parts, meshes.add(Cuboid::new(5.0, 16.0, 5.0)), palette.stone.clone(), Transform::from_translation(tower_pos));
+    push_solid(&mut parts, meshes.add(Cuboid::new(5.0, 16.0, 5.0)), palette.stone.clone(), Transform::from_translation(tower_pos), Footprint::Block(Vec3::new(5.0, 16.0, 5.0)));
     push(&mut parts, meshes.add(Cone::new(3.2, 7.0)), palette.slate.clone(), Transform::from_xyz(0.0, 16.0 + 3.5, -9.0));
     parts
 }
@@ -211,26 +238,28 @@ fn farm(meshes: &mut Assets<Mesh>, palette: &Palette, rng: &mut Rng) -> Vec<Part
     );
     for x in [-4.0, 0.0] {
         let j = jitter(rng);
-        push(
+        push_solid(
             &mut parts,
             meshes.add(Cylinder::new(2.6, 9.5)),
             palette.white.clone(),
             Transform::from_xyz(x - 2.0 + j.x, 4.75, -9.0 + j.y),
+            Footprint::Cylinder { radius: 2.6, height: 9.5 },
         );
     }
     let j = jitter(rng);
-    push(
+    push_solid(
         &mut parts,
         meshes.add(Cylinder::new(3.0, 12.0)),
         palette.stone.clone(),
         Transform::from_xyz(-14.0 + j.x, 6.0, 14.0 + j.y),
+        Footprint::Cylinder { radius: 3.0, height: 12.0 },
     );
     parts
 }
 
 fn mill(meshes: &mut Assets<Mesh>, palette: &Palette) -> Vec<Part> {
     let mut parts = Vec::new();
-    push(&mut parts, meshes.add(Cylinder::new(3.8, 11.0)), palette.stone.clone(), Transform::from_xyz(0.0, 5.5, 0.0));
+    push_solid(&mut parts, meshes.add(Cylinder::new(3.8, 11.0)), palette.stone.clone(), Transform::from_xyz(0.0, 5.5, 0.0), Footprint::Cylinder { radius: 3.8, height: 11.0 });
     push(&mut parts, meshes.add(Cone::new(4.6, 4.5)), palette.tile.clone(), Transform::from_xyz(0.0, 13.25, 0.0));
     push(
         &mut parts,
@@ -260,11 +289,12 @@ fn house(
             .with_rotation(rotation)
             .with_scale(scale)
     };
-    push(
+    push_solid(
         parts,
         palette.unit_cube.clone(),
         walls,
         local(Vec3::new(0.0, wall_height / 2.0, 0.0), Vec3::new(width, wall_height, depth)),
+        Footprint::Block(Vec3::new(width, wall_height, depth)),
     );
     push(
         parts,
@@ -275,7 +305,12 @@ fn house(
 }
 
 fn push(parts: &mut Vec<Part>, mesh: Handle<Mesh>, material: Handle<StandardMaterial>, transform: Transform) {
-    parts.push(Part { mesh, material, transform });
+    parts.push(Part { mesh, material, transform, solid: None });
+}
+
+/// A part that can be bumped into.
+fn push_solid(parts: &mut Vec<Part>, mesh: Handle<Mesh>, material: Handle<StandardMaterial>, transform: Transform, solid: Footprint) {
+    parts.push(Part { mesh, material, transform, solid: Some(solid) });
 }
 
 // A pitched roof whose ridge runs along X, with gable ends, built from flat-shaded triangles.
@@ -332,5 +367,35 @@ impl Rng {
 
     fn range(&mut self, lo: f32, hi: f32) -> f32 {
         lo + (hi - lo) * self.unit()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_house_makes_a_solid_where_and_how_it_is_drawn() {
+        // A house 8 x 6 m turned 0.6 radians, standing on ground at 20 m in a settlement at (100, 50).
+        let origin = Vec3::new(100.0, 20.0, 50.0);
+        let yaw = 0.6;
+        let transform = Transform::from_translation(Vec3::new(3.0, 2.0, -5.0)).with_rotation(Quat::from_rotation_y(yaw)).with_scale(Vec3::new(8.0, 4.0, 6.0));
+        let solid = solid_for(origin, &transform, Footprint::Block(Vec3::new(8.0, 4.0, 6.0)));
+        assert!((solid.top_at(Vec2::ZERO) - 24.0).abs() < 1e-4, "walls reach 4 m above the ground: {}", solid.top_at(Vec2::ZERO));
+        // The corners of the drawn house are on the solid's edge, so it's turned the same way.
+        let corner = transform.transform_point(Vec3::new(0.5, 0.0, 0.5));
+        let (distance, _) = solid.shape.separation(Vec2::new(origin.x + corner.x, origin.z + corner.z));
+        assert!(distance.abs() < 1e-3, "corner is {distance} m from the solid's edge");
+        let middle = Vec2::new(origin.x + 3.0, origin.z - 5.0);
+        assert!(solid.shape.separation(middle).0 < -2.9, "the middle is well inside");
+    }
+
+    #[test]
+    fn a_silo_makes_a_round_solid() {
+        let transform = Transform::from_xyz(-4.0, 4.75, -9.0);
+        let solid = solid_for(Vec3::new(10.0, 5.0, 10.0), &transform, Footprint::Cylinder { radius: 2.6, height: 9.5 });
+        assert!((solid.top_at(Vec2::ZERO) - 14.5).abs() < 1e-4);
+        let (distance, _) = solid.shape.separation(Vec2::new(6.0 + 2.6 + 1.0, 1.0));
+        assert!((distance - 1.0).abs() < 1e-4);
     }
 }

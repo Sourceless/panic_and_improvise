@@ -7,6 +7,8 @@ Sources (all CC0; see assets/CREDITS.md):
   clipload1.wav, clipload2.wav  https://opengameart.org/content/gun-reload-sound-effects
   bfh1_wood_hit_02, bfh1_hit_02, bfh1_wood_hit_01
                               https://opengameart.org/content/75-cc0-breaking-falling-hit-sfx
+  bfh1_rock_hit_01, bfh1_hit_08  (same pack)
+  clink2.wav, clink3.wav      https://opengameart.org/content/metal-impact-sounds
   thwack-02.wav, thwack-03.wav  https://opengameart.org/content/thwack-sounds
 
 The 75-sound pack is .ogg; convert those to .wav first, e.g.
@@ -18,7 +20,9 @@ Outputs, all mono 48 kHz 16-bit, under assets/sounds/:
   gun/reload_charge.wav    the whole recording, with the slide racked: for a gun whose bolt was forward
   gun/dry_click_{1,2}.wav  the trigger pulled with nothing to fire
   impact/dirt_{1,2,3}.wav  a bullet hitting soil: dull thumps
-  impact/target_{1,2}.wav  a bullet hitting the target dummy: sharper knocks
+  impact/target_{1,2}.wav  a bullet hitting the target dummy (and wood): sharper knocks
+  impact/stone_{1,2}.wav   a bullet chipping stone: a hard tock
+  impact/metal_{1,2}.wav   a bullet on sheet metal: a short clink
 
 Usage: python3 tools/make_gun_sounds.py "<directory of the .wav sources>"
 """
@@ -88,6 +92,12 @@ def main():
     # The target dummy is harder, so sharper.
     save(f"{OUT}/impact/target_1.wav", cut(load(folder, "bfh1_wood_hit_01"), 0.0, 0.25, fade_out=0.05))
     save(f"{OUT}/impact/target_2.wav", cut(load(folder, "thwack-02"), 0.0, 0.21, fade_out=0.05))
+    # Stone is harder still: a short, dry tock.
+    save(f"{OUT}/impact/stone_1.wav", cut(load(folder, "bfh1_rock_hit_01"), 0.0, 0.11, fade_out=0.03))
+    save(f"{OUT}/impact/stone_2.wav", cut(load(folder, "bfh1_hit_08"), 0.0, 0.3, fade_out=0.08))
+    # Metal rings, briefly.
+    save(f"{OUT}/impact/metal_1.wav", cut(load(folder, "clink2"), 0.0, 0.3, fade_out=0.1))
+    save(f"{OUT}/impact/metal_2.wav", cut(load(folder, "clink3"), 0.0, 0.3, fade_out=0.1))
 
 
 if __name__ == "__main__":

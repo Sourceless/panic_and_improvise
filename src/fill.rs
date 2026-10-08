@@ -7,6 +7,7 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::collections::BinaryHeap;
 
+use crate::collision::{Colliders, Material, Solid};
 use crate::contour::{clip_to_terrain_triangle, triangulate, Contour, Seg, Smoothing, OPEN};
 use crate::field_material::{FieldExtension, FieldMaterial};
 use crate::map::{fbm, grid_pos, TerrainMap, CELL, TILE_CELLS};
@@ -28,12 +29,13 @@ pub fn spawn_fill(
     zones: &ZoneMap,
     roads: &RoadNetwork,
     params: &GenParams,
+    colliders: &mut Colliders,
 ) {
-    let hedge_points = spawn_field_tiling(commands, meshes, materials, field_materials, textures, map, zones, roads, params);
+    let hedge_points = spawn_field_tiling(commands, meshes, materials, field_materials, textures, map, zones, roads, params, colliders);
     if !crate::world::skip("trees") {
-        crate::vegetation::spawn_vegetation(commands, meshes, materials, map, zones, &hedge_points);
+        crate::vegetation::spawn_vegetation(commands, meshes, materials, map, zones, &hedge_points, colliders);
     }
-    spawn_sheds(commands, meshes, materials, map, zones);
+    spawn_sheds(commands, meshes, materials, map, zones, colliders);
 }
 
 const SMOOTH_PASSES: u32 = 2;
@@ -63,6 +65,7 @@ fn spawn_field_tiling(
     zones: &ZoneMap,
     roads: &RoadNetwork,
     params: &GenParams,
+    colliders: &mut Colliders,
 ) -> Vec<Vec2> {
     let n = map.grid_size();
     let farms: Vec<Vec2> = map
@@ -120,7 +123,7 @@ fn spawn_field_tiling(
     let clearance = RoadClearance::new(&road_ribbons(map, roads));
     let wall_segs = clear_of_roads(&contour.segs, &clearance);
     if !crate::world::skip("boundaries") {
-        spawn_field_boundaries(commands, meshes, materials, textures, map, &wall_segs);
+        spawn_field_boundaries(commands, meshes, materials, textures, map, &wall_segs, colliders);
     }
     hedge_tree_points(&wall_segs)
 }
@@ -717,6 +720,7 @@ fn spawn_field_boundaries(
     textures: &TerrainTextures,
     map: &TerrainMap,
     segs: &[Seg],
+    colliders: &mut Colliders,
 ) {
     // Each segment is already short (at most one grid cell across), and pins to the true
     // ground height at both of its own endpoints - the same trick road_mesh uses for its
@@ -733,6 +737,8 @@ fn spawn_field_boundaries(
             kind,
         );
         let buf = tiles.entry(tile).or_default();
+        let (half_thickness, height, material) = boundary_solid(kind);
+        colliders.add(Solid::wall(seg.a, seg.b, half_thickness, ga + height, gb + height).of(material));
         match kind {
             0 => push_hedge_segment(buf, map, seg.a, ga, seg.b, gb),
             1 => push_box_segment(buf, seg.a, ga, seg.b, gb, 0.6, 0.0, 1.1, 1.6),
@@ -759,6 +765,17 @@ fn spawn_field_boundaries(
             Mesh3d(meshes.add(buf.into_mesh())),
             MeshMaterial3d(materials_by_kind[kind as usize].clone()),
         ));
+    }
+}
+
+/// The solid a boundary makes, by kind (0 hedge, 1 stone wall, 2 fence): half its thickness, how high
+/// it is, and what it's made of. A hedge is a thick bank of leaves a person can force their way over the top of,
+/// a bit lower than it looks; a stone wall is waist high; a fence is its top rail.
+pub fn boundary_solid(kind: u32) -> (f32, f32, Material) {
+    match kind {
+        0 => (0.6, 1.5, Material::Leaves),
+        1 => (0.3, 1.1, Material::Stone),
+        _ => (0.12, 1.0, Material::Wood),
     }
 }
 
@@ -866,6 +883,7 @@ fn spawn_sheds(
     materials: &mut Assets<StandardMaterial>,
     map: &TerrainMap,
     zones: &ZoneMap,
+    colliders: &mut Colliders,
 ) {
     let shed = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
     let wall = materials.add(StandardMaterial {
@@ -889,6 +907,7 @@ fn spawn_sheds(
                 14.0 + hash01(ix, iz, 12) * 12.0,
             );
             let ground = map.height_at(p);
+            colliders.add(Solid::rect(p, Vec2::new(size.x, size.z) * 0.5, 0.0, ground + size.y).of(Material::Metal));
             commands.spawn((
                 TerrainRoot,
                 Mesh3d(shed.clone()),
@@ -1033,6 +1052,69 @@ mod tests {
         for p in hedge_tree_points(&kept) {
             assert!(clearance.clearance(p) > WALL_ROAD_MARGIN - 0.1);
         }
+    }
+
+    /// How many solids a lookup has to look at on a real map's trees and field boundaries, for the
+    /// grid the game uses and for a much coarser one.
+    #[test]
+    fn a_lookup_looks_at_only_a_few_solids_on_a_real_map() {
+        use crate::collision::{Colliders, Solid, DEFAULT_BUCKET, PLAYER_RADIUS, STEP_UP};
+        let (map, zones, params) = generate();
+        let is_farmland = farmland(&map, &zones);
+        let seeds = scatter_seeds(&map, &is_farmland, &params);
+        let owner = smooth_owners(&map, &is_farmland, claim_regions(&map, &is_farmland, &seeds, &params), SMOOTH_PASSES);
+        let owner = split_disconnected_regions(&map, &is_farmland, &owner);
+        let labels: Vec<u32> = owner.iter().map(|o| o.unwrap_or(OPEN)).collect();
+        let segs = Contour::build(map.grid_size(), &labels, map.seed, None, Smoothing::FIELD).segs;
+        let plan = crate::vegetation::plan_vegetation(&map, &zones, &[]);
+
+        let fill = |colliders: &mut Colliders| {
+            plan.add_colliders(colliders);
+            for seg in &segs {
+                let (half, height, material) = boundary_solid(pair_hash(seg.pair.0, seg.pair.1) % 3);
+                let (ga, gb) = (map.height_at(seg.a), map.height_at(seg.b));
+                colliders.add(Solid::wall(seg.a, seg.b, half, ga + height, gb + height).of(material));
+            }
+        };
+        let mut fine = Colliders::default();
+        let mut coarse = Colliders::with_bucket(16.0);
+        fill(&mut fine);
+        fill(&mut coarse);
+
+        // Spots where a lookup matters: just by a solid, which is where you get stuck against one;
+        // and anywhere at all.
+        let near_solids: Vec<Vec2> = segs.iter().step_by(7).map(|s| (s.a + s.b) * 0.5 + Vec2::new(0.6, 0.3)).take(20_000).collect();
+        let anywhere: Vec<Vec2> = (0..20_000).map(|i| Vec2::new(field_hash(Vec2::new(i as f32, 1.0), 77) - 0.5, field_hash(Vec2::new(i as f32, 2.0), 78) - 0.5) * crate::map::MAP_SIZE * 0.95).collect();
+        let report = |name: &str, colliders: &Colliders, points: &[Vec2]| {
+            let (mut filed, mut kept, mut worst) = (0usize, 0usize, 0usize);
+            for &p in points {
+                let (f, k) = colliders.examined(p, PLAYER_RADIUS + 0.35);
+                filed += f;
+                kept += k;
+                worst = worst.max(k);
+            }
+            let n = points.len() as f32;
+            let start = std::time::Instant::now();
+            for &p in points {
+                let _ = colliders.resolve(p, PLAYER_RADIUS, 0.0, STEP_UP);
+                let _ = colliders.support(p, 0.0, STEP_UP);
+            }
+            let micros = start.elapsed().as_secs_f32() * 1e6 / n;
+            eprintln!("{name:34} filed in square {:6.1} | looked at after box test {:5.1} (worst {worst:3}) | resolve+support {micros:5.2} us", filed as f32 / n, kept as f32 / n);
+            (filed as f32 / n, kept as f32 / n, micros)
+        };
+        eprintln!("{} solids ({} trees and {} boundary segments)", fine.len(), fine.len() - segs.len(), segs.len());
+        let (coarse_filed, coarse_near, _) = report("16 m grid, by walls and hedges", &coarse, &near_solids);
+        let (fine_filed, fine_near, fine_us) = report(&format!("{DEFAULT_BUCKET} m grid + box test, by walls"), &fine, &near_solids);
+        report("16 m grid, anywhere", &coarse, &anywhere);
+        report(&format!("{DEFAULT_BUCKET} m grid + box test, anywhere"), &fine, &anywhere);
+        // The shapes themselves are tested only where the bounding box test lets them through: about
+        // one per lookup, whichever grid, which is why a smarter structure has nothing to win.
+        assert!(fine_near < 3.0, "a lookup beside a wall still tests {fine_near} shapes on average");
+        assert!((fine_near - coarse_near).abs() < 0.05, "the grid doesn't change what is tested ({fine_near} vs {coarse_near})");
+        // What the finer grid saves is what has to be filed in, and looked through, per square.
+        assert!(fine_filed < coarse_filed * 0.6, "finer squares hold fewer entries ({fine_filed} vs {coarse_filed})");
+        assert!(fine_us < 20.0, "a frame's worth of lookups takes {fine_us} us");
     }
 
     // Diagnostic, not an assertion: prints a spot where a road runs across farmland on both

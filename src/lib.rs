@@ -1,5 +1,6 @@
 pub mod ballistics;
 pub mod cloud_material;
+pub mod collision;
 pub mod cloud_shadows;
 pub mod contour;
 pub mod crosshair;
@@ -70,6 +71,7 @@ impl Plugin for GamePlugin {
         app.add_plugins((
             player::PlayerPlugin,
             weapon::WeaponPlugin,
+            collision::CollisionPlugin,
             sound::SoundPlugin,
             impact::ImpactPlugin,
             target::TargetPlugin,

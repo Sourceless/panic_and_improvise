@@ -4,6 +4,7 @@
 
 use bevy::prelude::*;
 
+use crate::collision::Colliders;
 use crate::field_material::FieldMaterial;
 use crate::fill::spawn_fill;
 use crate::map::TerrainMap;
@@ -31,9 +32,12 @@ pub fn build_world(
 ) {
     let zones = ZoneMap::generate(map, params);
     let roads = RoadNetwork::generate(map, params);
-    spawn_terrain(commands, meshes, standard, terrain, textures, map, &zones, waters, images);
+    // Everything solid that the generators place is collected here for the player to bump into.
+    let mut colliders = Colliders::default();
+    spawn_terrain(commands, meshes, standard, terrain, textures, map, &zones, waters, images, &mut colliders);
     spawn_roads(commands, meshes, road_materials, textures, map, &roads);
-    spawn_fill(commands, meshes, standard, fields, textures, map, &zones, &roads, params);
+    spawn_fill(commands, meshes, standard, fields, textures, map, &zones, &roads, params, &mut colliders);
+    commands.insert_resource(colliders);
     commands.insert_resource(zones);
     commands.insert_resource(roads);
 }
