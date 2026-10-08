@@ -453,7 +453,9 @@ impl Layout {
         let mut lanes = grow_lanes(&mut rng, map, centre, radius, tier, &streets);
         streets.extend(lanes.iter().cloned());
         let mut layout = Layout::default();
-        let mut site = Site { map, centre, radius, streets: RoadClearance::new(&streets), placed: Placed::new(), max_range: MAX_FOOTPRINT_RANGE, rejected: Default::default() };
+        // Footpaths are not streets to build along, but nothing is built on one.
+        let blockers: Vec<RoadRibbon> = streets.iter().cloned().chain(ribbons.iter().filter(|r| r.kind == RoadKind::Path && r.points.iter().any(|p| p.distance(centre) < radius + 20.0)).cloned()).collect();
+        let mut site = Site { map, centre, radius, streets: RoadClearance::new(&blockers), placed: Placed::new(), max_range: MAX_FOOTPRINT_RANGE, rejected: Default::default() };
 
         let frontages: Vec<(Frontage, RoadKind)> = streets.iter().flat_map(|r| frontages_of(r, centre, radius * BUILD_LIMIT).into_iter().map(move |f| (f, r.kind))).collect();
 
@@ -1275,6 +1277,37 @@ mod tests {
             let mill = layout.buildings.iter().find(|b| b.kind == BuildingKind::Mill).unwrap_or_else(|| panic!("no mill at {poi:?}; rejected: {:?}", layout.rejected));
             assert!(clearance.clearance(mill.centre) > mill.width * 0.5, "the mill tower is on its road");
             assert!(map.water_distance(mill.centre) < 25.0, "and is by the water");
+        }
+    }
+
+    #[test]
+    fn footpaths_join_settlements_and_farms_and_nothing_is_built_on_them() {
+        let params = GenParams::default();
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
+        let roads = crate::roads::RoadNetwork::generate(&map, &params);
+        let ribbons = road_ribbons(&map, &roads);
+        let paths: Vec<&RoadRibbon> = ribbons.iter().filter(|r| r.kind == RoadKind::Path).collect();
+        let length: f32 = paths.iter().map(|r| r.points.windows(2).map(|w| w[0].distance(w[1])).sum::<f32>()).sum();
+        eprintln!("{} footpaths, {:.1} km", paths.len(), length / 1000.0);
+        let _ = length;
+        let touches = |poi: &Poi| paths.iter().any(|r| r.points.iter().any(|p| p.distance(poi.position) < poi.radius * 1.3 + 12.0));
+        let farms: Vec<&Poi> = map.pois.iter().filter(|p| p.kind == PoiKind::Farm).collect();
+        let reached = farms.iter().filter(|p| touches(p)).count();
+        assert!(reached * 10 >= farms.len() * 8, "{reached} of {} farms have a footpath", farms.len());
+        let villages: Vec<&Poi> = map.pois.iter().filter(|p| p.kind == PoiKind::Village).collect();
+        let reached = villages.iter().filter(|p| touches(p)).count();
+        assert!(reached * 10 >= villages.len() * 9, "{reached} of {} villages have a footpath", villages.len());
+
+        // No building stands on a footpath.
+        let plan = SettlementPlan::generate(&map, &roads);
+        let clearance = RoadClearance::new(&ribbons.iter().filter(|r| r.kind == RoadKind::Path).cloned().collect::<Vec<_>>());
+        for layout in &plan.layouts {
+            for b in &layout.buildings {
+                let (distance, _) = b.shape().separation(b.centre);
+                let _ = distance;
+                let points = footprint_points(&b.shape());
+                assert!(points.iter().all(|&p| clearance.clearance(p) > -0.1), "{b:?} stands on a footpath");
+            }
         }
     }
 }

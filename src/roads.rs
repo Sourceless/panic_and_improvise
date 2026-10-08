@@ -37,6 +37,14 @@ const MINOR_WATER_COST: f32 = 6.0;
 const EXISTING_ROAD_DISCOUNT: f32 = 0.12;
 const PATH_SLOPE_PENALTY: f32 = 5.0;
 const PATH_WATER_COST: f32 = 4.0;
+/// How much dearer it is for a footpath to follow a road than to run beside it across the fields.
+const ON_THE_ROAD_PENALTY: f32 = 3.0;
+/// Footpaths join each settlement to its nearest neighbours up to this far away, and each farm to the
+/// nearest settlement within the second distance.
+const PATH_LINK_RANGE: f32 = 1600.0;
+const PATH_SECOND_LINK_RANGE: f32 = 900.0;
+const FARM_PATH_RANGE: f32 = 1500.0;
+const FARM_NEIGHBOUR_RANGE: f32 = 450.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RoadKind {
@@ -79,7 +87,7 @@ impl RoadNetwork {
             .collect();
 
         if let Some((&first, rest)) = hubs.split_first() {
-            grow_network(map, vec![first], rest.to_vec(), RoadKind::Major, params, &mut cells, &mut edges);
+            grow_network(map, vec![first], rest.to_vec(), RoadKind::Major, params, &mut cells, &[], &mut edges);
         }
 
         let seeds: Vec<usize> = hubs
@@ -87,7 +95,9 @@ impl RoadNetwork {
             .copied()
             .chain((0..n * n).filter(|&i| cells[i].is_some()))
             .collect();
-        grow_network(map, seeds, farms, RoadKind::Minor, params, &mut cells, &mut edges);
+        grow_network(map, seeds, farms, RoadKind::Minor, params, &mut cells, &[], &mut edges);
+
+        lay_footpaths(map, params, &mut cells, &mut edges);
 
         RoadNetwork { cells, edges, verts: n, extra: Vec::new() }
     }
@@ -109,6 +119,107 @@ impl RoadNetwork {
     }
 }
 
+/// Footpaths: from each village, hamlet and mill to the nearest others, and from each farm to the
+/// nearest settlement (and to a close neighbour). They start and end on a road at the settlement, so
+/// they come off it the way a public footpath does, and they cross the fields on their own line
+/// instead of following the tarmac. Their cells are not recorded in `cells`, so a path never clears
+/// ground the way a road does.
+fn lay_footpaths(map: &TerrainMap, params: &GenParams, cells: &mut [Option<RoadKind>], edges: &mut Vec<(usize, usize, RoadKind)>) {
+    let n = map.grid_size();
+    // Where a settlement's footpaths start: the nearest road cell inside it, or its middle.
+    let gate = |poi: &crate::map::Poi| -> usize {
+        let centre = nearest_cell(map, poi.position);
+        let reach = (poi.radius * 1.2 / CELL).ceil() as isize;
+        let (cx, cz) = ((centre % n) as isize, (centre / n) as isize);
+        let mut best: Option<(f32, usize)> = None;
+        for dz in -reach..=reach {
+            for dx in -reach..=reach {
+                let (x, z) = (cx + dx, cz + dz);
+                if !(0..n as isize).contains(&x) || !(0..n as isize).contains(&z) {
+                    continue;
+                }
+                let idx = z as usize * n + x as usize;
+                let d = ((dx * dx + dz * dz) as f32).sqrt() * CELL;
+                if cells[idx].is_some() && d <= poi.radius * 1.2 && best.is_none_or(|(b, _)| d < b) {
+                    best = Some((d, idx));
+                }
+            }
+        }
+        best.map_or(centre, |(_, idx)| idx)
+    };
+    let places: Vec<(&crate::map::Poi, usize)> = map.pois.iter().map(|p| (p, gate(p))).collect();
+    let is_town = |k: PoiKind| matches!(k, PoiKind::Village | PoiKind::Mill);
+
+    let mut links: Vec<(f32, usize, usize)> = Vec::new();
+    let mut linked: HashSet<(usize, usize)> = HashSet::new();
+    let mut link = |a: usize, b: usize, links: &mut Vec<(f32, usize, usize)>| {
+        if a != b && linked.insert((a.min(b), a.max(b))) {
+            links.push((places[a].0.position.distance(places[b].0.position), a, b));
+        }
+    };
+    let distance = |a: usize, b: usize| places[a].0.position.distance(places[b].0.position);
+    for (i, (poi, _)) in places.iter().enumerate() {
+        let mut others: Vec<(f32, usize)> = places
+            .iter()
+            .enumerate()
+            .filter(|&(j, (other, _))| j != i && is_town(other.kind) == is_town(poi.kind) && (!is_town(poi.kind) || is_town(other.kind)))
+            .map(|(j, _)| (distance(i, j), j))
+            .collect();
+        others.sort_by(|a, b| a.0.total_cmp(&b.0));
+        if is_town(poi.kind) {
+            if let Some(&(d, j)) = others.first().filter(|(d, _)| *d < PATH_LINK_RANGE) {
+                let _ = d;
+                link(i, j, &mut links);
+            }
+            if let Some(&(_, j)) = others.get(1).filter(|(d, _)| *d < PATH_SECOND_LINK_RANGE) {
+                link(i, j, &mut links);
+            }
+        } else if poi.kind == PoiKind::Farm {
+            let nearest_town = places
+                .iter()
+                .enumerate()
+                .filter(|(_, (other, _))| is_town(other.kind) && other.kind == PoiKind::Village)
+                .map(|(j, _)| (distance(i, j), j))
+                .min_by(|a, b| a.0.total_cmp(&b.0));
+            if let Some((_, j)) = nearest_town.filter(|(d, _)| *d < FARM_PATH_RANGE) {
+                link(i, j, &mut links);
+            }
+            if let Some(&(_, j)) = others.first().filter(|(d, _)| *d < FARM_NEIGHBOUR_RANGE) {
+                link(i, j, &mut links);
+            }
+        }
+    }
+    // Short links first: they make the trunk the longer ones then join.
+    links.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut path_cells: Vec<Option<RoadKind>> = vec![None; n * n];
+    let mut drawn: HashSet<(usize, usize)> = HashSet::new();
+    for (_, a, b) in links {
+        let (from, to) = (places[a].1, places[b].1);
+        if from != to {
+            let Some((reached, previous)) = dijkstra_to_any(map, &[from], &HashSet::from([to]), RoadKind::Path, params, &path_cells, cells) else {
+                continue;
+            };
+            // Walk back to where it started, recording the steps that no earlier path has already taken.
+            let mut current = reached;
+            while let Some(p) = previous[current] {
+                if drawn.insert((current.min(p), current.max(p))) {
+                    edges.push((current, p, RoadKind::Path));
+                }
+                path_cells[current] = Some(RoadKind::Path);
+                current = p;
+            }
+            path_cells[current] = Some(RoadKind::Path);
+        }
+    }
+    // A footpath stops at the edge of a farm's land: it doesn't go through the yard.
+    let farms: Vec<(Vec2, f32)> = map.pois.iter().filter(|p| p.kind == PoiKind::Farm).map(|p| (p.position, p.radius * 0.95)).collect();
+    let inside_a_farm = |idx: usize| {
+        let at = grid_pos(idx % n, idx / n);
+        farms.iter().any(|&(c, r)| c.distance(at) < r)
+    };
+    edges.retain(|&(a, b, kind)| kind != RoadKind::Path || !(inside_a_farm(a) || inside_a_farm(b)));
+}
+
 // Grows the network by repeatedly finding, with a single Dijkstra search seeded from
 // everything already connected, the cheapest path to the nearest still-unconnected
 // target. The search stops as soon as it reaches any target, so each step costs roughly
@@ -120,13 +231,14 @@ fn grow_network(
     kind: RoadKind,
     params: &GenParams,
     cells: &mut [Option<RoadKind>],
+    avoid: &[Option<RoadKind>],
     edges: &mut Vec<(usize, usize, RoadKind)>,
 ) {
     let mut connected = seeds;
     let mut remaining: HashSet<usize> = targets.into_iter().collect();
 
     while !remaining.is_empty() {
-        let Some((reached, previous)) = dijkstra_to_any(map, &connected, &remaining, kind, params, cells) else {
+        let Some((reached, previous)) = dijkstra_to_any(map, &connected, &remaining, kind, params, cells, avoid) else {
             break;
         };
         // Walk back from the newly reached settlement toward the network, recording each
@@ -160,6 +272,7 @@ fn dijkstra_to_any(
     kind: RoadKind,
     params: &GenParams,
     cells: &[Option<RoadKind>],
+    avoid: &[Option<RoadKind>],
 ) -> Option<(usize, Vec<Option<usize>>)> {
     let n = map.grid_size();
     let count = n * n;
@@ -179,7 +292,7 @@ fn dijkstra_to_any(
             return Some((c, previous));
         }
         for neighbour in neighbours(n, c) {
-            let step_cost = step_cost(map, cells, c, neighbour, kind, params);
+            let step_cost = step_cost(map, cells, avoid, c, neighbour, kind, params);
             let next = cost[c] + step_cost;
             if next < cost[neighbour] {
                 cost[neighbour] = next;
@@ -191,7 +304,7 @@ fn dijkstra_to_any(
     None
 }
 
-fn step_cost(map: &TerrainMap, cells: &[Option<RoadKind>], from: usize, to: usize, kind: RoadKind, params: &GenParams) -> f32 {
+fn step_cost(map: &TerrainMap, cells: &[Option<RoadKind>], avoid: &[Option<RoadKind>], from: usize, to: usize, kind: RoadKind, params: &GenParams) -> f32 {
     let n = map.grid_size();
     let diagonal = (to % n != from % n) && (to / n != from / n);
     let step = if diagonal { CELL * std::f32::consts::SQRT_2 } else { CELL };
@@ -212,6 +325,9 @@ fn step_cost(map: &TerrainMap, cells: &[Option<RoadKind>], from: usize, to: usiz
     }
     if cells[to].is_some() {
         c *= EXISTING_ROAD_DISCOUNT;
+    } else if avoid.get(to).is_some_and(Option::is_some) {
+        // A walker keeps off a road they have no need to be on.
+        c *= ON_THE_ROAD_PENALTY;
     }
     c
 }
