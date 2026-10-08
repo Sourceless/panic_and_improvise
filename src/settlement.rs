@@ -5,8 +5,8 @@ use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
 
 use crate::collision::{Colliders, Solid};
-use crate::map::{Poi, PoiKind, TerrainMap};
-use crate::settlement_plan::{footprint_points, BuildingKind, Layout, SettlementPlan};
+use crate::map::{Poi, TerrainMap};
+use crate::settlement_plan::{footprint_points, Building, BuildingKind, Layout, Rng, SettlementPlan};
 
 #[derive(Component)]
 pub struct SettlementRoot;
@@ -19,6 +19,13 @@ struct Palette {
     brick: Handle<StandardMaterial>,
     white: Handle<StandardMaterial>,
     timber: Handle<StandardMaterial>,
+    /// Shop awnings and signs.
+    awnings: Vec<Handle<StandardMaterial>>,
+    glass: Handle<StandardMaterial>,
+    /// Barn roofs, canopies, kiosk roofs.
+    metal: Handle<StandardMaterial>,
+    /// Forecourts.
+    asphalt: Handle<StandardMaterial>,
     // Unit-sized shapes every house is scaled from, so a town of hundreds of houses shares
     // two meshes instead of allocating two each.
     unit_cube: Handle<Mesh>,
@@ -80,7 +87,11 @@ pub fn spawn_settlements(
         stone: colour(0.6, 0.6, 0.58),
         brick: colour(0.55, 0.22, 0.16),
         white: colour(0.92, 0.92, 0.9),
-        timber: colour(0.4, 0.3, 0.2),
+        timber: colour(0.52, 0.4, 0.28),
+        awnings: vec![colour(0.7, 0.12, 0.1), colour(0.12, 0.4, 0.2), colour(0.15, 0.25, 0.55), colour(0.85, 0.7, 0.15)],
+        glass: colour(0.1, 0.14, 0.18),
+        metal: colour(0.45, 0.47, 0.5),
+        asphalt: colour(0.12, 0.12, 0.13),
         unit_cube: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
         unit_gable: meshes.add(gable(1.0, 1.0, 1.0)),
     };
@@ -95,11 +106,8 @@ pub fn spawn_settlements(
             ))
             .id();
         let mut rng = Rng::from_position(poi.position);
-        let parts = match poi.kind {
-            PoiKind::Village => village_parts(meshes, &palette, &mut rng, map, poi, layout),
-            PoiKind::Farm => farm(meshes, &palette, &mut rng),
-            PoiKind::Mill => mill(meshes, &palette),
-        };
+        let _ = &mut rng;
+        let parts = layout_parts(meshes, &palette, map, poi, layout);
         let origin = Vec3::new(poi.position.x, ground, poi.position.y);
         for part in parts {
             if let Some(footprint) = part.solid {
@@ -117,46 +125,149 @@ pub fn spawn_settlements(
     }
 }
 
-/// The buildings of a village, as the plan has them: each stands where it was put, turned to face its
-/// street.
-fn village_parts(meshes: &mut Assets<Mesh>, palette: &Palette, rng: &mut Rng, map: &TerrainMap, poi: &Poi, layout: &Layout) -> Vec<Part> {
+/// A placement: where a building is and how it is turned, for putting its parts relative to it.
+struct Frame {
+    centre: Vec3,
+    rotation: Quat,
+}
+
+impl Frame {
+    fn new(centre: Vec3, yaw: f32) -> Frame {
+        Frame { centre, rotation: Quat::from_rotation_y(yaw) }
+    }
+
+    /// A transform for a part at `offset` from the building's middle (in its own turned axes), scaled.
+    fn at(&self, offset: Vec3, scale: Vec3) -> Transform {
+        Transform::from_translation(self.centre + self.rotation * offset).with_rotation(self.rotation).with_scale(scale)
+    }
+}
+
+/// Every building the plan has for a settlement, as parts: each stands where it was put, turned so
+/// that its front (local -Z) faces the street, the yard or the water.
+fn layout_parts(meshes: &mut Assets<Mesh>, palette: &Palette, map: &TerrainMap, poi: &Poi, layout: &Layout) -> Vec<Part> {
     let ground = map.height_at(poi.position);
     let relative = |p: Vec2| Vec3::new(p.x - poi.position.x, map.height_at(p) - ground, p.y - poi.position.y);
     let mut parts = Vec::new();
     for building in &layout.buildings {
         let centre = relative(building.centre);
-        match building.kind {
-            BuildingKind::Church => {
-                // The church is modelled around its own origin: shifted so its footprint is centred,
-                // then turned and put where the plan says.
-                let turn = Quat::from_rotation_y(building.yaw);
-                for mut part in church(meshes, palette) {
-                    part.transform.translation = centre + turn * (part.transform.translation + Vec3::new(0.0, 0.0, CHURCH_SHIFT));
-                    part.transform.rotation = turn * part.transform.rotation;
-                    parts.push(part);
-                }
-            }
-            _ => {
-                let walls = palette.walls[(rng.unit() * palette.walls.len() as f32) as usize % palette.walls.len()].clone();
-                let roof = if rng.unit() < 0.7 { palette.slate.clone() } else { palette.tile.clone() };
-                // Where the ground falls away from the middle of the house, the walls go down to meet it.
-                let lowest = footprint_points(&building.shape()).iter().map(|&p| map.height_at(p) - ground).fold(f32::MAX, f32::min);
-                let sink = (centre.y - lowest).max(0.0) + 0.15;
-                house(
-                    &mut parts,
-                    palette,
-                    walls,
-                    roof,
-                    Vec3::new(centre.x, centre.y - sink, centre.z),
-                    building.yaw,
-                    building.width,
-                    building.depth,
-                    building.wall_height + sink,
-                );
-            }
-        }
+        // Where the ground falls away from the middle of a building, its walls go down to meet it.
+        let lowest = footprint_points(&building.shape()).iter().map(|&p| map.height_at(p) - ground).fold(f32::MAX, f32::min);
+        let sink = (centre.y - lowest).max(0.0) + 0.15;
+        let mut rng = Rng::from_position(building.centre);
+        building_parts(&mut parts, meshes, palette, &mut rng, building, centre, sink);
     }
     parts
+}
+
+fn pick(rng: &mut Rng, list: &[Handle<StandardMaterial>]) -> Handle<StandardMaterial> {
+    list[(rng.unit() * list.len() as f32) as usize % list.len()].clone()
+}
+
+fn building_parts(parts: &mut Vec<Part>, meshes: &mut Assets<Mesh>, palette: &Palette, rng: &mut Rng, b: &Building, centre: Vec3, sink: f32) {
+    let frame = Frame::new(centre, b.yaw);
+    let (w, d, h) = (b.width, b.depth, b.wall_height);
+    let rise = d * 0.5;
+    // The main walls and roof of a gabled building, sunk to meet the ground.
+    let gabled = |parts: &mut Vec<Part>, walls: Handle<StandardMaterial>, roof: Handle<StandardMaterial>| {
+        house(parts, palette, walls, roof, Vec3::new(centre.x, centre.y - sink, centre.z), b.yaw, w, d, h + sink);
+    };
+    let cube = palette.unit_cube.clone();
+    let chimney = |parts: &mut Vec<Part>, along: f32| {
+        push(parts, cube.clone(), palette.brick.clone(), frame.at(Vec3::new(along * w, h + rise + 0.3, 0.0), Vec3::new(0.85, 2.0, 0.95)));
+    };
+    match b.kind {
+        BuildingKind::Cottage | BuildingKind::House | BuildingKind::Terrace | BuildingKind::Farmhouse => {
+            let walls = if b.kind == BuildingKind::Farmhouse { palette.walls[0].clone() } else { pick(rng, &palette.walls) };
+            let roof = if b.kind == BuildingKind::Farmhouse || rng.unit() >= 0.7 { palette.tile.clone() } else { palette.slate.clone() };
+            gabled(parts, walls, roof);
+            if b.kind == BuildingKind::Terrace {
+                // A chimney for every house in the row.
+                for k in 0..((w / 6.0) as usize).max(2) {
+                    let along = (k as f32 + 0.5) / ((w / 6.0) as usize).max(2) as f32 - 0.5;
+                    chimney(parts, along);
+                }
+            } else if rng.unit() < 0.7 {
+                chimney(parts, if rng.unit() < 0.5 { -0.3 } else { 0.3 });
+            }
+        }
+        BuildingKind::Church => {
+            // The church is modelled around its own origin: shifted so its footprint is centred, then
+            // turned and put where the plan says.
+            for mut part in church(meshes, palette) {
+                part.transform.translation = centre + frame.rotation * (part.transform.translation + Vec3::new(0.0, 0.0, CHURCH_SHIFT));
+                part.transform.rotation = frame.rotation * part.transform.rotation;
+                parts.push(part);
+            }
+        }
+        BuildingKind::Pub => {
+            gabled(parts, palette.walls[2].clone(), palette.slate.clone());
+            chimney(parts, -0.32);
+            chimney(parts, 0.32);
+            // A hanging sign, sticking out from the front wall near the door.
+            let sign = pick(rng, &palette.awnings);
+            push(parts, cube.clone(), sign, frame.at(Vec3::new(w * 0.5 - 1.0, h - 0.9, -(d * 0.5 + 0.55)), Vec3::new(0.07, 0.9, 1.1)));
+            // A porch over the door.
+            push(parts, cube.clone(), palette.timber.clone(), frame.at(Vec3::new(-w * 0.15, h - 1.2, -(d * 0.5 + 0.7)), Vec3::new(2.6, 0.14, 1.4)));
+        }
+        BuildingKind::Shop => {
+            gabled(parts, pick(rng, &palette.walls), palette.slate.clone());
+            chimney(parts, 0.3);
+            let awning = pick(rng, &palette.awnings);
+            // Shop window, awning over the pavement, and the sign above.
+            push(parts, cube.clone(), palette.glass.clone(), frame.at(Vec3::new(0.0, 1.35, -(d * 0.5 + 0.04)), Vec3::new(w * 0.8, 1.7, 0.08)));
+            push(parts, cube.clone(), awning.clone(), frame.at(Vec3::new(0.0, 2.75, -(d * 0.5 + 0.75)), Vec3::new(w * 0.92, 0.1, 1.5)));
+            push(parts, cube.clone(), awning, frame.at(Vec3::new(0.0, h - 0.4, -(d * 0.5 + 0.06)), Vec3::new(w * 0.7, 0.5, 0.12)));
+        }
+        BuildingKind::School => {
+            gabled(parts, palette.brick.clone(), palette.slate.clone());
+            // A bell turret on the ridge.
+            push(parts, cube.clone(), palette.white.clone(), frame.at(Vec3::new(0.0, h + rise + 0.5, 0.0), Vec3::new(1.4, 1.7, 1.4)));
+            push(parts, meshes.add(Cone::new(1.1, 1.5)), palette.slate.clone(), frame.at(Vec3::new(0.0, h + rise + 2.1, 0.0), Vec3::ONE));
+            chimney(parts, -0.35);
+        }
+        BuildingKind::Hall => {
+            gabled(parts, palette.walls[2].clone(), palette.tile.clone());
+            push(parts, cube.clone(), palette.timber.clone(), frame.at(Vec3::new(0.0, 1.3, -(d * 0.5 + 0.9)), Vec3::new(3.2, 2.6, 1.8)));
+            push(parts, cube.clone(), palette.metal.clone(), frame.at(Vec3::new(0.0, 2.7, -(d * 0.5 + 0.9)), Vec3::new(3.6, 0.2, 2.2)));
+        }
+        BuildingKind::Barn => {
+            gabled(parts, palette.timber.clone(), palette.metal.clone());
+            // A big door in the front.
+            push(parts, cube.clone(), palette.glass.clone(), frame.at(Vec3::new(0.0, 2.0, -(d * 0.5 + 0.04)), Vec3::new(4.2, 4.0, 0.08)));
+        }
+        BuildingKind::Silo => {
+            let r = w * 0.5;
+            push_solid(parts, meshes.add(Cylinder::new(r, h)), palette.white.clone(), Transform::from_translation(centre + Vec3::Y * (h * 0.5 - sink)).with_scale(Vec3::new(1.0, 1.0, 1.0)), Footprint::Cylinder { radius: r, height: h });
+            push(parts, meshes.add(Cone::new(r * 1.05, 1.6)), palette.metal.clone(), Transform::from_translation(centre + Vec3::Y * (h + 0.8 - sink)));
+        }
+        BuildingKind::Mill => {
+            let r = w * 0.5;
+            push_solid(parts, meshes.add(Cylinder::new(r, h)), palette.stone.clone(), Transform::from_translation(centre + Vec3::Y * (h * 0.5 - sink)), Footprint::Cylinder { radius: r, height: h });
+            push(parts, meshes.add(Cone::new(r + 0.8, 4.5)), palette.tile.clone(), Transform::from_translation(centre + Vec3::Y * (h + 2.25 - sink)));
+            // The wheel is on the water side (the building's front), turning about a horizontal axis.
+            let wheel = frame.at(Vec3::new(0.0, 2.5, -(r + 0.5)), Vec3::ONE);
+            push(parts, meshes.add(Cylinder::new(3.0, 0.6)), palette.timber.clone(), Transform { rotation: frame.rotation * Quat::from_rotation_x(FRAC_PI_2), ..wheel });
+        }
+        BuildingKind::PetrolStation => {
+            // Local -Z faces the road: the canopy over the pumps nearest it, the kiosk behind.
+            push(parts, cube.clone(), palette.asphalt.clone(), frame.at(Vec3::new(0.0, 0.04, 0.0), Vec3::new(w * 0.95, 0.08, d * 0.95)));
+            push(parts, cube.clone(), palette.white.clone(), frame.at(Vec3::new(0.0, 5.0, -5.0), Vec3::new(13.0, 0.4, 8.5)));
+            push(parts, cube.clone(), pick(rng, &palette.awnings), frame.at(Vec3::new(0.0, 4.75, -5.0), Vec3::new(13.2, 0.3, 8.7)));
+            for (x, z) in [(-5.8, -8.2), (5.8, -8.2), (-5.8, -1.8), (5.8, -1.8)] {
+                push_solid(parts, meshes.add(Cylinder::new(0.2, 4.75)), palette.metal.clone(), frame.at(Vec3::new(x, 2.375, z), Vec3::ONE), Footprint::Cylinder { radius: 0.2, height: 4.75 });
+            }
+            for (x, z) in [(-2.2, -6.2), (2.2, -6.2), (-2.2, -3.8), (2.2, -3.8)] {
+                push_solid(parts, cube.clone(), palette.awnings[0].clone(), frame.at(Vec3::new(x, 0.75, z), Vec3::new(0.75, 1.5, 0.45)), Footprint::Block(Vec3::new(0.75, 1.5, 0.45)));
+            }
+            // The kiosk.
+            push_solid(parts, cube.clone(), palette.white.clone(), frame.at(Vec3::new(0.0, 1.6, 6.0), Vec3::new(8.5, 3.2, 5.0)), Footprint::Block(Vec3::new(8.5, 3.2, 5.0)));
+            push(parts, cube.clone(), palette.glass.clone(), frame.at(Vec3::new(0.0, 1.5, 6.0 - 2.54), Vec3::new(6.5, 1.6, 0.08)));
+            push(parts, cube.clone(), palette.metal.clone(), frame.at(Vec3::new(0.0, 3.35, 6.0), Vec3::new(9.2, 0.3, 5.7)));
+            // The price sign, on a pole by the road.
+            push_solid(parts, cube.clone(), palette.metal.clone(), frame.at(Vec3::new(9.0, 3.5, -9.0), Vec3::new(0.35, 7.0, 0.35)), Footprint::Block(Vec3::new(0.35, 7.0, 0.35)));
+            push(parts, cube.clone(), palette.awnings[3].clone(), frame.at(Vec3::new(9.0, 6.6, -9.0), Vec3::new(1.9, 1.7, 0.25)));
+        }
+    }
 }
 
 /// How far the church model's footprint is from its origin along its length (the nave runs from -7 to
@@ -172,79 +283,6 @@ fn church(meshes: &mut Assets<Mesh>, palette: &Palette) -> Vec<Part> {
     let tower_pos = Vec3::new(0.0, 8.0, -9.0);
     push_solid(&mut parts, meshes.add(Cuboid::new(5.0, 16.0, 5.0)), palette.stone.clone(), Transform::from_translation(tower_pos), Footprint::Block(Vec3::new(5.0, 16.0, 5.0)));
     push(&mut parts, meshes.add(Cone::new(3.2, 7.0)), palette.slate.clone(), Transform::from_xyz(0.0, 16.0 + 3.5, -9.0));
-    parts
-}
-
-fn farm(meshes: &mut Assets<Mesh>, palette: &Palette, rng: &mut Rng) -> Vec<Part> {
-    let mut parts = Vec::new();
-    let jitter = |rng: &mut Rng| Vec2::new(rng.range(-2.0, 2.0), rng.range(-2.0, 2.0));
-    let j = jitter(rng);
-    house(
-        &mut parts,
-        palette,
-        palette.walls[0].clone(),
-        palette.tile.clone(),
-        Vec3::new(-12.0 + j.x, 0.0, j.y),
-        rng.range(-0.15, 0.15),
-        9.0,
-        6.5,
-        4.5,
-    );
-    let j = jitter(rng);
-    house(
-        &mut parts,
-        palette,
-        palette.brick.clone(),
-        palette.slate.clone(),
-        Vec3::new(8.0 + j.x, 0.0, 6.0 + j.y),
-        rng.range(-0.15, 0.15),
-        16.0,
-        9.0,
-        6.5,
-    );
-    let j = jitter(rng);
-    house(
-        &mut parts,
-        palette,
-        palette.brick.clone(),
-        palette.slate.clone(),
-        Vec3::new(10.0 + j.x, 0.0, -14.0 + j.y),
-        rng.range(-0.15, 0.15),
-        22.0,
-        10.0,
-        7.0,
-    );
-    for x in [-4.0, 0.0] {
-        let j = jitter(rng);
-        push_solid(
-            &mut parts,
-            meshes.add(Cylinder::new(2.6, 9.5)),
-            palette.white.clone(),
-            Transform::from_xyz(x - 2.0 + j.x, 4.75, -9.0 + j.y),
-            Footprint::Cylinder { radius: 2.6, height: 9.5 },
-        );
-    }
-    let j = jitter(rng);
-    push_solid(
-        &mut parts,
-        meshes.add(Cylinder::new(3.0, 12.0)),
-        palette.stone.clone(),
-        Transform::from_xyz(-14.0 + j.x, 6.0, 14.0 + j.y),
-        Footprint::Cylinder { radius: 3.0, height: 12.0 },
-    );
-    parts
-}
-
-fn mill(meshes: &mut Assets<Mesh>, palette: &Palette) -> Vec<Part> {
-    let mut parts = Vec::new();
-    push_solid(&mut parts, meshes.add(Cylinder::new(3.8, 11.0)), palette.stone.clone(), Transform::from_xyz(0.0, 5.5, 0.0), Footprint::Cylinder { radius: 3.8, height: 11.0 });
-    push(&mut parts, meshes.add(Cone::new(4.6, 4.5)), palette.tile.clone(), Transform::from_xyz(0.0, 13.25, 0.0));
-    push(
-        &mut parts,
-        meshes.add(Cylinder::new(3.0, 0.6)),
-        palette.timber.clone(),
-        Transform::from_xyz(-4.6, 2.5, 0.0).with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
-    );
     parts
 }
 
@@ -329,24 +367,6 @@ fn outward(tris: &mut Vec<[Vec3; 3]>, [a, b, c]: [Vec3; 3], inside: Vec3) {
     }
 }
 
-struct Rng(u64);
-
-impl Rng {
-    fn from_position(p: Vec2) -> Self {
-        Rng(((p.x.to_bits() as u64) << 32) ^ p.y.to_bits() as u64 ^ 0x9E37_79B9_7F4A_7C15)
-    }
-
-    fn unit(&mut self) -> f32 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        (self.0 >> 40) as f32 / (1u64 << 24) as f32
-    }
-
-    fn range(&mut self, lo: f32, hi: f32) -> f32 {
-        lo + (hi - lo) * self.unit()
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -393,19 +413,6 @@ mod tests {
         let mut streets = road_ribbons(&map, &roads);
         streets.extend(plan.lanes());
         let clearance = RoadClearance::new(&streets);
-        let mut meshes = Assets::<Mesh>::default();
-        let palette = Palette {
-            walls: vec![Handle::default()],
-            slate: Handle::default(),
-            tile: Handle::default(),
-            stone: Handle::default(),
-            brick: Handle::default(),
-            white: Handle::default(),
-            timber: Handle::default(),
-            unit_cube: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
-            unit_gable: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
-        };
-
         #[derive(Default, Debug)]
         struct Tally {
             settlements: usize,
@@ -418,19 +425,10 @@ mod tests {
         }
         let mut tiers: std::collections::BTreeMap<&str, Tally> = Default::default();
         for (poi, layout) in map.pois.iter().zip(&plan.layouts) {
-            let ground = map.height_at(poi.position);
-            let mut rng = Rng::from_position(poi.position);
-            let shapes: Vec<Shape> = match poi.kind {
-                PoiKind::Village => layout.buildings.iter().map(|b| b.shape()).collect(),
-                other => {
-                    let parts = if other == PoiKind::Farm { farm(&mut meshes, &palette, &mut rng) } else { mill(&mut meshes, &palette) };
-                    let origin = Vec3::new(poi.position.x, ground, poi.position.y);
-                    parts.iter().filter_map(|p| p.solid.map(|f| solid_for(origin, &p.transform, f).shape)).collect()
-                }
-            };
+            let shapes: Vec<Shape> = layout.buildings.iter().map(|b| b.shape()).collect();
             let tier = match (poi.kind, poi.radius) {
-                (PoiKind::Mill, _) => "mill",
-                (PoiKind::Farm, _) => "farm",
+                (crate::map::PoiKind::Mill, _) => "mill",
+                (crate::map::PoiKind::Farm, _) => "farm",
                 (_, r) if r >= 150.0 => "town",
                 (_, r) if r >= 90.0 => "large village",
                 (_, r) if r >= 45.0 => "village",

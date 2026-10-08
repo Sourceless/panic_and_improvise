@@ -28,6 +28,25 @@ pub enum BuildingKind {
     /// A row of houses sharing walls, in the middle of a town.
     Terrace,
     Church,
+    Pub,
+    Shop,
+    School,
+    /// The village hall.
+    Hall,
+    PetrolStation,
+    Farmhouse,
+    Barn,
+    /// A grain silo: round.
+    Silo,
+    /// The mill's tower: round.
+    Mill,
+}
+
+impl BuildingKind {
+    /// Whether its footprint is a circle (the building's width is then its diameter).
+    pub fn is_round(self) -> bool {
+        matches!(self, BuildingKind::Silo | BuildingKind::Mill)
+    }
 }
 
 /// One building in a plan.
@@ -49,7 +68,11 @@ pub struct Building {
 
 impl Building {
     pub fn shape(&self) -> Shape {
-        Shape::Box { centre: self.centre, half: Vec2::new(self.width, self.depth) * 0.5, yaw: self.yaw }
+        if self.kind.is_round() {
+            Shape::Circle { centre: self.centre, radius: self.width * 0.5 }
+        } else {
+            Shape::Box { centre: self.centre, half: Vec2::new(self.width, self.depth) * 0.5, yaw: self.yaw }
+        }
     }
 }
 
@@ -98,6 +121,10 @@ const ROAD_GAP: f32 = 1.0;
 const BUILDING_GAP: f32 = 1.2;
 /// The most the ground may vary across a footprint, metres.
 const MAX_FOOTPRINT_RANGE: f32 = 1.8;
+/// Farm buildings and mills may stand on more slope: a farm is only flattened a little way round, and a
+/// mill stands on a river bank.
+const FARM_RANGE: f32 = 2.8;
+const MILL_RANGE: f32 = 4.0;
 /// Ground this near the sea, or water this near, is not built on.
 const SEA_MARGIN: f32 = 0.6;
 const WATER_MARGIN: f32 = 6.0;
@@ -346,6 +373,8 @@ struct Site<'a> {
     radius: f32,
     streets: RoadClearance,
     placed: Placed,
+    /// The most the ground may vary across a footprint here: more for a mill on its bank.
+    max_range: f32,
     /// Why spots were turned down, for finding out what is wrong when too few buildings fit.
     rejected: std::cell::RefCell<HashMap<&'static str, usize>>,
 }
@@ -385,7 +414,7 @@ impl Site<'_> {
         if low <= SEA_MARGIN {
             return Some("at sea level");
         }
-        if high - low > MAX_FOOTPRINT_RANGE {
+        if high - low > self.max_range {
             return Some("on a slope");
         }
         if self.map.water_distance(middle) <= WATER_MARGIN {
@@ -399,8 +428,13 @@ impl Site<'_> {
 }
 
 impl Layout {
-    /// Plans one settlement. (Only villages and hamlets so far; farms and mills are left as they were.)
+    /// Plans one settlement.
     pub fn generate(map: &TerrainMap, poi: &Poi, ribbons: &[RoadRibbon]) -> Layout {
+        match poi.kind {
+            PoiKind::Farm => return plan_farm(map, poi, ribbons),
+            PoiKind::Mill => return plan_mill(map, poi, ribbons),
+            PoiKind::Village => {}
+        }
         let Some(tier) = Tier::of(poi) else { return Layout::default() };
         let (centre, radius) = (poi.position, poi.radius);
         let mut rng = Rng::from_position(centre);
@@ -419,13 +453,17 @@ impl Layout {
         let mut lanes = grow_lanes(&mut rng, map, centre, radius, tier, &streets);
         streets.extend(lanes.iter().cloned());
         let mut layout = Layout::default();
-        let mut site = Site { map, centre, radius, streets: RoadClearance::new(&streets), placed: Placed::new(), rejected: Default::default() };
+        let mut site = Site { map, centre, radius, streets: RoadClearance::new(&streets), placed: Placed::new(), max_range: MAX_FOOTPRINT_RANGE, rejected: Default::default() };
 
         let frontages: Vec<(Frontage, RoadKind)> = streets.iter().flat_map(|r| frontages_of(r, centre, radius * BUILD_LIMIT).into_iter().map(move |f| (f, r.kind))).collect();
 
-        // The church first, where it has the pick of the plots, then everything else around it.
+        // The church first, where it has the pick of the plots, then the other buildings a place this size
+        // has, then houses everywhere else.
         if radius >= SMALL_SETTLEMENT_RADIUS {
             place_church(&mut rng, &mut site, &mut layout, &frontages, poi.landmark);
+        }
+        for special in specials(&mut rng, tier, radius) {
+            place_special(&mut site, &mut layout, &frontages, &special);
         }
         fill_with_houses(&mut rng, &mut site, &mut layout, &frontages, tier);
         layout.lanes = std::mem::take(&mut lanes);
@@ -596,6 +634,270 @@ fn place_church(rng: &mut Rng, site: &mut Site, layout: &mut Layout, frontages: 
             return;
         }
     }
+}
+
+/// A building a settlement has one or a few of, and what it wants of its site.
+struct Special {
+    kind: BuildingKind,
+    width: f32,
+    depth: f32,
+    wall_height: f32,
+    setback: f32,
+    /// Kept clear around it (a forecourt, a playground), as a radius.
+    yard: Option<f32>,
+    /// How far from the middle it likes to be, as a fraction of the settlement's radius.
+    near: f32,
+    /// Where it must stand: on a main road, or on a lane, or either.
+    on: Street,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Street {
+    MainRoad,
+    PreferMain,
+    Any,
+}
+
+/// The special buildings a settlement of this tier and radius has.
+fn specials(rng: &mut Rng, tier: Tier, radius: f32) -> Vec<Special> {
+    let pub_ = |near: f32| Special { kind: BuildingKind::Pub, width: 12.0, depth: 8.5, wall_height: 4.4, setback: 2.5, yard: None, near, on: Street::PreferMain };
+    let shop = |near: f32| Special { kind: BuildingKind::Shop, width: 8.0, depth: 7.0, wall_height: 4.0, setback: 1.8, yard: None, near, on: Street::PreferMain };
+    let school = Special { kind: BuildingKind::School, width: 22.0, depth: 9.5, wall_height: 3.8, setback: 5.0, yard: Some(15.0), near: 0.5, on: Street::Any };
+    let hall = |near: f32| Special { kind: BuildingKind::Hall, width: 14.0, depth: 8.5, wall_height: 4.2, setback: 4.0, yard: None, near, on: Street::Any };
+    let petrol = Special { kind: BuildingKind::PetrolStation, width: 20.0, depth: 20.0, wall_height: 3.2, setback: 3.0, yard: None, near: 0.78, on: Street::MainRoad };
+    let mut list = Vec::new();
+    match tier {
+        Tier::Hamlet => {}
+        Tier::Village => {
+            if radius >= 58.0 {
+                list.push(pub_(0.12));
+            }
+            if radius >= 65.0 {
+                list.push(shop(0.2));
+            }
+            if radius >= 72.0 {
+                list.push(hall(0.45));
+            }
+        }
+        Tier::LargeVillage => {
+            list.extend([pub_(0.12), pub_(0.4), shop(0.15), shop(0.3), hall(0.4), school]);
+            if rng.unit() < 0.5 {
+                list.push(petrol);
+            }
+        }
+        Tier::Town => {
+            list.extend([pub_(0.1), pub_(0.3), pub_(0.5), school, petrol, hall(0.35)]);
+            list.extend((0..7).map(|i| shop(0.06 + 0.05 * i as f32)));
+            list.push(Special { kind: BuildingKind::School, width: 22.0, depth: 9.5, wall_height: 3.8, setback: 5.0, yard: Some(15.0), near: 0.7, on: Street::Any });
+            list.push(Special { kind: BuildingKind::PetrolStation, width: 20.0, depth: 20.0, wall_height: 3.2, setback: 3.0, yard: None, near: 0.7, on: Street::MainRoad });
+        }
+    }
+    list
+}
+
+/// How far apart two of the same sort of special building are kept, metres.
+fn kept_apart(kind: BuildingKind) -> f32 {
+    match kind {
+        BuildingKind::PetrolStation => 150.0,
+        BuildingKind::School => 90.0,
+        BuildingKind::Pub => 45.0,
+        BuildingKind::Shop => 14.0,
+        _ => 0.0,
+    }
+}
+
+/// Puts one special building on the best plot there is for it: along a street of the right sort, as near
+/// the distance it likes from the middle as can be had.
+fn place_special(site: &mut Site, layout: &mut Layout, frontages: &[(Frontage, RoadKind)], special: &Special) -> bool {
+    let mut candidates: Vec<(f32, Building)> = Vec::new();
+    for (frontage, kind) in frontages {
+        let main = matches!(kind, RoadKind::Major | RoadKind::Minor);
+        if special.on == Street::MainRoad && !main {
+            continue;
+        }
+        for side in [1.0f32, -1.0] {
+            let mut s = special.width * 0.5;
+            while s < frontage.length() - special.width * 0.5 {
+                let (p, t, hw) = frontage.at(s);
+                let b = building_on_frontage(special.kind, p, t, hw, side, special.setback, special.width, special.depth, special.wall_height);
+                let distance = b.centre.distance(site.centre);
+                let mut score = (distance - special.near * site.radius).abs();
+                if special.on == Street::PreferMain && !main {
+                    score += 14.0;
+                }
+                candidates.push((score, b));
+                s += 3.0;
+            }
+        }
+    }
+    candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let apart = kept_apart(special.kind);
+    for (_, building) in candidates {
+        if layout.buildings.iter().any(|other| other.kind == special.kind && other.centre.distance(building.centre) < apart) {
+            continue;
+        }
+        let shape = building.shape();
+        if !site.fits(&shape) {
+            continue;
+        }
+        site.placed.add(shape);
+        if let Some(radius) = special.yard {
+            site.placed.add(Shape::Circle { centre: building.centre + building.front * (building.depth * 0.5 + radius * 0.4), radius });
+            layout.yards.push(Yard { centre: building.centre + building.front * (building.depth * 0.5 + radius * 0.4), radius });
+        }
+        layout.buildings.push(building);
+        return true;
+    }
+    false
+}
+
+/// A farm: a farmhouse facing the track, with barns and silos around a yard.
+fn plan_farm(map: &TerrainMap, poi: &Poi, ribbons: &[RoadRibbon]) -> Layout {
+    let (centre, radius) = (poi.position, poi.radius);
+    let mut rng = Rng::from_position(centre);
+    let mut layout = Layout::default();
+    let streets: Vec<RoadRibbon> = ribbons.iter().filter(|r| r.points.iter().any(|p| p.distance(centre) < radius + 20.0)).cloned().collect();
+    let mut site = Site { map, centre, radius: radius * 1.6, streets: RoadClearance::new(&streets), placed: Placed::new(), max_range: FARM_RANGE, rejected: Default::default() };
+    // Where the track is, and which way it runs, near the farm's centre.
+    let mut nearest: Option<(f32, Vec2, Vec2, f32)> = None;
+    for ribbon in &streets {
+        for (i, w) in ribbon.points.windows(2).enumerate() {
+            let direction = (w[1] - w[0]).normalize_or(Vec2::X);
+            let along = (centre - w[0]).dot(direction).clamp(0.0, w[0].distance(w[1]));
+            let point = w[0] + direction * along;
+            let d = point.distance(centre);
+            if nearest.is_none_or(|(best, ..)| d < best) {
+                nearest = Some((d, point, direction, ribbon.half_widths[i]));
+            }
+        }
+    }
+    // With no track, the yard simply faces a random way.
+    let (point, tangent, hw) = match nearest {
+        Some((_, p, t, hw)) => (p, t, hw),
+        None => {
+            let a = rng.range(0.0, TAU_F);
+            (centre, Vec2::new(a.cos(), a.sin()), 0.0)
+        }
+    };
+    let side = if rng.unit() < 0.5 { 1.0 } else { -1.0 };
+    let place = |site: &mut Site, layout: &mut Layout, b: Building| -> bool {
+        if site.fits(&b.shape()) {
+            site.placed.add(b.shape());
+            layout.buildings.push(b);
+            true
+        } else {
+            false
+        }
+    };
+    // The farmhouse stands beside the track, front to it, trying a little way either side.
+    let mut house = None;
+    for shift in [0.0, 6.0, -6.0, 12.0, -12.0, 18.0, -18.0] {
+        let b = building_on_frontage(BuildingKind::Farmhouse, point + tangent * shift, tangent, hw, side, rng.range(3.0, 5.0), 10.0, 7.0, 4.4);
+        if place(&mut site, &mut layout, b) {
+            house = Some(b);
+            break;
+        }
+    }
+    let Some(house) = house else { return layout };
+    // The yard is behind the house. Barns go round it on whatever ground has room: biggest first, each
+    // tried at a ring of places, then smaller ones if the big ones won't fit anywhere.
+    let yard = house.centre - house.front * (house.depth * 0.5 + 9.0);
+    let ring_places = |radius: f32| -> Vec<Vec2> {
+        // Away from the track side (the house's front), most room to the back first.
+        (0..12)
+            .map(|k| {
+                let a = k as f32 / 12.0 * TAU_F;
+                Vec2::new(a.cos(), a.sin())
+            })
+            .filter(|d| d.dot(house.front) < 0.5)
+            .map(|d| yard + d * radius)
+            .collect()
+    };
+    let mut barns: Vec<Building> = Vec::new();
+    let wanted = if rng.unit() < 0.35 { 1 } else { 2 };
+    'barns: for &(width, depth, wall) in &[(24.0f32, 10.5f32, 5.8f32), (19.0, 9.5, 5.4), (15.0, 8.5, 4.8), (11.0, 7.5, 4.2)] {
+        if barns.len() >= wanted {
+            break;
+        }
+        for radius in [12.0, 15.0, 18.0, 22.0, 26.0, 9.0] {
+            let mut places = ring_places(radius);
+            // Level ground first.
+            places.sort_by(|a, b| ground_range(map, *a, width).total_cmp(&ground_range(map, *b, width)));
+            for c in places {
+                // A barn faces the yard.
+                let facing = (yard - c).normalize_or(house.front);
+                let b = Building { kind: BuildingKind::Barn, centre: c, yaw: yaw_facing(facing), width, depth, wall_height: wall, front: facing };
+                if place(&mut site, &mut layout, b) {
+                    barns.push(b);
+                    continue 'barns;
+                }
+            }
+        }
+    }
+    // Silos beside the first barn.
+    if let Some(barn) = barns.first() {
+        let across = left_of(barn.front);
+        for k in 0..2 {
+            'silo: for nudge in [0.0, 3.0, -3.0, 6.0, -6.0] {
+                for side in [1.0f32, -1.0] {
+                    let c = barn.centre + across * side * (barn.width * 0.5 + 4.0 + k as f32 * 6.2) + barn.front * (nudge - barn.depth * 0.3);
+                    let silo = Building { kind: BuildingKind::Silo, centre: c, yaw: 0.0, width: 5.2, depth: 5.2, wall_height: 9.5, front: barn.front };
+                    if place(&mut site, &mut layout, silo) {
+                        break 'silo;
+                    }
+                }
+            }
+        }
+    }
+    layout.rejected = site.rejected.into_inner();
+    layout
+}
+
+/// The mill: its tower beside the end of the road, on the bank, and not on the road.
+fn plan_mill(map: &TerrainMap, poi: &Poi, ribbons: &[RoadRibbon]) -> Layout {
+    let centre = poi.position;
+    let streets: Vec<RoadRibbon> = ribbons.iter().filter(|r| r.points.iter().any(|p| p.distance(centre) < 40.0)).cloned().collect();
+    let site = Site { map, centre, radius: 40.0, streets: RoadClearance::new(&streets), placed: Placed::new(), max_range: MILL_RANGE, rejected: Default::default() };
+    let mut layout = Layout::default();
+    // Around the road's end, nearest the water that isn't in it.
+    let mut best: Option<(f32, Building)> = None;
+    for ring in [9.0, 11.0, 13.0, 16.0, 20.0, 24.0, 28.0] {
+        for step in 0..36 {
+            let angle = step as f32 / 36.0 * TAU_F;
+            let c = centre + Vec2::new(angle.cos(), angle.sin()) * ring;
+            // The wheel is on the water side: the way the water is nearest.
+            let toward_water = (0..16)
+                .map(|k| {
+                    let a = k as f32 / 16.0 * TAU_F;
+                    let d = Vec2::new(a.cos(), a.sin());
+                    (map.water_distance(c + d * 6.0), d)
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map_or(Vec2::X, |(_, d)| d);
+            let b = Building { kind: BuildingKind::Mill, centre: c, yaw: yaw_facing(toward_water), width: 7.6, depth: 7.6, wall_height: 11.0, front: toward_water };
+            // The tower needs room for the wheel: more than the usual distance from the water, on the road side.
+            if site.fits(&b.shape()) {
+                let score = map.water_distance(c);
+                if best.is_none_or(|(s, _)| score < s) {
+                    best = Some((score, b));
+                }
+            }
+        }
+    }
+    if let Some((_, b)) = best {
+        layout.buildings.push(b);
+    }
+    layout.rejected = site.rejected.into_inner();
+    layout
+}
+
+const TAU_F: f32 = std::f32::consts::TAU;
+
+/// How much the ground varies across `size` metres round `at`.
+fn ground_range(map: &TerrainMap, at: Vec2, size: f32) -> f32 {
+    let r = size * 0.4;
+    let heights = [Vec2::ZERO, Vec2::X * r, -Vec2::X * r, Vec2::Y * r, -Vec2::Y * r].map(|d| map.height_at(at + d));
+    heights.iter().cloned().fold(f32::MIN, f32::max) - heights.iter().cloned().fold(f32::MAX, f32::min)
 }
 
 /// Fills the frontage of every street with houses.
@@ -774,7 +1076,12 @@ mod tests {
                 assert!(points.iter().all(|&p| map.water_surface_at(p).is_none()), "{poi:?} {b:?} in water");
                 let heights: Vec<f32> = points.iter().map(|&p| map.height_at(p)).collect();
                 let range = heights.iter().cloned().fold(f32::MIN, f32::max) - heights.iter().cloned().fold(f32::MAX, f32::min);
-                assert!(range <= MAX_FOOTPRINT_RANGE + 1e-3, "{b:?} on a {range} m slope");
+                let allowed = match poi.kind {
+                    PoiKind::Village => MAX_FOOTPRINT_RANGE,
+                    PoiKind::Farm => FARM_RANGE,
+                    PoiKind::Mill => MILL_RANGE,
+                };
+                assert!(range <= allowed + 1e-3, "{b:?} on a {range} m slope");
             }
         }
         assert!(total > 500, "only {total} buildings on the whole map");
@@ -837,13 +1144,19 @@ mod tests {
             let frontage = main_m + lane_m;
             let mut why: Vec<_> = layout.rejected.iter().collect();
             why.sort_by(|a, b| b.1.cmp(a.1));
-            println!("{:>8.0} {:>7} {:>6} {:>8.0} {:>10.0} {:>10} {:>9.1}   {:?}", poi.radius, mains.len(), layout.lanes.len(), lane_m, main_m, layout.buildings.len(), layout.buildings.len() as f32 / (frontage / 100.0).max(0.01), why);
+            let mut kinds: HashMap<BuildingKind, usize> = HashMap::new();
+            for b in &layout.buildings {
+                *kinds.entry(b.kind).or_default() += 1;
+            }
+            let special: Vec<String> = [BuildingKind::Church, BuildingKind::Pub, BuildingKind::Shop, BuildingKind::School, BuildingKind::Hall, BuildingKind::PetrolStation].iter().map(|k| format!("{:?}:{}", k, kinds.get(k).copied().unwrap_or(0))).collect();
+            println!("{:>8.0} {:>7} {:>6} {:>8.0} {:>10.0} {:>10} {:>9.1}   {}", poi.radius, mains.len(), layout.lanes.len(), lane_m, main_m, layout.buildings.len(), layout.buildings.len() as f32 / (frontage / 100.0).max(0.01), special.join(" "));
+            let _ = why;
         }
     }
 
     /// A diagnostic: writes the layout of the settlement of a given rank (largest first) as JSON, to
     /// draw. `SETTLEMENT_DUMP` is where to write, and `SETTLEMENT_RANK` which one (default 0).
-    ///   SETTLEMENT_DUMP=/tmp/town.json cargo test --lib dump_a_settlement -- --ignored --nocapture
+    ///   SETTLEMENT_DUMP=/tmp/town.json [SETTLEMENT_KIND=farm|mill] cargo test --lib dump_a_settlement -- --ignored --nocapture
     #[test]
     #[ignore]
     fn dump_a_settlement() {
@@ -854,7 +1167,12 @@ mod tests {
         let roads = crate::roads::RoadNetwork::generate(&map, &params);
         let ribbons = road_ribbons(&map, &roads);
         let plan = SettlementPlan::generate(&map, &roads);
-        let mut rows: Vec<_> = map.pois.iter().zip(&plan.layouts).filter(|(p, _)| p.kind == PoiKind::Village).collect();
+        let wanted = match std::env::var("SETTLEMENT_KIND").as_deref() {
+            Ok("farm") => PoiKind::Farm,
+            Ok("mill") => PoiKind::Mill,
+            _ => PoiKind::Village,
+        };
+        let mut rows: Vec<_> = map.pois.iter().zip(&plan.layouts).filter(|(p, _)| p.kind == wanted).collect();
         rows.sort_by(|a, b| b.0.radius.total_cmp(&a.0.radius));
         let (poi, layout) = rows[rank];
         let near = |p: &Vec2| p.distance(poi.position) < poi.radius * 1.4;
@@ -874,5 +1192,89 @@ mod tests {
         let y: Vec<String> = layout.yards.iter().map(|y| format!("[{:.1},{:.1},{:.1}]", y.centre.x, y.centre.y, y.radius)).collect();
         out += &format!("\"yards\":[{}]}}", y.join(","));
         std::fs::write(&path, out).expect("write");
+    }
+
+    #[test]
+    fn a_town_has_what_a_town_should_and_a_hamlet_does_not() {
+        let count = |radius: f32, kind: BuildingKind| {
+            let (map, poi) = flat_site(radius, &[]);
+            Layout::generate(&map, &poi, &[main_road(radius * 2.0)]).buildings.iter().filter(|b| b.kind == kind).count()
+        };
+        // A town: several pubs and shops, schools, a hall, and petrol stations on the main road.
+        assert!(count(230.0, BuildingKind::Pub) >= 2 && count(230.0, BuildingKind::Shop) >= 3);
+        assert!(count(230.0, BuildingKind::School) >= 1 && count(230.0, BuildingKind::PetrolStation) >= 1);
+        // A village: a pub and a shop, but no petrol station or school. A hamlet: none of them.
+        assert_eq!(count(70.0, BuildingKind::Pub), 1);
+        assert_eq!(count(70.0, BuildingKind::PetrolStation) + count(70.0, BuildingKind::School), 0);
+        for kind in [BuildingKind::Pub, BuildingKind::Shop, BuildingKind::School, BuildingKind::Hall, BuildingKind::PetrolStation, BuildingKind::Church] {
+            assert_eq!(count(35.0, kind), 0, "a hamlet has no {kind:?}");
+        }
+    }
+
+    #[test]
+    fn two_petrol_stations_are_not_side_by_side() {
+        let (map, poi) = flat_site(230.0, &[]);
+        let layout = Layout::generate(&map, &poi, &[main_road(460.0)]);
+        let stations: Vec<_> = layout.buildings.iter().filter(|b| b.kind == BuildingKind::PetrolStation).collect();
+        for (i, a) in stations.iter().enumerate() {
+            for b in &stations[i + 1..] {
+                assert!(a.centre.distance(b.centre) >= 150.0, "{} m apart", a.centre.distance(b.centre));
+            }
+        }
+    }
+
+    #[test]
+    fn petrol_stations_stand_on_a_main_road_and_not_a_lane() {
+        let (map, poi) = flat_site(230.0, &[]);
+        let road = main_road(460.0);
+        let layout = Layout::generate(&map, &poi, &[road.clone()]);
+        let main_only = RoadClearance::new(&[road]);
+        let _ = main_only;
+        for b in layout.buildings.iter().filter(|b| b.kind == BuildingKind::PetrolStation) {
+            // The road runs along y = 0; a station beside it is within a plot and a bit of it.
+            assert!(b.centre.y.abs() < 24.0, "{b:?} is {} m from the main road", b.centre.y.abs());
+            assert!(b.front.y.abs() > 0.9, "and faces it");
+        }
+    }
+
+    #[test]
+    fn every_farm_has_a_farmhouse_and_a_barn_and_none_is_on_the_track() {
+        let params = GenParams::default();
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
+        let roads = crate::roads::RoadNetwork::generate(&map, &params);
+        let plan = SettlementPlan::generate(&map, &roads);
+        let mut farms = 0;
+        let mut with_house = 0;
+        let mut with_barn = 0;
+        let mut why: HashMap<&str, usize> = HashMap::new();
+        for layout in map.pois.iter().zip(&plan.layouts).filter(|(p, _)| p.kind == PoiKind::Farm).map(|(_, l)| l) {
+            farms += 1;
+            let has = |kind| layout.buildings.iter().any(|b| b.kind == kind);
+            with_house += has(BuildingKind::Farmhouse) as usize;
+            with_barn += has(BuildingKind::Barn) as usize;
+            if !has(BuildingKind::Barn) {
+                for (reason, n) in &layout.rejected {
+                    *why.entry(reason).or_default() += n;
+                }
+            }
+        }
+        eprintln!("{farms} farms: {with_house} with a farmhouse, {with_barn} with a barn; turned down on the others: {why:?}");
+        assert!(with_house * 10 >= farms * 9, "{with_house} of {farms} farms have a farmhouse");
+        assert!(with_barn * 10 >= farms * 8, "{with_barn} of {farms} farms have a barn");
+    }
+
+    #[test]
+    fn every_mill_has_its_tower_by_the_water_and_off_the_road() {
+        let params = GenParams::default();
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
+        let roads = crate::roads::RoadNetwork::generate(&map, &params);
+        let plan = SettlementPlan::generate(&map, &roads);
+        let streets = road_ribbons(&map, &roads);
+        let clearance = RoadClearance::new(&streets);
+        for (poi, layout) in map.pois.iter().zip(&plan.layouts).filter(|(p, _)| p.kind == PoiKind::Mill) {
+            let mill = layout.buildings.iter().find(|b| b.kind == BuildingKind::Mill).unwrap_or_else(|| panic!("no mill at {poi:?}; rejected: {:?}", layout.rejected));
+            assert!(clearance.clearance(mill.centre) > mill.width * 0.5, "the mill tower is on its road");
+            assert!(map.water_distance(mill.centre) < 25.0, "and is by the water");
+        }
     }
 }
