@@ -79,6 +79,13 @@ pub struct Snapshot {
     pub spread: f32,
     /// Bullets in flight.
     pub bullets: Vec<BulletInfo>,
+    /// Rounds left in the magazine, whether a reload is going, and how far the gun is lowered for it.
+    pub ammo: u32,
+    pub reloading: bool,
+    pub gun_lowered: f32,
+    /// Where the bolt rests when the gun is at rest, and how long the current reload will take.
+    pub bolt: Option<fps_prototype::gun_state::Bolt>,
+    pub reload_seconds: f32,
 }
 
 static GAME: OnceLock<Sender<Command>> = OnceLock::new();
@@ -353,7 +360,17 @@ fn take_snapshot(world: &mut World) -> Snapshot {
             velocity: bullet.velocity(),
         })
         .collect();
+    let (ammo, reloading, gun_lowered, bolt, reload_seconds) = world
+        .query::<&Gun>()
+        .iter(world)
+        .next()
+        .map_or((0, false, 0.0, None, 0.0), |g| (g.ammo, g.reloading(), g.lowered, g.bolt(), g.reload_seconds()));
     Snapshot {
+        bolt,
+        reload_seconds,
+        ammo,
+        reloading,
+        gun_lowered,
         stance,
         eye_height,
         ground_speed,

@@ -3,13 +3,23 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use crate::gun_model::{self, BORE_Y, MUZZLE_Z, REAR_PEEP_Z, SIGHT_LINE};
 use crate::ballistics::{self, Cartridge, Flight, NINE_PARA};
+use crate::gun_state::{Bolt, Mechanism, State, STERLING};
 use crate::wind::Wind;
 use crate::player::{spawn_player, toggle_cursor_grab, AimBlend, FpsCamera, Stance};
 pub use crate::gun_model::sight_points;
 use crate::map::TerrainMap;
 use crate::target::{dummy_aabb, TargetDummy};
 
-const FIRE_INTERVAL: f32 = 0.12;
+/// The gun's mechanism: bolt type and timings (rate of fire, how long a reload takes).
+pub const MECHANISM: Mechanism = STERLING;
+/// Rounds in a full magazine.
+pub const MAGAZINE_SIZE: u32 = 30;
+/// Seconds the gun takes to drop away at the start of a reload, and again to come back up at the end.
+const RELOAD_LOWER_TIME: f32 = 0.45;
+/// How far the gun drops (metres) and tips muzzle-down (radians) at the bottom of a reload: far
+/// enough to be right off the bottom of the screen.
+const RELOAD_DROP: f32 = 0.6;
+const RELOAD_TIP: f32 = -0.6;
 /// A bullet that hasn't hit anything by now is long gone.
 const BULLET_LIFETIME: f32 = 5.0;
 /// The range the Sterling's sights are zeroed for: a shot crosses the line of sight here.
@@ -21,7 +31,9 @@ pub const CARTRIDGE: Cartridge = NINE_PARA;
 const BULLET_DAMAGE: f32 = 25.0;
 /// Tracers appear after the bullet has flown this far (metres), and are this long.
 const TRACER_START: f32 = 15.0;
-const TRACER_LENGTH: f32 = 2.4;
+const TRACER_LENGTH: f32 = 3.0;
+/// The tracer's thickness at the muzzle, metres.
+const TRACER_WIDTH: f32 = 0.04;
 
 /// Where the gun sits in camera space when carried at the hip, and when aimed down its sights.
 const HIP_POSITION: Vec3 = Vec3::new(0.2, -0.2, -0.5);
@@ -79,7 +91,8 @@ impl Plugin for WeaponPlugin {
 
 #[derive(Component)]
 pub struct Gun {
-    cooldown: f32,
+    /// Where the gun's mechanism is: ready, cycling a shot, dry, or being reloaded.
+    pub state: State,
     trigger_blocked: bool,
     pub shots_fired: u32,
     /// Whether the player has toggled aiming down the sights.
@@ -107,6 +120,49 @@ pub struct Gun {
     pub current_spread: f32,
     /// The gun model's jolt, 1 right after a shot, decaying to 0.
     pub gun_kick: f32,
+    /// Rounds left in the magazine.
+    pub ammo: u32,
+    /// The reload key was pressed mid-shot; the reload starts as soon as the shot has cycled.
+    reload_queued: bool,
+    /// How far the gun is lowered for the reload right now, 0 to 1.
+    pub lowered: f32,
+}
+
+impl Gun {
+    pub fn reloading(&self) -> bool {
+        self.state.is_reloading()
+    }
+
+    /// Acts on a reload request, as soon as the mechanism is free to (not mid-shot). A request the
+    /// gun can't use at all (a full magazine, a reload already going) is dropped.
+    fn try_queued_reload(&mut self) {
+        if !self.reload_queued || matches!(self.state, State::Cycling { .. }) {
+            return;
+        }
+        self.reload_queued = false;
+        self.state = MECHANISM.press_reload(self.state, self.ammo, MAGAZINE_SIZE);
+    }
+
+    /// Where the bolt is, when the gun is at rest.
+    pub fn bolt(&self) -> Option<Bolt> {
+        MECHANISM.bolt(self.state)
+    }
+
+    /// How long the current reload will take, or 0 when not reloading.
+    pub fn reload_seconds(&self) -> f32 {
+        match self.state {
+            State::Reloading { total, .. } => total,
+            _ => 0.0,
+        }
+    }
+
+    /// How far down the gun is for the reload, 0 to 1.
+    fn lowering(&self) -> f32 {
+        match self.state {
+            State::Reloading { elapsed, total } => reload_lowering(elapsed, total),
+            _ => 0.0,
+        }
+    }
 }
 
 /// The gun's inaccuracy right now: how far a shot could stray (radians, half-angle of the cone),
@@ -137,11 +193,25 @@ pub fn gun_transform(blend: f32) -> Transform {
 /// The gun with its recoil jolt applied: shoved back toward the shoulder and tipped muzzle-up,
 /// about half as much when braced on the sights.
 pub fn gun_pose(blend: f32, kick: f32) -> Transform {
+    gun_pose_lowered(blend, kick, 0.0)
+}
+
+/// The gun's pose with `lowered` (0 to 1) of the way down for a reload: dropped away below the view
+/// and tipped muzzle-down.
+pub fn gun_pose_lowered(blend: f32, kick: f32, lowered: f32) -> Transform {
     let k = kick * (1.0 - 0.5 * blend.clamp(0.0, 1.0));
     let mut t = gun_transform(blend);
     t.translation.z += GUN_KICK_BACK * k;
-    t.rotation = Quat::from_rotation_x(GUN_KICK_TIP * k);
+    t.rotation = Quat::from_rotation_x(GUN_KICK_TIP * k + RELOAD_TIP * lowered);
+    t.translation.y -= RELOAD_DROP * lowered;
     t
+}
+
+/// How far down the gun is, 0 to 1, `elapsed` seconds into a reload of `total`: it drops away, stays
+/// down while the magazine is changed (and the bolt charged, if it needs it), then comes back up.
+pub fn reload_lowering(elapsed: f32, total: f32) -> f32 {
+    let smooth = |x: f32| x.clamp(0.0, 1.0).powi(2) * (3.0 - 2.0 * x.clamp(0.0, 1.0));
+    smooth(elapsed / RELOAD_LOWER_TIME).min(smooth((total - elapsed) / RELOAD_LOWER_TIME))
 }
 
 /// How much one shot kicks the view: (pitch up, yaw), in radians. The sideways part is a fixed
@@ -214,6 +284,15 @@ impl Bullet {
     }
 }
 
+/// How much to scale the tracer streak once the bullet has flown `distance` metres. A streak of
+/// fixed size shrinks to nothing as it flies away; growing it with distance keeps it about as big
+/// on the screen, so the arc of the fall can be followed all the way out.
+pub fn tracer_scale(distance: f32) -> Vec3 {
+    let width = (1.0 + 0.05 * distance).min(10.0);
+    let length = (1.0 + 0.02 * distance).min(5.0);
+    Vec3::new(width, width, length)
+}
+
 /// Whether a bullet that has flown `distance` metres shows its tracer yet. Right at the muzzle a
 /// glowing streak is just a distraction in your face (and spoils the sight picture), so it only
 /// appears once the bullet is well on its way.
@@ -265,10 +344,10 @@ pub fn spawn_gun(
     };
     commands.insert_resource(BulletAssets {
         // A thin streak along the line of flight (the bullet is turned to face the way it goes).
-        mesh: meshes.add(Cuboid::new(0.018, 0.018, TRACER_LENGTH)),
+        mesh: meshes.add(Cuboid::new(TRACER_WIDTH, TRACER_WIDTH, TRACER_LENGTH)),
         // Unlit and additive, with HDR values, so it glows (and blooms) against any sky.
         material: materials.add(StandardMaterial {
-            base_color: Color::linear_rgb(5.0, 3.2, 1.0),
+            base_color: Color::linear_rgb(40.0, 24.0, 7.0),
             unlit: true,
             alpha_mode: AlphaMode::Add,
             ..default()
@@ -281,7 +360,7 @@ pub fn spawn_gun(
         cam_children
             .spawn((
                 Gun {
-                    cooldown: 0.0,
+                    state: State::Ready,
                     trigger_blocked: false,
                     shots_fired: 0,
                     aiming: false,
@@ -298,6 +377,9 @@ pub fn spawn_gun(
                     worst_shot_error: 0.0,
                     current_spread: HIP_SPREAD,
                     gun_kick: 0.0,
+                    ammo: MAGAZINE_SIZE,
+                    reload_queued: false,
+                    lowered: 0.0,
                 },
                 gun_transform(0.0),
                 Visibility::default(),
@@ -328,8 +410,18 @@ fn aim(
         return;
     };
     let captured = cursors.single().is_ok_and(|c| c.grab_mode == CursorGrabMode::Locked);
-    if captured && mouse.just_pressed(MouseButton::Right) {
+    // Reloading is always something the player asks for: nothing reloads by itself.
+    if captured && keys.just_pressed(KeyCode::KeyR) {
+        gun.reload_queued = true;
+    }
+    gun.try_queued_reload();
+    gun.lowered = gun.lowering();
+    // The sights come down for a reload, and can't be raised again until it's done.
+    if captured && mouse.just_pressed(MouseButton::Right) && !gun.reloading() {
         gun.aiming = !gun.aiming;
+    }
+    if gun.reloading() {
+        gun.aiming = false;
     }
     if keys.pressed(KeyCode::ShiftLeft) && keys.pressed(KeyCode::KeyW) {
         gun.aiming = false;
@@ -348,7 +440,7 @@ fn aim(
     if gun.gun_kick < 0.002 {
         gun.gun_kick = 0.0;
     }
-    *transform = gun_pose(gun.aim_blend, gun.gun_kick);
+    *transform = gun_pose_lowered(gun.aim_blend, gun.gun_kick, gun.lowered);
     blend.0 = gun.aim_blend;
     if let Ok(player) = player.single() {
         gun.current_spread = current_spread(&gun, player);
@@ -367,7 +459,13 @@ fn fire(
     let Ok(mut gun) = guns.single_mut() else {
         return;
     };
-    gun.cooldown = (gun.cooldown - time.delta_secs()).max(0.0);
+    // The mechanism moves on with time: a shot finishes cycling, a reload finishes.
+    let (state, reload_done) = MECHANISM.tick(gun.state, gun.ammo, mouse.pressed(MouseButton::Left), time.delta_secs());
+    gun.state = state;
+    if reload_done {
+        gun.ammo = MAGAZINE_SIZE;
+    }
+    gun.try_queued_reload();
     gun.since_shot += time.delta_secs();
 
     if !mouse.pressed(MouseButton::Left) {
@@ -382,12 +480,19 @@ fn fire(
         gun.trigger_blocked = true;
         return;
     }
-    if gun.trigger_blocked || gun.cooldown > 0.0 {
+    if gun.trigger_blocked {
         return;
     }
     let Ok((mut cam, mut view)) = camera.single_mut() else {
         return;
     };
+    // The trigger: the mechanism decides whether that fires a round (it won't while cycling,
+    // reloading or dry, and on an empty open-bolt gun it just lets the bolt go forward).
+    let (state, fires) = MECHANISM.pull_trigger(gun.state, gun.ammo);
+    gun.state = state;
+    if !fires {
+        return;
+    }
 
     // The bullet leaves the end of the barrel, wherever the gun is right now (hip or sights).
     let gun_in_world = cam.mul_transform(gun_pose(gun.aim_blend, gun.gun_kick));
@@ -405,8 +510,8 @@ fn fire(
     gun.worst_shot_error = gun.worst_shot_error.max(error);
     gun.bloom = (gun.bloom + BLOOM_PER_SHOT).min(BLOOM_MAX);
 
-    gun.cooldown = FIRE_INTERVAL;
     gun.shots_fired += 1;
+    gun.ammo -= 1;
     gun.last_shot_origin = Some(muzzle);
     gun.since_shot = 0.0;
     // A different recording each time, a little faster or slower, so a burst doesn't sound like
@@ -524,6 +629,7 @@ fn move_bullets(
         if let Ok(heading) = Dir3::new(flight.velocity) {
             transform.look_to(heading, Vec3::Y);
         }
+        transform.scale = tracer_scale(bullet.travelled);
         if tracer_visible(bullet.travelled) && *visibility == Visibility::Hidden {
             *visibility = Visibility::Inherited;
         }
@@ -757,5 +863,52 @@ mod tests {
         assert!(!tracer_visible(TRACER_START - 0.1));
         assert!(tracer_visible(TRACER_START));
         assert!(tracer_visible(200.0));
+    }
+
+    #[test]
+    fn the_tracer_grows_with_distance_up_to_a_limit() {
+        let near = tracer_scale(TRACER_START);
+        let far = tracer_scale(100.0);
+        assert!(far.x > near.x * 2.0 && far.z > near.z);
+        assert_eq!(tracer_scale(1.0e6), tracer_scale(1.0e7), "capped");
+        assert!(tracer_scale(0.0).x >= 1.0);
+    }
+
+    #[test]
+    fn a_reload_drops_the_gun_away_and_brings_it_back() {
+        for total in [2.0, 2.7] {
+            assert_eq!(reload_lowering(0.0, total), 0.0);
+            assert_eq!(reload_lowering(total / 2.0, total), 1.0, "fully down mid-reload");
+            assert_eq!(reload_lowering(total, total), 0.0);
+            let steps: Vec<f32> = (0..=100).map(|i| reload_lowering(i as f32 / 100.0 * total, total)).collect();
+            assert!(steps.windows(2).take(15).all(|p| p[1] >= p[0]), "going down");
+            assert!(steps.windows(2).skip(85).all(|p| p[1] <= p[0]), "coming back up");
+        }
+    }
+
+    #[test]
+    fn a_longer_reload_spends_the_extra_time_with_the_gun_down() {
+        // The drop and the recovery take the same time either way; the extra seconds are at the bottom.
+        let (quick, slow) = (2.0, 2.7);
+        assert_eq!(reload_lowering(RELOAD_LOWER_TIME, quick), 1.0);
+        assert_eq!(reload_lowering(RELOAD_LOWER_TIME, slow), 1.0);
+        assert_eq!(reload_lowering(slow - RELOAD_LOWER_TIME, slow), 1.0);
+        assert!(reload_lowering(quick - 0.1, slow) == 1.0, "still down when a quick reload would be rising");
+    }
+
+    #[test]
+    fn a_lowered_gun_is_below_the_view() {
+        let rest = gun_pose_lowered(0.0, 0.0, 0.0);
+        let down = gun_pose_lowered(0.0, 0.0, 1.0);
+        assert_eq!(rest, gun_pose(0.0, 0.0));
+        // Even the muzzle end is well below the bottom of a 45-degree-or-so view.
+        let muzzle = down.transform_point(MUZZLE_LOCAL);
+        assert!(-muzzle.y / -muzzle.z > 1.0, "muzzle at {muzzle:?}");
+        assert!(down.transform_point(Vec3::ZERO).y < rest.translation.y - 0.4);
+    }
+
+    #[test]
+    fn the_magazine_holds_thirty_rounds() {
+        assert_eq!(MAGAZINE_SIZE, 30);
     }
 }

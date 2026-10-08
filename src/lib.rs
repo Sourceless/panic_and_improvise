@@ -6,6 +6,7 @@ pub mod crosshair;
 pub mod field_material;
 pub mod fill;
 pub mod grass;
+pub mod gun_state;
 pub mod ground_textures;
 pub mod gun_model;
 pub mod look;

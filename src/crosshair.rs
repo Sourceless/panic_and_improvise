@@ -4,7 +4,7 @@
 use bevy::prelude::*;
 
 use crate::player::FpsCamera;
-use crate::weapon::Gun;
+use crate::weapon::{Gun, MAGAZINE_SIZE};
 
 const DASH_LENGTH: f32 = 9.0;
 const DASH_THICKNESS: f32 = 2.0;
@@ -39,7 +39,7 @@ pub struct CrosshairPlugin;
 
 impl Plugin for CrosshairPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_crosshair).add_systems(Update, update_crosshair);
+        app.add_systems(Startup, (spawn_crosshair, spawn_ammo_counter)).add_systems(Update, (update_crosshair, update_ammo_counter));
     }
 }
 
@@ -59,6 +59,43 @@ fn spawn_crosshair(mut commands: Commands) {
             },
             BackgroundColor(Color::WHITE),
         ));
+    }
+}
+
+#[derive(Component)]
+struct AmmoCounter;
+
+fn spawn_ammo_counter(mut commands: Commands) {
+    commands.spawn((
+        AmmoCounter,
+        Text::new(""),
+        TextFont { font_size: bevy::text::FontSize::Px(30.0), ..default() },
+        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.85)),
+        Node { position_type: PositionType::Absolute, right: Val::Px(28.0), bottom: Val::Px(22.0), ..default() },
+    ));
+}
+
+/// What the ammo counter says: the rounds left in the magazine, or that a reload is going.
+pub fn ammo_text(ammo: u32, reloading: bool) -> String {
+    if reloading {
+        "RELOADING".to_string()
+    } else if ammo == 0 {
+        // Nothing left to do but reload.
+        format!("0 / {MAGAZINE_SIZE}   R")
+    } else {
+        format!("{ammo} / {MAGAZINE_SIZE}")
+    }
+}
+
+fn update_ammo_counter(guns: Query<&Gun>, mut counters: Query<(&mut Text, &mut TextColor), With<AmmoCounter>>) {
+    let Ok(gun) = guns.single() else { return };
+    for (mut text, mut colour) in &mut counters {
+        let shown = ammo_text(gun.ammo, gun.reloading());
+        if text.0 != shown {
+            text.0 = shown;
+        }
+        // The last few rounds show in red.
+        colour.0 = if gun.ammo <= 5 && !gun.reloading() { Color::srgb(1.0, 0.35, 0.3) } else { Color::srgba(1.0, 1.0, 1.0, 0.85) };
     }
 }
 
@@ -100,6 +137,14 @@ mod tests {
     use super::*;
 
     const FOV: f32 = std::f32::consts::FRAC_PI_2 * 0.8;
+
+    #[test]
+    fn the_ammo_counter_reads_rounds_or_reloading() {
+        assert_eq!(ammo_text(30, false), "30 / 30");
+        assert_eq!(ammo_text(7, false), "7 / 30");
+        assert_eq!(ammo_text(7, true), "RELOADING");
+        assert!(ammo_text(0, false).ends_with('R'), "an empty magazine says how to reload");
+    }
 
     #[test]
     fn the_gap_grows_with_the_spread() {

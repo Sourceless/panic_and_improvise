@@ -1,0 +1,72 @@
+Feature: The magazine, the bolt, and reloading
+
+  Background:
+    Given I am in test room 1
+    And I have the smg
+
+  Scenario: A full magazine holds thirty rounds
+    Then the magazine has 30 rounds
+
+  Scenario: Each shot uses a round
+    When I fire 3 single shots
+    Then the magazine has 27 rounds
+
+  Scenario: The bolt rests to the rear on a ready open-bolt gun
+    Then the bolt is back
+
+  Scenario: R reloads a part-empty magazine, with the gun dipping off the screen
+    Given I fire 3 single shots
+    When I press R
+    Then the gun is reloading
+    And the reload takes 2 seconds
+    And the gun has dipped off the screen
+    And the gun is back up
+    And the magazine has 30 rounds
+
+  Scenario: R does nothing with a full magazine
+    When I press R
+    Then the gun is not reloading
+
+  Scenario: You cannot fire during a reload
+    Given I fire once
+    And I press R
+    And the gun is reloading
+    When I hold fire for 0.5 seconds
+    Then the gun fired between 1 and 1 shots
+
+  Scenario: Reloading takes the gun off its sights
+    Given I right click
+    And the gun is on its sights
+    And I fire once
+    When I press R
+    Then the gun is back at the hip
+
+  Scenario: Emptying the magazine leaves the bolt forward, and nothing reloads by itself
+    When I hold fire for 4 seconds
+    Then the gun fired between 30 and 30 shots
+    And the magazine has 0 rounds
+    And the bolt is forward
+    And the gun is not reloading
+
+  Scenario: A dry gun does nothing when the trigger is pulled
+    Given I hold fire for 4 seconds
+    When I fire once
+    Then the gun fired between 30 and 30 shots
+    And the gun is not reloading
+
+  Scenario: Reloading a dry gun takes longer, because the bolt has to be charged
+    Given I hold fire for 4 seconds
+    And the bolt is forward
+    When I press R
+    Then the gun is reloading
+    And the reload takes 2.7 seconds
+    And the gun is back up
+    And the magazine has 30 rounds
+    And the bolt is back
+
+  Scenario: Once reloaded the gun fires again
+    Given I hold fire for 4 seconds
+    And I press R
+    And the gun is back up
+    When I fire once
+    Then the gun fired between 31 and 31 shots

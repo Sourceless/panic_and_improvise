@@ -98,6 +98,7 @@ fn shot_from_hip(_world: &mut GameWorld) {
     assert!(right > 0.15 && up < -0.1 && ahead > 0.4, "muzzle at right {right}, up {up}, ahead {ahead}");
 }
 
+#[given(regex = r"^I fire (\d+) single shots?$")]
 #[when(regex = r"^I fire (\d+) single shots?$")]
 fn fire_n_single_shots(_world: &mut GameWorld, count: u32) {
     step_pause();
@@ -163,12 +164,17 @@ fn shot_from_sights(_world: &mut GameWorld) {
     assert!(right.abs() < 0.01 && up.abs() < 0.12 && ahead > 0.4, "muzzle at right {right}, up {up}, ahead {ahead}");
 }
 
+#[given("I fire once")]
 #[when("I fire once")]
 fn fire_once(_world: &mut GameWorld) {
     step_pause();
+    let before = snapshot().shots_fired;
     tap_fire();
+    // Don't move on until the shot has happened, so what the next step does can't land in the same frame.
+    wait_for(Duration::from_secs(3), || snapshot().shots_fired > before);
 }
 
+#[given(regex = r"^I hold fire for ([\d.]+) seconds?$")]
 #[when(regex = r"^I hold fire for ([\d.]+) seconds?$")]
 fn hold_fire_for(_world: &mut GameWorld, seconds: f32) {
     step_pause();
@@ -237,6 +243,7 @@ fn key_named(name: &str) -> KeyCode {
     match name {
         "C" => KeyCode::KeyC,
         "Z" => KeyCode::KeyZ,
+        "R" => KeyCode::KeyR,
         "W" => KeyCode::KeyW,
         "Space" => KeyCode::Space,
         "Shift" => KeyCode::ShiftLeft,
@@ -397,4 +404,62 @@ fn blown(_world: &mut GameWorld, toward: String, metres: f32) {
 fn not_blown(_world: &mut GameWorld, metres: f32) {
     let bullet = bullet_past(metres).expect("the bullet never got that far");
     assert!(bullet.velocity.x.abs() < 1.5, "moving sideways at {} m/s after {} m", bullet.velocity.x, bullet.travelled);
+}
+
+#[given(regex = r"^the magazine has (\d+) rounds?$")]
+#[then(regex = r"^the magazine has (\d+) rounds?$")]
+fn magazine_has(_world: &mut GameWorld, rounds: u32) {
+    let ok = wait_for(Duration::from_secs(8), || snapshot().ammo == rounds);
+    assert!(ok, "the magazine has {} rounds, not {rounds}", snapshot().ammo);
+}
+
+#[given("the gun is reloading")]
+#[then("the gun is reloading")]
+fn gun_reloading(_world: &mut GameWorld) {
+    let ok = wait_for(Duration::from_secs(3), || snapshot().reloading);
+    assert!(ok, "the gun is not reloading");
+}
+
+#[then("the gun is not reloading")]
+fn gun_not_reloading(_world: &mut GameWorld) {
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!snapshot().reloading, "the gun is reloading");
+}
+
+#[given("the gun has dipped off the screen")]
+#[then("the gun has dipped off the screen")]
+fn gun_dipped(_world: &mut GameWorld) {
+    let ok = wait_for(Duration::from_secs(8), || snapshot().gun_lowered > 0.99);
+    assert!(ok, "the gun only got {} of the way down", snapshot().gun_lowered);
+}
+
+#[given("the gun is back up")]
+#[then("the gun is back up")]
+fn gun_back_up(_world: &mut GameWorld) {
+    // It has to have gone down first: a gun that never started reloading isn't "back up".
+    let started = wait_for(Duration::from_secs(3), || snapshot().reloading);
+    assert!(started, "the reload never started");
+    let ok = wait_for(Duration::from_secs(10), || {
+        let s = snapshot();
+        !s.reloading && s.gun_lowered == 0.0
+    });
+    assert!(ok, "the gun is still down");
+}
+
+#[given(regex = r"^the bolt is (forward|back)$")]
+#[then(regex = r"^the bolt is (forward|back)$")]
+fn bolt_is(_world: &mut GameWorld, place: String) {
+    use fps_prototype::gun_state::Bolt;
+    let want = if place == "forward" { Bolt::Forward } else { Bolt::Rear };
+    let ok = wait_for(Duration::from_secs(3), || snapshot().bolt == Some(want));
+    assert!(ok, "the bolt is {:?}, not {want:?}", snapshot().bolt);
+}
+
+#[given(regex = r"^the reload takes ([\d.]+) seconds$")]
+#[then(regex = r"^the reload takes ([\d.]+) seconds$")]
+fn reload_takes(_world: &mut GameWorld, seconds: f32) {
+    let started = wait_for(Duration::from_secs(3), || snapshot().reloading);
+    assert!(started, "no reload is going");
+    let total = snapshot().reload_seconds;
+    assert!((total - seconds).abs() < 0.05, "the reload takes {total} s, not {seconds}");
 }
