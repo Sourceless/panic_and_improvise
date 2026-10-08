@@ -130,6 +130,75 @@ def grass_tuft(atlas, seed, blades):
     return canvas
 
 
+def strap_tuft(atlas, seed, blades):
+    """A fern-like tuft: long strap leaves arching out and over from one point."""
+    rng = random.Random(seed)
+    sprites = load_sprites(atlas, min_area=1200)
+    canvas = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
+    root = (SIZE / 2, SIZE - 8)
+    for i in range(blades):
+        sprite = rng.choice(sprites)
+        if sprite.height > sprite.width:
+            sprite = sprite.rotate(-90, expand=True)
+        # Leaf lies along +x; stand it up, then fan it out to either side.
+        length = rng.uniform(0.5, 0.95) * SIZE * 0.62
+        scale = length / sprite.width
+        s = sprite.resize((max(2, int(sprite.width * scale)), max(2, int(sprite.height * scale))), Image.LANCZOS)
+        angle = rng.uniform(-78, 78)  # from straight up; leaning out
+        layer = Image.new("RGBA", (SIZE * 2, SIZE * 2), (0, 0, 0, 0))
+        c = (SIZE, SIZE + SIZE // 2)
+        layer.paste(s, (c[0], c[1] - s.height // 2), s)
+        layer = layer.rotate(90 - angle, center=c, resample=Image.BICUBIC)
+        layer = layer.crop((c[0] - SIZE // 2, c[1] - (SIZE - 8), c[0] + SIZE // 2, c[1] + 8))
+        layer = ImageEnhance.Brightness(layer).enhance(rng.uniform(0.7, 1.1))
+        canvas.alpha_composite(layer)
+    return canvas
+
+
+def leaf_mound(atlas, seed, count, leaf_px):
+    """Low, spreading ground cover (ivy, bramble): leaves heaped in a flat dome."""
+    rng = random.Random(seed)
+    sprites = load_sprites(atlas)
+    canvas = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
+    placed = []
+    for _ in range(count):
+        th = rng.uniform(0, 3.1416)
+        r = rng.random() ** 0.55
+        x = SIZE / 2 + np.cos(th) * r * SIZE * 0.46
+        y = SIZE - 20 - np.sin(th) * r * SIZE * 0.5
+        placed.append((y, x))
+    for y, x in sorted(placed, key=lambda p: p[0]):
+        sprite = rng.choice(sprites)
+        scale = leaf_px * rng.uniform(0.8, 1.25) / max(sprite.width, sprite.height)
+        shade = 0.6 + 0.5 * (1 - y / SIZE) + rng.uniform(-0.07, 0.07)
+        paste(canvas, sprite, (x, y), rng.uniform(0, 360), scale, float(np.clip(shade, 0.5, 1.15)))
+    return canvas
+
+
+def rosette(atlas, seed, leaves):
+    """A rosette of broad leaves lying out from the centre, seen edge-on from just above."""
+    rng = random.Random(seed)
+    sprites = load_sprites(atlas, min_area=4000)
+    canvas = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
+    root = (SIZE / 2, SIZE - 10)
+    for i in range(leaves):
+        sprite = rng.choice(sprites)
+        if sprite.height > sprite.width:
+            sprite = sprite.rotate(-90, expand=True)
+        length = rng.uniform(0.55, 0.9) * SIZE * 0.5
+        scale = length / sprite.width
+        s = sprite.resize((max(2, int(sprite.width * scale)), max(2, int(sprite.height * scale * 0.7))), Image.LANCZOS)
+        angle = (i / (leaves - 1) - 0.5) * 150 + rng.uniform(-8, 8)
+        layer = Image.new("RGBA", (SIZE * 2, SIZE * 2), (0, 0, 0, 0))
+        c = (SIZE, SIZE + SIZE // 2)
+        layer.paste(s, (c[0], c[1] - s.height // 2), s)
+        layer = layer.rotate(90 - angle, center=c, resample=Image.BICUBIC)
+        layer = layer.crop((c[0] - SIZE // 2, c[1] - (SIZE - 10), c[0] + SIZE // 2, c[1] + 10))
+        layer = ImageEnhance.Brightness(layer).enhance(rng.uniform(0.75, 1.1))
+        canvas.alpha_composite(layer)
+    return canvas
+
+
 def opaque_hedge(atlas, seed):
     """A seamless-ish dense leaf texture for the faces of hedges (no transparency)."""
     base = leafy_cluster(atlas, seed, 520, 70, spread=(0.62, 0.62))
@@ -149,7 +218,15 @@ def main():
     save(leafy_cluster("leaf_willow.png", 3, 170, 125), "cluster_willow.png")
     save(leafy_cluster("leaf_lime.png", 4, 130, 135), "cluster_lime.png")
     save(conifer_card("leaf_conifer.png", 5, 14), "cluster_conifer.png")
-    save(grass_tuft("blades.png", 7, 16), "grass_tuft.png")
+    tuft = grass_tuft("blades.png", 7, 16)
+    save(tuft, "grass_tuft.png")
+    # One atlas of ground-level plants: grass, fern/sedge, ivy mat, leaf rosette. The game
+    # picks a card by its position along the width.
+    cards = [tuft, strap_tuft("strap_leaves.png", 8, 9), leaf_mound("ivy.png", 9, 70, 110), rosette("rosette_leaf.png", 10, 9)]
+    atlas = Image.new("RGBA", (SIZE * len(cards), SIZE), (0, 0, 0, 0))
+    for i, card in enumerate(cards):
+        atlas.paste(card, (i * SIZE, 0))
+    save(atlas, "ground_plants.png")
     opaque_hedge("leaf_beech.png", 6).save(os.path.join(OUT, "hedge.jpg"), quality=88)
     for f in sorted(os.listdir(OUT)):
         print(f, os.path.getsize(os.path.join(OUT, f)) // 1024, "KB")

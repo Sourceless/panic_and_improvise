@@ -47,6 +47,8 @@ pub enum Cover {
     Rough = 3,
     /// Sparse grass on verges and open ground.
     Verge = 4,
+    /// The floor of a wood: ferns and sedges, ivy mats, leaf rosettes, a little grass.
+    Understory = 5,
 }
 
 #[derive(Resource)]
@@ -88,6 +90,7 @@ impl GroundCover {
             2 => Cover::Pasture,
             3 => Cover::Rough,
             4 => Cover::Verge,
+            5 => Cover::Understory,
             _ => Cover::None,
         }
     }
@@ -120,7 +123,7 @@ fn load_grass(
                 ..ImageSamplerDescriptor::linear()
             });
         })
-        .load("textures/veg/grass_tuft.png");
+        .load("textures/veg/ground_plants.png");
     mips.0.push(texture.clone());
     let material = materials.add(WindMaterial {
         base: StandardMaterial {
@@ -156,7 +159,27 @@ fn tuft_profile(cover: Cover) -> (f32, f32, f32) {
         Cover::Pasture => (1.4, 0.18, 0.32),
         Cover::Rough => (0.75, 0.55, 0.95),
         Cover::Verge => (0.5, 0.3, 0.55),
+        Cover::Understory => (1.5, 0.3, 0.6),
         Cover::None => (0.0, 0.0, 0.0),
+    }
+}
+
+// The cards in the ground-plants atlas, left to right.
+const CARD_GRASS: u32 = 0;
+const CARD_FERN: u32 = 1;
+const CARD_IVY: u32 = 2;
+const CARD_ROSETTE: u32 = 3;
+
+// Which card a tuft uses, from a 0..1 roll, and its (height scale, width / height).
+fn pick_card(cover: Cover, roll: f32) -> (u32, f32, f32) {
+    if cover != Cover::Understory {
+        return (CARD_GRASS, 1.0, 0.5);
+    }
+    match roll {
+        r if r < 0.38 => (CARD_FERN, 1.35, 1.25),
+        r if r < 0.62 => (CARD_IVY, 0.9, 1.0),
+        r if r < 0.82 => (CARD_ROSETTE, 0.8, 1.15),
+        _ => (CARD_GRASS, 1.0, 0.5),
     }
 }
 
@@ -180,7 +203,10 @@ fn build_cell_mesh(map: &TerrainMap, cover: &GroundCover, cx: i32, cz: i32) -> O
         if hash(cx, cz, k as u32 * 4 + 3) > density / 1.5 {
             continue;
         }
-        let ground = map.height_at(p);
+        // Rest on the rendered ground: the terrain mesh's own surface, and above the field
+        // fill (which is laid a little above the terrain) wherever there is any.
+        let lift = if matches!(kind, Cover::Verge) { 0.0 } else { crate::fill::FIELD_LIFT };
+        let ground = map.surface_height_at(p) + lift;
         // Nothing grows under water.
         if map.water_level(
             (((p.x + HALF_SIZE) / CELL).round() as usize).min(map.grid_size() - 1),
@@ -190,18 +216,20 @@ fn build_cell_mesh(map: &TerrainMap, cover: &GroundCover, cx: i32, cz: i32) -> O
         {
             continue;
         }
-        let height = h_lo + (h_hi - h_lo) * hash(cx, cz, k as u32 * 4 + 4);
-        let half_width = height * 0.5;
+        let (card, height_scale, aspect) = pick_card(kind, hash(cx, cz, k as u32 * 9 + 300));
+        let height = (h_lo + (h_hi - h_lo) * hash(cx, cz, k as u32 * 4 + 4)) * height_scale;
+        let half_width = height * aspect;
+        let (u0, u1) = (card as f32 * 0.25, card as f32 * 0.25 + 0.25);
         let yaw0 = hash(cx, cz, k as u32 * 7 + 100) * TAU;
         let tone = 0.75 + 0.4 * hash(cx, cz, k as u32 * 7 + 101);
         // Three crossed quads read as a round tuft from any side.
         for q in 0..3 {
             let yaw = yaw0 + q as f32 * TAU / 6.0;
             let along = Vec3::new(yaw.cos(), 0.0, yaw.sin()) * half_width;
-            let base = Vec3::new(p.x, ground - 0.02, p.y);
+            let base = Vec3::new(p.x, ground - 0.03, p.y);
             let top = base + Vec3::Y * height;
             let first = positions.len() as u32;
-            for (corner, uv) in [(base - along, [0.0, 1.0]), (base + along, [1.0, 1.0]), (top + along, [1.0, 0.0]), (top - along, [0.0, 0.0])] {
+            for (corner, uv) in [(base - along, [u0, 1.0]), (base + along, [u1, 1.0]), (top + along, [u1, 0.0]), (top - along, [u0, 0.0])] {
                 positions.push(corner.to_array());
                 normals.push([0.0, 1.0, 0.0]);
                 uvs.push(uv);

@@ -184,6 +184,23 @@ impl TerrainMap {
         top + (bottom - top) * fz
     }
 
+    /// The height of the terrain *mesh* at `p`. The mesh splits every cell into two triangles
+    /// along its top-right to bottom-left diagonal, which on a slope sits slightly above or
+    /// below the smooth bilinear surface of `height_at`; anything that must rest exactly on
+    /// the rendered ground (grass, say) should use this.
+    pub fn surface_height_at(&self, p: Vec2) -> f32 {
+        let gx = ((p.x + HALF_SIZE) / CELL).clamp(0.0, CELLS as f32 - 0.001);
+        let gz = ((p.y + HALF_SIZE) / CELL).clamp(0.0, CELLS as f32 - 0.001);
+        let (ix, iz) = (gx.floor() as usize, gz.floor() as usize);
+        let (u, v) = (gx - ix as f32, gz - iz as f32);
+        let h = |x: usize, z: usize| self.heights[z * VERTS + x];
+        if u + v <= 1.0 {
+            h(ix, iz) + u * (h(ix + 1, iz) - h(ix, iz)) + v * (h(ix, iz + 1) - h(ix, iz))
+        } else {
+            h(ix + 1, iz + 1) + (1.0 - u) * (h(ix, iz + 1) - h(ix + 1, iz + 1)) + (1.0 - v) * (h(ix + 1, iz) - h(ix + 1, iz + 1))
+        }
+    }
+
     pub fn vertex_height(&self, ix: usize, iz: usize) -> f32 {
         self.heights[iz * VERTS + ix]
     }
@@ -685,5 +702,24 @@ impl Rng {
     fn range(&mut self, lo: f32, hi: f32) -> f32 {
         let unit = (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32;
         lo + (hi - lo) * unit
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+
+    #[test]
+    fn mesh_surface_matches_vertices_and_stays_within_the_cell() {
+        let map = TerrainMap::generate(7, &GenParams::default());
+        for (ix, iz) in [(100, 100), (250, 300), (400, 80)] {
+            let p = grid_pos(ix, iz);
+            assert!((map.surface_height_at(p) - map.vertex_height(ix, iz)).abs() < 1e-3);
+            let q = p + Vec2::new(3.0, 8.0);
+            let corners = [(0, 0), (1, 0), (0, 1), (1, 1)].map(|(dx, dz)| map.vertex_height(ix + dx, iz + dz));
+            let (lo, hi) = (corners.iter().cloned().fold(f32::MAX, f32::min), corners.iter().cloned().fold(f32::MIN, f32::max));
+            let s = map.surface_height_at(q);
+            assert!(s >= lo - 1e-3 && s <= hi + 1e-3, "{s} not in {lo}..{hi}");
+        }
     }
 }

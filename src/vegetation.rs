@@ -894,9 +894,17 @@ pub fn plan_vegetation(map: &TerrainMap, zones: &ZoneMap, hedge_points: &[Vec2])
         }
     });
     // Undergrowth in woods, and scrub on rough ground.
-    scan(11.0, 41, &mut |p, ix, iz, density| {
+    scan(7.5, 41, &mut |p, ix, iz, density| {
         let zone = zone_at(map, zones, p);
-        if matches!(zone, Zone::Woodland | Zone::Wetland) && hash2(ix, iz, 42) < 0.28 + 0.3 * density {
+        // Shrubs thicken into proper underbrush in woods, and thin out under conifers (where
+        // little grows in the shade of the needles).
+        let chance = match zone {
+            Zone::Woodland => 0.42 + 0.45 * density,
+            Zone::Wetland => 0.28 + 0.3 * density,
+            Zone::Conifer => 0.07 + 0.12 * density,
+            _ => 0.0,
+        };
+        if chance > 0.0 && hash2(ix, iz, 42) < chance {
             let sp = if hash2(ix, iz, 43) < 0.7 { Species::Hawthorn } else { Species::Gorse };
             place(&mut plan, sp, p, ix, iz);
         }
@@ -1094,7 +1102,7 @@ mod tests {
                 Species::Oak | Species::Beech | Species::Birch | Species::Maple => zone == Zone::Woodland,
                 Species::Spruce | Species::Pine => zone == Zone::Conifer,
                 Species::Apple => zone == Zone::Orchard,
-                Species::Hawthorn | Species::Gorse => matches!(zone, Zone::Woodland | Zone::Wetland),
+                Species::Hawthorn | Species::Gorse => matches!(zone, Zone::Woodland | Zone::Wetland | Zone::Conifer),
             };
             assert!(ok, "{species:?} planted in {zone:?}");
             assert!((pos.y - map.height_at(Vec2::new(pos.x, pos.z))).abs() < 0.01, "{species:?} is off the ground");

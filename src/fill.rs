@@ -15,7 +15,7 @@ use crate::roads::RoadNetwork;
 use crate::terrain::{TerrainRoot, TerrainTextures};
 use crate::zones::{Zone, ZoneMap};
 
-const FIELD_LIFT: f32 = 0.15;
+pub const FIELD_LIFT: f32 = 0.15;
 const SHED_SPACING: f32 = 60.0;
 
 pub fn spawn_fill(
@@ -637,6 +637,7 @@ fn ground_cover(map: &TerrainMap, zones: &ZoneMap, labels: &[u32], styles: &[Fie
             }
             let cover = match zones.zone_at(idx % n, idx / n) {
                 Zone::Pasture | Zone::Arable | Zone::Orchard | Zone::Open | Zone::Moorland | Zone::Wetland => Cover::Verge,
+                Zone::Woodland | Zone::Conifer => Cover::Understory,
                 _ => Cover::None,
             };
             cover as u8
