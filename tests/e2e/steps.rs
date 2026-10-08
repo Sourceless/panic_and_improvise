@@ -241,12 +241,36 @@ fn dummy_respawns(_world: &mut GameWorld, seconds: u64) {
 
 fn key_named(name: &str) -> KeyCode {
     match name {
+        "A" => KeyCode::KeyA,
+        "B" => KeyCode::KeyB,
         "C" => KeyCode::KeyC,
-        "Z" => KeyCode::KeyZ,
+        "D" => KeyCode::KeyD,
+        "E" => KeyCode::KeyE,
+        "F" => KeyCode::KeyF,
+        "G" => KeyCode::KeyG,
+        "H" => KeyCode::KeyH,
+        "I" => KeyCode::KeyI,
+        "J" => KeyCode::KeyJ,
+        "K" => KeyCode::KeyK,
+        "L" => KeyCode::KeyL,
+        "M" => KeyCode::KeyM,
+        "N" => KeyCode::KeyN,
+        "O" => KeyCode::KeyO,
+        "P" => KeyCode::KeyP,
+        "Q" => KeyCode::KeyQ,
         "R" => KeyCode::KeyR,
+        "S" => KeyCode::KeyS,
+        "T" => KeyCode::KeyT,
+        "U" => KeyCode::KeyU,
+        "V" => KeyCode::KeyV,
         "W" => KeyCode::KeyW,
+        "X" => KeyCode::KeyX,
+        "Y" => KeyCode::KeyY,
+        "Z" => KeyCode::KeyZ,
         "Space" => KeyCode::Space,
         "Shift" => KeyCode::ShiftLeft,
+        "Ctrl" => KeyCode::ControlLeft,
+        "Escape" => KeyCode::Escape,
         other => panic!("no key called {other}"),
     }
 }
@@ -715,4 +739,115 @@ fn dummy_unhurt(_world: &mut GameWorld) {
     let state = snapshot();
     assert_eq!(state.dummy_hits, 0, "the target dummy was hit");
     assert_eq!(state.dummy_health, 100.0);
+}
+
+// ---- controls and the menu ------------------------------------------------------------------
+
+use fps_prototype::controls::{Action, Bind, Preset};
+
+#[given("my controls are Colemak Mod-DH")]
+fn controls_are_colemak(_world: &mut GameWorld) {
+    send(Command::UsePreset(Preset::ColemakModDh));
+    step_pause();
+}
+
+#[then("the menu is open")]
+fn menu_is_open(_world: &mut GameWorld) {
+    let ok = wait_for(Duration::from_secs(4), || snapshot().menu_open);
+    assert!(ok, "the menu is not open");
+}
+
+#[then("the menu is closed")]
+fn menu_is_closed(_world: &mut GameWorld) {
+    let ok = wait_for(Duration::from_secs(4), || !snapshot().menu_open);
+    assert!(ok, "the menu is open");
+}
+
+#[given("the menu is open")]
+fn open_the_menu(_world: &mut GameWorld) {
+    step_pause();
+    send(Command::TapKey(KeyCode::Escape));
+    let ok = wait_for(Duration::from_secs(4), || snapshot().menu_open);
+    assert!(ok, "the menu did not open");
+}
+
+#[then("the mouse is free")]
+fn mouse_is_free(_world: &mut GameWorld) {
+    let ok = wait_for(Duration::from_secs(4), || !snapshot().cursor_captured);
+    assert!(ok, "the mouse is still captured");
+}
+
+#[then("the mouse is captured")]
+fn mouse_is_captured(_world: &mut GameWorld) {
+    let ok = wait_for(Duration::from_secs(4), || snapshot().cursor_captured);
+    assert!(ok, "the mouse is free");
+}
+
+#[when(regex = r"^I choose (QWERTY|Colemak Mod-DH) in the menu$")]
+fn choose_preset(_world: &mut GameWorld, name: String) {
+    let preset = if name == "QWERTY" { Preset::Qwerty } else { Preset::ColemakModDh };
+    send(Command::MenuChoosePreset(preset));
+    step_pause();
+}
+
+#[when(regex = r"^I choose to rebind (\w+)$")]
+fn choose_rebind(_world: &mut GameWorld, action: String) {
+    send(Command::MenuStartRebind(Action::from_id(&action).unwrap_or_else(|| panic!("no action {action}"))));
+    step_pause();
+}
+
+#[when("I save my controls")]
+fn save_controls(_world: &mut GameWorld) {
+    send(Command::MenuSave);
+    step_pause();
+}
+
+#[then(regex = r"^the menu is waiting for a key for (\w+)$")]
+fn menu_waiting(_world: &mut GameWorld, action: String) {
+    let want = Action::from_id(&action).unwrap_or_else(|| panic!("no action {action}"));
+    let ok = wait_for(Duration::from_secs(3), || snapshot().menu_rebinding == Some(want));
+    assert!(ok, "waiting for {:?}", snapshot().menu_rebinding);
+}
+
+#[then("the menu is not waiting for a key")]
+fn menu_not_waiting(_world: &mut GameWorld) {
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(snapshot().menu_rebinding, None);
+}
+
+#[then(regex = r"^(\w+) is bound to (\w+)$")]
+fn is_bound_to(_world: &mut GameWorld, action: String, key: String) {
+    let action = Action::from_id(&action).unwrap_or_else(|| panic!("no action {action}"));
+    let want = Bind::parse(&key).unwrap_or_else(|| panic!("no key {key}"));
+    let ok = wait_for(Duration::from_secs(3), || snapshot().controls.bind(action) == want);
+    assert!(ok, "{action:?} is on {:?}, not {want:?}", snapshot().controls.bind(action));
+}
+
+#[then(regex = r#"^the saved controls say "(.*)"$"#)]
+fn saved_say(_world: &mut GameWorld, text: String) {
+    // The game writes the file on its next frame.
+    let read = || std::fs::read_to_string(fps_prototype::controls::controls_path()).unwrap_or_default();
+    let ok = wait_for(Duration::from_secs(4), || read().contains(&text));
+    assert!(ok, "the saved controls are:\n{}", read());
+}
+
+#[then(regex = r"^I have moved (forward|back|left|right)$")]
+fn have_moved(_world: &mut GameWorld, way: String) {
+    let ok = wait_for(Duration::from_secs(4), || {
+        let (x, z) = snapshot().player;
+        match way.as_str() {
+            "forward" => z < -1.0,
+            "back" => z > 1.0,
+            "right" => x > 1.0,
+            _ => x < -1.0,
+        }
+    });
+    assert!(ok, "at {:?}", snapshot().player);
+}
+
+#[then("I have not moved")]
+fn have_not_moved(_world: &mut GameWorld) {
+    std::thread::sleep(Duration::from_secs(1));
+    let (x, z) = snapshot().player;
+    assert!(x.abs() < 0.05 && z.abs() < 0.05, "moved to ({x}, {z})");
 }

@@ -2,6 +2,8 @@ use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
 
+use crate::controls::{Action, Controls, Keyboard};
+use crate::menu::{menu_keys, Menu};
 use crate::collision::{settle, Colliders, PLAYER_RADIUS, STEP_DOWN, STEP_UP, MANTLE_REACH};
 use crate::map::TerrainMap;
 use crate::MAP_HALF_SIZE;
@@ -98,11 +100,12 @@ pub struct PlayerPlugin;
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CursorIntent>()
+            .init_resource::<Menu>()
             .init_resource::<AimBlend>()
             .add_systems(Startup, (spawn_player, grab_cursor))
             .add_systems(
                 Update,
-                (toggle_cursor_grab, regrab_on_focus, mouse_look, player_movement, sprint_fov).chain(),
+                (menu_keys, toggle_cursor_grab, regrab_on_focus, mouse_look, player_movement, sprint_fov).chain(),
             );
     }
 }
@@ -251,20 +254,26 @@ fn regrab_on_focus(
     cursor.visible = false;
 }
 
+/// The mouse is free while the menu is open, taken again when it closes, and also taken by a click.
 pub fn toggle_cursor_grab(
-    keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    menu: Res<Menu>,
     mut intent: ResMut<CursorIntent>,
     mut cursors: Query<&mut CursorOptions, With<PrimaryWindow>>,
+    mut was_open: Local<bool>,
 ) {
     let Ok(mut cursor) = cursors.single_mut() else {
         return;
     };
-    if keys.just_pressed(KeyCode::Escape) {
+    if menu.open {
+        *was_open = true;
         intent.captured = false;
         cursor.grab_mode = CursorGrabMode::None;
         cursor.visible = true;
-    } else if mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    // Closing the menu, or clicking, takes the mouse back.
+    if std::mem::take(&mut *was_open) || mouse.just_pressed(MouseButton::Left) {
         intent.captured = true;
         cursor.grab_mode = CursorGrabMode::Locked;
         cursor.visible = false;
@@ -369,7 +378,9 @@ pub fn step_movement(mut state: MoveState, intent: MoveIntent, dt: f32) -> MoveS
 
 fn player_movement(
     time: Res<Time>,
-    keys: Res<ButtonInput<KeyCode>>,
+    keys: Res<Keyboard>,
+    controls: Res<Controls>,
+    menu: Option<Res<Menu>>,
     terrain: Res<TerrainMap>,
     colliders: Option<Res<Colliders>>,
     aim: Res<AimBlend>,
@@ -386,32 +397,36 @@ fn player_movement(
     let forward = Vec2::new(-cam.yaw.sin(), -cam.yaw.cos());
     let right = Vec2::new(cam.yaw.cos(), -cam.yaw.sin());
 
+    // With the menu open the keys are for the menu: the player stands where they are.
+    let in_menu = menu.is_some_and(|m| m.open);
+    let held = |action: Action| !in_menu && controls.pressed(action, &keys);
+    let tapped = |action: Action| !in_menu && controls.just_pressed(action, &keys);
     let mut direction = Vec2::ZERO;
-    if keys.pressed(KeyCode::KeyW) {
+    if held(Action::Forward) {
         direction += forward;
     }
-    if keys.pressed(KeyCode::KeyS) {
+    if held(Action::Back) {
         direction -= forward;
     }
-    if keys.pressed(KeyCode::KeyD) {
+    if held(Action::Right) {
         direction += right;
     }
-    if keys.pressed(KeyCode::KeyA) {
+    if held(Action::Left) {
         direction -= right;
     }
     // Sprinting is for running forward, not backpedalling.
-    let sprint_keys = keys.pressed(KeyCode::ShiftLeft) && keys.pressed(KeyCode::KeyW) && !keys.pressed(KeyCode::KeyS);
+    let sprint_keys = held(Action::Sprint) && held(Action::Forward) && !held(Action::Back);
     // The jump key, from a crouch or prone, stands you up instead of jumping; and holding it
     // afterwards doesn't then also jump.
-    let jump_key = keys.pressed(KeyCode::Space);
-    let stands_up = keys.just_pressed(KeyCode::Space) && cam.stance != Stance::Stand;
+    let jump_key = held(Action::Jump);
+    let stands_up = tapped(Action::Jump) && cam.stance != Stance::Stand;
     if stands_up {
         cam.jump_spent_standing = true;
     }
     if !jump_key {
         cam.jump_spent_standing = false;
     }
-    cam.stance = next_stance(cam.stance, keys.just_pressed(KeyCode::KeyC), keys.just_pressed(KeyCode::KeyZ), stands_up, sprint_keys);
+    cam.stance = next_stance(cam.stance, tapped(Action::Crouch), tapped(Action::Prone), stands_up, sprint_keys);
     // The eye eases to its new height (a crouch takes a moment).
     let target_eye = cam.stance.eye_height();
     cam.eye_height += (target_eye - cam.eye_height) * (1.0 - (-STANCE_EASE * time.delta_secs()).exp());
@@ -499,6 +514,7 @@ fn sprint_fov(time: Res<Time>, aim: Res<AimBlend>, mut cameras: Query<(&FpsCamer
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controls::Bind;
 
     const DT: f32 = 1.0 / 120.0;
 
@@ -594,7 +610,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .insert_resource(TerrainMap::flat(ground))
-            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<Keyboard>()
+            .init_resource::<Controls>()
             .init_resource::<AimBlend>()
             .add_systems(Update, player_movement);
         app.world_mut().spawn((
@@ -621,14 +638,14 @@ mod tests {
         let standing = 10.0 + EYE_HEIGHT;
         frame(&mut app, 1.0 / 60.0);
         assert!((eye_height(&mut app) - standing).abs() < 1e-3);
-        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::Space);
+        app.world_mut().resource_mut::<Keyboard>().press(Bind::Space);
         let mut peak = 0.0f32;
         for _ in 0..30 {
             frame(&mut app, 1.0 / 60.0);
             peak = peak.max(eye_height(&mut app) - standing);
         }
         assert!(peak > 0.8, "peak {peak}");
-        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().release(KeyCode::Space);
+        app.world_mut().resource_mut::<Keyboard>().release(Bind::Space);
         for _ in 0..90 {
             frame(&mut app, 1.0 / 60.0);
         }
@@ -640,10 +657,10 @@ mod tests {
         let travelled = |sprint: bool| {
             let mut app = app_with_player(0.0);
             {
-                let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
-                keys.press(KeyCode::KeyW);
+                let mut keys = app.world_mut().resource_mut::<Keyboard>();
+                keys.press(Bind::Char('w'));
                 if sprint {
-                    keys.press(KeyCode::ShiftLeft);
+                    keys.press(Bind::Shift);
                 }
             }
             for _ in 0..120 {

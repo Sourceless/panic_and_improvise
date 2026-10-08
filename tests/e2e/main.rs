@@ -10,12 +10,16 @@ use bevy::audio::{AudioPlayer, AudioSink, AudioSinkPlayback};
 use bevy::input::InputSystems;
 use bevy::ecs::message::Messages;
 use bevy::ecs::system::RunSystemOnce;
+use bevy::input::keyboard::{Key, KeyboardInput, NativeKey};
 use bevy::input::mouse::MouseMotion;
+use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, ExitCondition, PrimaryWindow};
 use bevy::winit::WinitPlugin;
 use cucumber::World as _;
 use cucumber::writer::Stats;
+use fps_prototype::controls::{controls_path, Action, Controls, ControlsSet, Keyboard, Preset};
+use fps_prototype::menu::Menu;
 use fps_prototype::player::{spawn_player, CursorIntent, FpsCamera};
 use fps_prototype::target::{spawn_dummy, TargetDummy};
 use fps_prototype::weapon::{spawn_gun, Bullet, BulletAssets, Gun};
@@ -23,9 +27,17 @@ use fps_prototype::map::TerrainMap;
 use fps_prototype::GamePlugin;
 
 pub enum Command {
+    /// Real keyboard events, as the keyboard sends them: the physical key, typing the letter or key
+    /// its layout gives it (see `logical_key`).
     PressKey(KeyCode),
     ReleaseKey(KeyCode),
     TapKey(KeyCode),
+    /// Change the controls without going through the menu.
+    UsePreset(Preset),
+    /// What clicking in the menu does.
+    MenuChoosePreset(Preset),
+    MenuStartRebind(Action),
+    MenuSave,
     RemoveDummies,
     /// Put something solid in the test room.
     AddSolid(fps_prototype::collision::Solid),
@@ -103,6 +115,10 @@ pub struct Snapshot {
     pub feet: f32,
     pub mantles: u32,
     pub mantling: bool,
+    pub menu_open: bool,
+    pub menu_rebinding: Option<Action>,
+    pub menu_message: String,
+    pub controls: Controls,
 }
 
 static GAME: OnceLock<Sender<Command>> = OnceLock::new();
@@ -131,17 +147,22 @@ struct PendingTaps(Vec<MouseButton>);
 #[derive(Resource, Default)]
 struct HeldButtons(Vec<MouseButton>);
 
+/// Keys tapped (pressed for one frame): their release goes out at the start of the next frame.
 #[derive(Resource, Default)]
-struct HeldKeys(Vec<KeyCode>);
+struct PendingKeyTaps(Vec<KeyCode>);
 
 /// What was already held down on the previous frame: a button held for many frames is pressed once.
 #[derive(Resource, Default)]
 struct AlreadyHeld {
     buttons: Vec<MouseButton>,
-    keys: Vec<KeyCode>,
 }
 
 fn main() -> ExitCode {
+    // The tests keep their settings in a folder of their own, so your own saved controls can't change what they do.
+    let config = std::env::temp_dir().join(format!("fps_e2e_config_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&config);
+    // SAFETY: nothing else is running yet: this is before any thread is started.
+    unsafe { std::env::set_var("FPS_CONFIG_DIR", &config) };
     let headed = std::env::var("E2E_HEADED").is_ok();
     let (tx, rx) = mpsc::channel();
     GAME.set(tx).expect("game already started");
@@ -205,9 +226,10 @@ fn build_app(headed: bool, rx: Receiver<Command>) -> App {
         .insert_resource(Bridge { rx: Mutex::new(rx) })
         .init_resource::<PendingTaps>()
         .init_resource::<HeldButtons>()
-        .init_resource::<HeldKeys>()
+        .init_resource::<PendingKeyTaps>()
         .init_resource::<AlreadyHeld>()
-        .add_systems(PreUpdate, (isolate_input, drive).chain().after(InputSystems))
+        // The test's key events go out before the game reads the keyboard (`ControlsSet`).
+        .add_systems(PreUpdate, (isolate_input, drive).chain().after(InputSystems).before(ControlsSet))
         .add_systems(Last, release_taps);
     app
 }
@@ -216,13 +238,15 @@ fn build_app(headed: bool, rx: Receiver<Command>) -> App {
 fn isolate_input(
     mut mouse: ResMut<ButtonInput<MouseButton>>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut key_events: ResMut<Messages<KeyboardInput>>,
     mut motion: ResMut<Messages<MouseMotion>>,
     held: Res<HeldButtons>,
-    held_keys: Res<HeldKeys>,
     mut already: ResMut<AlreadyHeld>,
 ) {
     mouse.reset_all();
     keys.reset_all();
+    // Whatever the real keyboard sent doesn't get through: only the test's own events do.
+    key_events.clear();
     motion.clear();
     // Held buttons stay pressed, but only the first frame counts as a fresh press (as with real input).
     for button in &held.0 {
@@ -231,14 +255,31 @@ fn isolate_input(
             mouse.clear_just_pressed(*button);
         }
     }
-    for key in &held_keys.0 {
-        keys.press(*key);
-        if already.keys.contains(key) {
-            keys.clear_just_pressed(*key);
-        }
-    }
     already.buttons = held.0.clone();
-    already.keys = held_keys.0.clone();
+}
+
+/// What a physical key types, on the layout the tests pretend to have (the letter the key is named for).
+fn logical_key(code: KeyCode) -> Key {
+    match code {
+        KeyCode::Space => Key::Space,
+        KeyCode::ShiftLeft | KeyCode::ShiftRight => Key::Shift,
+        KeyCode::ControlLeft | KeyCode::ControlRight => Key::Control,
+        KeyCode::Escape => Key::Escape,
+        other => match format!("{other:?}").strip_prefix("Key") {
+            Some(letter) if letter.len() == 1 => Key::Character(letter.to_lowercase().into()),
+            _ => Key::Unidentified(NativeKey::Unidentified),
+        },
+    }
+}
+
+fn key_event(world: &mut World, code: KeyCode, state: ButtonState) {
+    let window = world.query_filtered::<Entity, With<PrimaryWindow>>().iter(world).next().unwrap_or(Entity::PLACEHOLDER);
+    world.write_message(KeyboardInput { key_code: code, logical_key: logical_key(code), state, text: None, repeat: false, window });
+    let mut keys = world.resource_mut::<ButtonInput<KeyCode>>();
+    match state {
+        ButtonState::Pressed => keys.press(code),
+        ButtonState::Released => keys.release(code),
+    }
 }
 
 fn release_taps(mut input: ResMut<ButtonInput<MouseButton>>, mut taps: ResMut<PendingTaps>) {
@@ -248,6 +289,9 @@ fn release_taps(mut input: ResMut<ButtonInput<MouseButton>>, mut taps: ResMut<Pe
 }
 
 fn drive(world: &mut World) {
+    for code in std::mem::take(&mut world.resource_mut::<PendingKeyTaps>().0) {
+        key_event(world, code, ButtonState::Released);
+    }
     let commands: Vec<Command> = world
         .resource::<Bridge>()
         .rx
@@ -273,20 +317,24 @@ fn drive(world: &mut World) {
                 world.resource_mut::<ButtonInput<MouseButton>>().press(button);
                 world.resource_mut::<PendingTaps>().0.push(button);
             }
-            Command::PressKey(key) => {
-                world.resource_mut::<ButtonInput<KeyCode>>().press(key);
-                let mut held = world.resource_mut::<HeldKeys>();
-                if !held.0.contains(&key) {
-                    held.0.push(key);
-                }
-                world.resource_mut::<AlreadyHeld>().keys.push(key);
+            Command::PressKey(code) => key_event(world, code, ButtonState::Pressed),
+            Command::ReleaseKey(code) => key_event(world, code, ButtonState::Released),
+            // A tap lasts one frame: it is let go of at the start of the next.
+            Command::TapKey(code) => {
+                key_event(world, code, ButtonState::Pressed);
+                world.resource_mut::<PendingKeyTaps>().0.push(code);
             }
-            Command::ReleaseKey(key) => {
-                world.resource_mut::<ButtonInput<KeyCode>>().release(key);
-                world.resource_mut::<HeldKeys>().0.retain(|held| *held != key);
+            Command::UsePreset(preset) => world.resource_mut::<Controls>().use_preset(preset),
+            Command::MenuChoosePreset(preset) => {
+                let mut controls = world.resource::<Controls>().clone();
+                world.resource_mut::<Menu>().choose_preset(preset, &mut controls);
+                *world.resource_mut::<Controls>() = controls;
             }
-            // A tap lasts one frame: input is cleared at the start of the next.
-            Command::TapKey(key) => world.resource_mut::<ButtonInput<KeyCode>>().press(key),
+            Command::MenuStartRebind(action) => world.resource_mut::<Menu>().start_rebinding(action),
+            Command::MenuSave => {
+                let controls = world.resource::<Controls>().clone();
+                world.resource_mut::<Menu>().save(&controls, &controls_path());
+            }
             Command::SetWind { heading, speed } => {
                 *world.resource_mut::<fps_prototype::wind::Wind>() = fps_prototype::wind::Wind { heading, speed };
             }
@@ -333,8 +381,13 @@ fn load_room(world: &mut World) {
     }
     world.resource_mut::<ButtonInput<MouseButton>>().reset_all();
     world.resource_mut::<HeldButtons>().0.clear();
-    world.resource_mut::<HeldKeys>().0.clear();
+    world.resource_mut::<PendingKeyTaps>().0.clear();
     world.resource_mut::<ButtonInput<KeyCode>>().reset_all();
+    // Controls, the menu, and anything saved: back to a fresh install, for every scenario.
+    world.resource_mut::<Keyboard>().clear();
+    *world.resource_mut::<Controls>() = Controls::default();
+    *world.resource_mut::<Menu>() = Menu::default();
+    let _ = std::fs::remove_file(controls_path());
     *world.resource_mut::<fps_prototype::wind::Wind>() = Default::default();
     world.resource_mut::<fps_prototype::collision::Colliders>().clear();
     *world.resource_mut::<fps_prototype::impact::ImpactStats>() = Default::default();
@@ -441,7 +494,14 @@ fn take_snapshot(world: &mut World) -> Snapshot {
         .iter(world)
         .next()
         .map_or(((0.0, 0.0), 0.0, 0, false), |(t, c)| ((t.translation.x, t.translation.z), c.feet(), c.mantles(), c.mantling()));
+    let menu = world.resource::<Menu>();
+    let (menu_open, menu_rebinding, menu_message) = (menu.open, menu.rebinding, menu.message.clone());
+    let controls = world.resource::<Controls>().clone();
     Snapshot {
+        menu_open,
+        menu_rebinding,
+        menu_message,
+        controls,
         player,
         feet,
         mantles,

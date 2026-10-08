@@ -1,6 +1,7 @@
 pub mod ballistics;
 pub mod cloud_material;
 pub mod collision;
+pub mod controls;
 pub mod cloud_shadows;
 pub mod contour;
 pub mod crosshair;
@@ -13,6 +14,7 @@ pub mod ground_textures;
 pub mod gun_model;
 pub mod look;
 pub mod map;
+pub mod menu;
 pub mod mipmaps;
 pub mod muzzle_flash;
 pub mod params;
@@ -72,6 +74,7 @@ impl Plugin for GamePlugin {
             player::PlayerPlugin,
             weapon::WeaponPlugin,
             collision::CollisionPlugin,
+            controls::ControlsPlugin::default(),
             sound::SoundPlugin,
             impact::ImpactPlugin,
             target::TargetPlugin,

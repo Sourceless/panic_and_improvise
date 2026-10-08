@@ -4,6 +4,7 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use crate::gun_model::{self, BORE_Y, MUZZLE_Z, REAR_PEEP_Z, SIGHT_LINE};
 use crate::ballistics::{self, Cartridge, Flight, NINE_PARA};
 use crate::collision::Colliders;
+use crate::controls::{Action, Controls, Keyboard};
 use crate::gun_state::{Bolt, Mechanism, State, STERLING};
 use crate::impact::{segment_aabb_hit, surface_hit, Impact, Rng, Surface};
 use crate::sound::play_after;
@@ -466,7 +467,8 @@ pub fn spawn_gun(
 fn aim(
     time: Res<Time>,
     mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
+    keys: Res<Keyboard>,
+    controls: Res<Controls>,
     cursors: Query<&CursorOptions, With<PrimaryWindow>>,
     mut guns: Query<(&mut Gun, &mut Transform)>,
     player: Query<&FpsCamera>,
@@ -477,7 +479,7 @@ fn aim(
     };
     let captured = cursors.single().is_ok_and(|c| c.grab_mode == CursorGrabMode::Locked);
     // Reloading is always something the player asks for: nothing reloads by itself.
-    if captured && keys.just_pressed(KeyCode::KeyR) {
+    if captured && controls.just_pressed(Action::Reload, &keys) {
         gun.reload_queued = true;
     }
     gun.try_queued_reload();
@@ -489,7 +491,7 @@ fn aim(
     if gun.reloading() {
         gun.aiming = false;
     }
-    if keys.pressed(KeyCode::ShiftLeft) && keys.pressed(KeyCode::KeyW) {
+    if controls.pressed(Action::Sprint, &keys) && controls.pressed(Action::Forward, &keys) {
         gun.aiming = false;
     }
     if !captured {
