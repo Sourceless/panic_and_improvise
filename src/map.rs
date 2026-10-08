@@ -201,6 +201,14 @@ impl TerrainMap {
         }
     }
 
+    /// The height of the water over `p`, if `p` is under water: a lake or river, or the sea, which
+    /// stands at height 0 wherever the land is below it.
+    pub fn water_surface_at(&self, p: Vec2) -> Option<f32> {
+        let (ix, iz) = nearest_vertex(p);
+        let level = self.water[iz * VERTS + ix].unwrap_or(f32::MIN).max(0.0);
+        (self.surface_height_at(p) < level - 0.001).then_some(level)
+    }
+
     pub fn vertex_height(&self, ix: usize, iz: usize) -> f32 {
         self.heights[iz * VERTS + ix]
     }

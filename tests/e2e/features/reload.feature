@@ -18,6 +18,7 @@ Feature: The magazine, the bolt, and reloading
     Given I fire 3 single shots
     When I press R
     Then the gun is reloading
+    And the gun has played 1 reload sound, 0 of them with the bolt charged
     And the reload takes 2 seconds
     And the gun has dipped off the screen
     And the gun is back up
@@ -48,10 +49,11 @@ Feature: The magazine, the bolt, and reloading
     And the bolt is forward
     And the gun is not reloading
 
-  Scenario: A dry gun does nothing when the trigger is pulled
+  Scenario: A dry gun clicks, and does nothing else, when the trigger is pulled
     Given I hold fire for 4 seconds
     When I fire once
     Then the gun fired between 30 and 30 shots
+    And the gun has clicked 1 time
     And the gun is not reloading
 
   Scenario: Reloading a dry gun takes longer, because the bolt has to be charged
@@ -59,6 +61,7 @@ Feature: The magazine, the bolt, and reloading
     And the bolt is forward
     When I press R
     Then the gun is reloading
+    And the gun has played 1 reload sound, 1 of them with the bolt charged
     And the reload takes 2.7 seconds
     And the gun is back up
     And the magazine has 30 rounds
@@ -70,3 +73,8 @@ Feature: The magazine, the bolt, and reloading
     And the gun is back up
     When I fire once
     Then the gun fired between 31 and 31 shots
+
+  Scenario: Mashing the trigger on a dry gun doesn't rattle
+    Given I hold fire for 4 seconds
+    When I pull the trigger 4 times quickly
+    Then the gun has clicked 1 time

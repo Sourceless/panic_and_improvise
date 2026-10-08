@@ -463,3 +463,80 @@ fn reload_takes(_world: &mut GameWorld, seconds: f32) {
     let total = snapshot().reload_seconds;
     assert!((total - seconds).abs() < 0.05, "the reload takes {total} s, not {seconds}");
 }
+
+#[then("a bullet hole appears in the ground")]
+fn hole_in_ground(_world: &mut GameWorld) {
+    use fps_prototype::impact::Surface;
+    let ok = wait_for(Duration::from_secs(4), || snapshot().holes_live > 0);
+    let state = snapshot();
+    assert!(ok, "no bullet hole appeared ({} impacts)", state.impacts.impacts);
+    let (surface, normal) = state.impacts.last.expect("an impact");
+    assert_eq!(surface, Surface::Ground);
+    assert!(normal.y > 0.99, "the ground should face up: {normal:?}");
+    let at = state.impacts.last_position.expect("a position");
+    assert!(at.y.abs() < 0.001, "the bullet landed on the ground, not {} m up or down", at.y);
+}
+
+#[then("a bullet hole appears on the target")]
+fn hole_on_target(_world: &mut GameWorld) {
+    use fps_prototype::impact::Surface;
+    let ok = wait_for(Duration::from_secs(4), || snapshot().holes_on_target > 0);
+    let state = snapshot();
+    assert!(ok, "no bullet hole on the target ({} impacts)", state.impacts.impacts);
+    let (surface, normal) = state.impacts.last.expect("an impact");
+    assert_eq!(surface, Surface::Target);
+    assert!(normal.z > 0.99, "the face turned to the player points back at them: {normal:?}");
+}
+
+#[then("dirt is thrown up")]
+fn dirt_thrown(_world: &mut GameWorld) {
+    let ok = wait_for(Duration::from_secs(4), || snapshot().chips_live > 3);
+    assert!(ok, "only {} chips in the air", snapshot().chips_live);
+}
+
+#[then("a puff of dust rises")]
+fn dust_rises(_world: &mut GameWorld) {
+    let ok = wait_for(Duration::from_secs(4), || snapshot().puffs_live > 0);
+    assert!(ok, "no dust");
+}
+
+#[then("the impact thumps")]
+fn impact_thumps(_world: &mut GameWorld) {
+    // It reaches the player a moment later, at the speed of sound.
+    let ok = wait_for(Duration::from_secs(4), || snapshot().thumps_playing > 0);
+    let state = snapshot();
+    assert!(ok, "no thump was heard (thumps started: {}, impacts: {})", state.impacts.thumps, state.impacts.impacts);
+}
+
+#[then("the debris is gone again")]
+fn debris_gone(_world: &mut GameWorld) {
+    let ok = wait_for(Duration::from_secs(6), || {
+        let s = snapshot();
+        s.chips_live == 0 && s.puffs_live == 0
+    });
+    let s = snapshot();
+    assert!(ok, "still {} chips and {} puffs", s.chips_live, s.puffs_live);
+    assert!(s.holes_live > 0, "but the hole stays");
+}
+
+#[then(regex = r"^the gun has played (\d+) reload sounds?, (\d+) of them with the bolt charged$")]
+fn reload_sounds(_world: &mut GameWorld, total: u32, charged: u32) {
+    let ok = wait_for(Duration::from_secs(3), || snapshot().sound_log.reloads == total);
+    let log = snapshot().sound_log;
+    assert!(ok && log.charged_reloads == charged, "reload sounds: {log:?}");
+}
+
+#[then(regex = r"^the gun has clicked (\d+) times?$")]
+fn dry_clicks(_world: &mut GameWorld, clicks: u32) {
+    let ok = wait_for(Duration::from_secs(3), || snapshot().sound_log.dry_clicks == clicks);
+    assert!(ok, "clicks: {:?}", snapshot().sound_log);
+}
+
+#[when(regex = r"^I pull the trigger (\d+) times quickly$")]
+fn pull_quickly(_world: &mut GameWorld, times: u32) {
+    step_pause();
+    for _ in 0..times {
+        tap_fire();
+        std::thread::sleep(Duration::from_millis(120));
+    }
+}

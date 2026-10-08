@@ -6,6 +6,7 @@ pub mod crosshair;
 pub mod field_material;
 pub mod fill;
 pub mod grass;
+pub mod impact;
 pub mod gun_state;
 pub mod ground_textures;
 pub mod gun_model;
@@ -17,6 +18,7 @@ pub mod params;
 pub mod perf;
 pub mod player;
 pub mod roads;
+pub mod sound;
 pub mod settlement;
 pub mod target;
 pub mod vegetation;
@@ -67,6 +69,8 @@ impl Plugin for GamePlugin {
         app.add_plugins((
             player::PlayerPlugin,
             weapon::WeaponPlugin,
+            sound::SoundPlugin,
+            impact::ImpactPlugin,
             target::TargetPlugin,
         ));
     }

@@ -48,6 +48,19 @@ else is done to them.
 `sounds/gunshots/*.wav` are an earlier CC0 pack from OpenGameArt ("Gunshots") and are no longer
 used by the gun, except as the `FPS_SHOT_SOUNDS=old` comparison.
 
+The reload, empty-click and impact sounds are cut from other CC0 recordings on OpenGameArt by
+`tools/make_gun_sounds.py` (trimmed, fades, a high-pass, and a gentle low-pass on the clicks and two
+of the thumps; the reload is slowed slightly in the game):
+
+| Files | Source |
+| --- | --- |
+| `sounds/gun/reload_*.wav` | [Handgun Reload Sound Effect](https://opengameart.org/content/handgun-reload-sound-effect) |
+| `sounds/gun/dry_click_*.wav` | [Gun Reload Sound Effects](https://opengameart.org/content/gun-reload-sound-effects) (clipload1, clipload2) |
+| `sounds/impact/dirt_1,2.wav`, `target_1.wav` | [75 CC0 breaking / falling / hit sfx](https://opengameart.org/content/75-cc0-breaking-falling-hit-sfx) |
+| `sounds/impact/dirt_3.wav`, `target_2.wav` | [Thwack Sounds](https://opengameart.org/content/thwack-sounds) |
+
+All of these are listed on OpenGameArt as CC0; the Thwack Sounds archive includes a CC0 licence file.
+
 ## Reference photographs
 
 The gun model was drawn from public-domain US Navy museum photographs of a Sterling L2A3

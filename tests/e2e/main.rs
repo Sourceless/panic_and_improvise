@@ -86,6 +86,15 @@ pub struct Snapshot {
     /// Where the bolt rests when the gun is at rest, and how long the current reload will take.
     pub bolt: Option<fps_prototype::gun_state::Bolt>,
     pub reload_seconds: f32,
+    /// What bullets landing have done so far, and what is still to be seen of it.
+    pub impacts: fps_prototype::impact::ImpactStats,
+    pub holes_live: usize,
+    pub holes_on_target: usize,
+    pub chips_live: usize,
+    pub puffs_live: usize,
+    /// Placed (impact) sounds playing right now.
+    pub thumps_playing: usize,
+    pub sound_log: fps_prototype::weapon::SoundLog,
 }
 
 static GAME: OnceLock<Sender<Command>> = OnceLock::new();
@@ -100,7 +109,7 @@ pub fn send(command: Command) {
 pub fn snapshot() -> Snapshot {
     let (reply_tx, reply_rx) = mpsc::channel();
     send(Command::Snapshot(reply_tx));
-    reply_rx.recv_timeout(Duration::from_secs(5)).expect("no snapshot reply")
+    reply_rx.recv_timeout(Duration::from_secs(30)).expect("no snapshot reply")
 }
 
 #[derive(Resource)]
@@ -116,6 +125,13 @@ struct HeldButtons(Vec<MouseButton>);
 
 #[derive(Resource, Default)]
 struct HeldKeys(Vec<KeyCode>);
+
+/// What was already held down on the previous frame: a button held for many frames is pressed once.
+#[derive(Resource, Default)]
+struct AlreadyHeld {
+    buttons: Vec<MouseButton>,
+    keys: Vec<KeyCode>,
+}
 
 fn main() -> ExitCode {
     let headed = std::env::var("E2E_HEADED").is_ok();
@@ -182,6 +198,7 @@ fn build_app(headed: bool, rx: Receiver<Command>) -> App {
         .init_resource::<PendingTaps>()
         .init_resource::<HeldButtons>()
         .init_resource::<HeldKeys>()
+        .init_resource::<AlreadyHeld>()
         .add_systems(PreUpdate, (isolate_input, drive).chain().after(InputSystems))
         .add_systems(Last, release_taps);
     app
@@ -194,16 +211,26 @@ fn isolate_input(
     mut motion: ResMut<Messages<MouseMotion>>,
     held: Res<HeldButtons>,
     held_keys: Res<HeldKeys>,
+    mut already: ResMut<AlreadyHeld>,
 ) {
     mouse.reset_all();
     keys.reset_all();
     motion.clear();
+    // Held buttons stay pressed, but only the first frame counts as a fresh press (as with real input).
     for button in &held.0 {
         mouse.press(*button);
+        if already.buttons.contains(button) {
+            mouse.clear_just_pressed(*button);
+        }
     }
     for key in &held_keys.0 {
         keys.press(*key);
+        if already.keys.contains(key) {
+            keys.clear_just_pressed(*key);
+        }
     }
+    already.buttons = held.0.clone();
+    already.keys = held_keys.0.clone();
 }
 
 fn release_taps(mut input: ResMut<ButtonInput<MouseButton>>, mut taps: ResMut<PendingTaps>) {
@@ -228,6 +255,7 @@ fn drive(world: &mut World) {
                 if !held.0.contains(&button) {
                     held.0.push(button);
                 }
+                world.resource_mut::<AlreadyHeld>().buttons.push(button);
             }
             Command::Release(button) => {
                 world.resource_mut::<ButtonInput<MouseButton>>().release(button);
@@ -243,6 +271,7 @@ fn drive(world: &mut World) {
                 if !held.0.contains(&key) {
                     held.0.push(key);
                 }
+                world.resource_mut::<AlreadyHeld>().keys.push(key);
             }
             Command::ReleaseKey(key) => {
                 world.resource_mut::<ButtonInput<KeyCode>>().release(key);
@@ -323,7 +352,14 @@ fn take_snapshot(world: &mut World) -> Snapshot {
     let shot_sound_loaded = match world.get_resource::<BulletAssets>() {
         Some(assets) => {
             let server = world.resource::<AssetServer>();
-            assets.shot_sounds.iter().all(|sound| server.is_loaded_with_dependencies(sound.id()))
+            let mut sounds: Vec<_> = assets.shot_sounds.iter().collect();
+            if let Some(gun) = world.get_resource::<fps_prototype::weapon::GunSounds>() {
+                sounds.extend(gun.all());
+            }
+            if let Some(impact) = world.get_resource::<fps_prototype::impact::ImpactAssets>() {
+                sounds.extend(impact.sounds());
+            }
+            sounds.iter().all(|sound| server.is_loaded_with_dependencies(sound.id()))
         }
         None => false,
     };
@@ -365,7 +401,29 @@ fn take_snapshot(world: &mut World) -> Snapshot {
         .iter(world)
         .next()
         .map_or((0, false, 0.0, None, 0.0), |g| (g.ammo, g.reloading(), g.lowered, g.bolt(), g.reload_seconds()));
+    let impacts = world.get_resource::<fps_prototype::impact::ImpactStats>().copied().unwrap_or_default();
+    let holes_live = world.query::<&fps_prototype::impact::BulletHole>().iter(world).count();
+    let holes_on_target = {
+        let mut query = world.query_filtered::<&ChildOf, With<fps_prototype::impact::BulletHole>>();
+        let parents: Vec<Entity> = query.iter(world).map(|c| c.parent()).collect();
+        parents.into_iter().filter(|&p| world.get::<TargetDummy>(p).is_some()).count()
+    };
+    let chips_live = world.query::<&fps_prototype::impact::Chipping>().iter(world).count();
+    let puffs_live = world.query::<&fps_prototype::impact::Dust>().iter(world).count();
+    let thumps_playing = world
+        .query::<&bevy::audio::SpatialAudioSink>()
+        .iter(world)
+        .filter(|sink| !sink.empty() && !sink.is_paused())
+        .count();
+    let sound_log = world.query::<&Gun>().iter(world).next().map(|g| g.sound_log).unwrap_or_default();
     Snapshot {
+        impacts,
+        holes_live,
+        holes_on_target,
+        chips_live,
+        puffs_live,
+        thumps_playing,
+        sound_log,
         bolt,
         reload_seconds,
         ammo,

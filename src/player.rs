@@ -167,6 +167,8 @@ pub fn spawn_player(mut commands: Commands, map: Res<TerrainMap>) {
     let eye = Vec3::new(start.x, map.height_at(start) + EYE_HEIGHT, start.y);
     commands.spawn((
         Camera3d::default(),
+        // The player's ears, for sounds placed in the world.
+        bevy::audio::SpatialListener::new(0.2),
         Transform::from_translation(eye).looking_at(eye - Vec3::Z, Vec3::Y),
         FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false },
     ));

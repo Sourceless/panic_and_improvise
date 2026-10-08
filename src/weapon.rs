@@ -4,11 +4,55 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use crate::gun_model::{self, BORE_Y, MUZZLE_Z, REAR_PEEP_Z, SIGHT_LINE};
 use crate::ballistics::{self, Cartridge, Flight, NINE_PARA};
 use crate::gun_state::{Bolt, Mechanism, State, STERLING};
+use crate::impact::{segment_aabb_hit, surface_hit, Impact, Surface};
+use crate::sound::play_after;
 use crate::wind::Wind;
 use crate::player::{spawn_player, toggle_cursor_grab, AimBlend, FpsCamera, Stance};
 pub use crate::gun_model::sight_points;
 use crate::map::TerrainMap;
 use crate::target::{dummy_aabb, TargetDummy};
+
+/// Things the gun's mechanism does that make a sound.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GunEvent {
+    /// A reload begins; `charge` if the bolt had to be hauled back as well.
+    ReloadStarted { charge: bool },
+    /// The trigger is pulled and nothing happens.
+    DryClick,
+    /// The trigger is pulled on an empty open-bolt gun: the bolt slams forward on nothing.
+    BoltDrop,
+}
+
+/// How many of each gun sound have been made (for tests).
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct SoundLog {
+    pub reloads: u32,
+    pub charged_reloads: u32,
+    pub dry_clicks: u32,
+    pub bolt_drops: u32,
+}
+
+#[derive(Resource)]
+pub struct GunSounds {
+    pub reload_swap: Handle<AudioSource>,
+    pub reload_charge: Handle<AudioSource>,
+    pub dry_clicks: Vec<Handle<AudioSource>>,
+}
+
+impl GunSounds {
+    pub fn all(&self) -> impl Iterator<Item = &Handle<AudioSource>> {
+        [&self.reload_swap, &self.reload_charge].into_iter().chain(&self.dry_clicks)
+    }
+}
+
+/// An empty click comes this long after the trigger is pulled (the action takes a moment), and
+/// there is at least this long between one empty click and the next, so that mashing the trigger on
+/// an empty gun doesn't rattle.
+const DRY_CLICK_DELAY: f32 = 0.15;
+const DRY_CLICK_INTERVAL: f32 = 0.6;
+/// How loud the empty clicks are: quiet, next to a shot.
+const DRY_CLICK_VOLUME: f32 = 0.3;
+const BOLT_DROP_VOLUME: f32 = 0.4;
 
 /// The gun's mechanism: bolt type and timings (rate of fire, how long a reload takes).
 pub const MECHANISM: Mechanism = STERLING;
@@ -84,7 +128,7 @@ impl Plugin for WeaponPlugin {
             .add_systems(Startup, spawn_gun.after(spawn_player))
             .add_systems(
                 Update,
-                (aim.before(fire), fire.before(toggle_cursor_grab), recover_view, animate_flash, move_bullets),
+                (aim.before(fire), fire.before(toggle_cursor_grab), play_gun_sounds.after(fire), recover_view, animate_flash, move_bullets),
             );
     }
 }
@@ -124,6 +168,11 @@ pub struct Gun {
     pub ammo: u32,
     /// The reload key was pressed mid-shot; the reload starts as soon as the shot has cycled.
     reload_queued: bool,
+    /// Sounds the mechanism has made since they were last played.
+    pending_sounds: Vec<GunEvent>,
+    /// Seconds before another empty click is allowed.
+    dry_click_cooldown: f32,
+    pub sound_log: SoundLog,
     /// How far the gun is lowered for the reload right now, 0 to 1.
     pub lowered: f32,
 }
@@ -140,7 +189,12 @@ impl Gun {
             return;
         }
         self.reload_queued = false;
+        let was_reloading = self.reloading();
         self.state = MECHANISM.press_reload(self.state, self.ammo, MAGAZINE_SIZE);
+        if !was_reloading && self.reloading() {
+            let charge = self.reload_seconds() > MECHANISM.reload_time + 0.01;
+            self.pending_sounds.push(GunEvent::ReloadStarted { charge });
+        }
     }
 
     /// Where the bolt is, when the gun is at rest.
@@ -342,6 +396,11 @@ pub fn spawn_gun(
         Ok(set) if !set.is_empty() => (1..=3).map(|i| asset_server.load(format!("sounds/{set}/smg_shot_{i}.wav"))).collect(),
         _ => (1..=3).map(|i| asset_server.load(format!("sounds/smg/smg_shot_{i}.wav"))).collect(),
     };
+    commands.insert_resource(GunSounds {
+        reload_swap: asset_server.load("sounds/gun/reload_swap.wav"),
+        reload_charge: asset_server.load("sounds/gun/reload_charge.wav"),
+        dry_clicks: (1..=2).map(|i| asset_server.load(format!("sounds/gun/dry_click_{i}.wav"))).collect(),
+    });
     commands.insert_resource(BulletAssets {
         // A thin streak along the line of flight (the bullet is turned to face the way it goes).
         mesh: meshes.add(Cuboid::new(TRACER_WIDTH, TRACER_WIDTH, TRACER_LENGTH)),
@@ -379,6 +438,9 @@ pub fn spawn_gun(
                     gun_kick: 0.0,
                     ammo: MAGAZINE_SIZE,
                     reload_queued: false,
+                    pending_sounds: Vec::new(),
+                    dry_click_cooldown: 0.0,
+                    sound_log: SoundLog::default(),
                     lowered: 0.0,
                 },
                 gun_transform(0.0),
@@ -467,6 +529,7 @@ fn fire(
     }
     gun.try_queued_reload();
     gun.since_shot += time.delta_secs();
+    gun.dry_click_cooldown = (gun.dry_click_cooldown - time.delta_secs()).max(0.0);
 
     if !mouse.pressed(MouseButton::Left) {
         gun.trigger_blocked = false;
@@ -488,9 +551,21 @@ fn fire(
     };
     // The trigger: the mechanism decides whether that fires a round (it won't while cycling,
     // reloading or dry, and on an empty open-bolt gun it just lets the bolt go forward).
+    let before = gun.state;
     let (state, fires) = MECHANISM.pull_trigger(gun.state, gun.ammo);
     gun.state = state;
     if !fires {
+        let clicked = if before == State::Ready && state == State::Dry {
+            Some(GunEvent::BoltDrop)
+        } else if before == State::Dry && mouse.just_pressed(MouseButton::Left) {
+            Some(GunEvent::DryClick)
+        } else {
+            None
+        };
+        if let Some(event) = clicked.filter(|_| gun.dry_click_cooldown == 0.0) {
+            gun.pending_sounds.push(event);
+            gun.dry_click_cooldown = DRY_CLICK_INTERVAL;
+        }
         return;
     }
 
@@ -579,13 +654,43 @@ fn recover_view(time: Res<Time>, mut guns: Query<&mut Gun>, mut camera: Query<(&
     }
 }
 
+/// Plays what the mechanism has made noises with since last frame.
+fn play_gun_sounds(mut commands: Commands, mut guns: Query<&mut Gun>, sounds: Res<GunSounds>) {
+    let Ok(mut gun) = guns.single_mut() else { return };
+    for event in std::mem::take(&mut gun.pending_sounds) {
+        let roll = gun.random();
+        let pitch = |low: f32, high: f32| low + (high - low) * roll;
+        match event {
+            GunEvent::ReloadStarted { charge } => {
+                gun.sound_log.reloads += 1;
+                // The magazine comes out once the gun has dropped away from the shoulder.
+                let sound = if charge { &sounds.reload_charge } else { &sounds.reload_swap };
+                gun.sound_log.charged_reloads += charge as u32;
+                // A little lower than the handgun it was recorded from: this is a bigger gun.
+                play_after(&mut commands, RELOAD_LOWER_TIME * 0.5, sound.clone(), pitch(0.9, 0.96), 0.9, None);
+            }
+            GunEvent::DryClick => {
+                gun.sound_log.dry_clicks += 1;
+                let pick = (roll * sounds.dry_clicks.len() as f32) as usize % sounds.dry_clicks.len();
+                play_after(&mut commands, DRY_CLICK_DELAY, sounds.dry_clicks[pick].clone(), pitch(0.95, 1.05), DRY_CLICK_VOLUME, None);
+            }
+            GunEvent::BoltDrop => {
+                gun.sound_log.bolt_drops += 1;
+                // The same click, lower: a heavy bolt running home.
+                play_after(&mut commands, DRY_CLICK_DELAY, sounds.dry_clicks[0].clone(), pitch(0.62, 0.7), BOLT_DROP_VOLUME, None);
+            }
+        }
+    }
+}
+
 fn move_bullets(
     mut commands: Commands,
     time: Res<Time>,
     wind: Res<Wind>,
     mut bullets: Query<(Entity, &mut Transform, &mut Bullet, &mut Visibility)>,
-    mut dummies: Query<(&Transform, &mut TargetDummy), Without<Bullet>>,
+    mut dummies: Query<(Entity, &Transform, &mut TargetDummy), Without<Bullet>>,
     map: Res<TerrainMap>,
+    mut impacts: MessageWriter<Impact>,
 ) {
     let dt = time.delta_secs();
     // The air moves with the wind, which drags the bullet along with it.
@@ -601,20 +706,35 @@ fn move_bullets(
             flight = ballistics::step(&CARTRIDGE, flight, air, h);
             bullet.age += h;
             bullet.travelled += (flight.position - start).length();
+            let speed = flight.velocity.length();
 
-            for (dummy_transform, mut dummy) in &mut dummies {
+            // What does this little step run into first: the land or water, or a target?
+            let mut landing = surface_hit(&map, start, flight.position)
+                .map(|(position, normal, surface)| (start.distance(position), Impact { position, normal, surface, speed, target: None }));
+            for (target, dummy_transform, dummy) in &dummies {
                 if dummy.health <= 0.0 {
                     continue;
                 }
                 let (min, max) = dummy_aabb(dummy_transform.translation);
-                if segment_hits_aabb(start, flight.position, min, max) {
-                    dummy.take_hit(BULLET_DAMAGE);
-                    finished = true;
-                    break;
+                if let Some((t, normal)) = segment_aabb_hit(start, flight.position, min, max) {
+                    let distance = t * start.distance(flight.position);
+                    if landing.as_ref().is_none_or(|(d, _)| distance < *d) {
+                        let position = start.lerp(flight.position, t);
+                        landing = Some((distance, Impact { position, normal, surface: Surface::Target, speed, target: Some(target) }));
+                    }
                 }
             }
-            let ground = map.height_at(Vec2::new(flight.position.x, flight.position.z));
-            if finished || bullet.age > BULLET_LIFETIME || flight.position.y < ground {
+            if let Some((_, impact)) = landing {
+                if let Some(target) = impact.target {
+                    if let Ok((_, _, mut dummy)) = dummies.get_mut(target) {
+                        dummy.take_hit(BULLET_DAMAGE);
+                    }
+                }
+                impacts.write(impact);
+                finished = true;
+                break;
+            }
+            if bullet.age > BULLET_LIFETIME {
                 finished = true;
                 break;
             }
@@ -634,32 +754,6 @@ fn move_bullets(
             *visibility = Visibility::Inherited;
         }
     }
-}
-
-fn segment_hits_aabb(p0: Vec3, p1: Vec3, min: Vec3, max: Vec3) -> bool {
-    let d = p1 - p0;
-    let mut t_min = 0.0_f32;
-    let mut t_max = 1.0_f32;
-    for i in 0..3 {
-        if d[i].abs() < f32::EPSILON {
-            if p0[i] < min[i] || p0[i] > max[i] {
-                return false;
-            }
-        } else {
-            let inv = 1.0 / d[i];
-            let mut t1 = (min[i] - p0[i]) * inv;
-            let mut t2 = (max[i] - p0[i]) * inv;
-            if t1 > t2 {
-                std::mem::swap(&mut t1, &mut t2);
-            }
-            t_min = t_min.max(t1);
-            t_max = t_max.min(t2);
-            if t_min > t_max {
-                return false;
-            }
-        }
-    }
-    true
 }
 
 #[cfg(test)]
