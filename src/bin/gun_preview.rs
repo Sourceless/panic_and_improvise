@@ -29,22 +29,29 @@ struct View {
     gun: Transform,
     /// Vertical field of view in radians; a very narrow one makes a near-orthographic photo-style view.
     fov: f32,
+    /// Show the muzzle flash (and its light) in this view.
+    flash: bool,
 }
 
 fn views() -> Vec<View> {
     const FOV: f32 = 0.7854;
-    let first_person = |name, gun| View { name, camera: Transform::IDENTITY, gun, fov: FOV };
+    let first_person = |name, gun| View { name, camera: Transform::IDENTITY, gun, fov: FOV, flash: false };
+    let flashing = |name, gun| View { name, camera: Transform::IDENTITY, gun, fov: FOV, flash: true };
     // Photo-style side views: a long, narrow lens from 3.5 m, looking square at the gun.
     let side = |name, x: f32| View {
         name,
         camera: Transform::from_xyz(x, 0.0, -0.16).looking_at(Vec3::new(0.0, 0.0, -0.16), Vec3::Y),
         gun: Transform::IDENTITY,
         fov: 0.2,
+        flash: false,
     };
     vec![
         first_person("hip", gun_transform(0.0)),
         first_person("sights", gun_transform(1.0)),
         first_person("recoil", gun_pose(0.0, 1.0)),
+        flashing("flash_hip", gun_pose(0.0, 1.0)),
+        flashing("flash_sights", gun_pose(1.0, 1.0)),
+        View { name: "flash_side", camera: Transform::from_xyz(2.2, 0.0, -0.45).looking_at(Vec3::new(0.0, 0.0, -0.45), Vec3::Y), gun: Transform::IDENTITY, fov: 0.35, flash: true },
         side("right", 3.5),
         side("left", -3.5),
         View {
@@ -52,18 +59,21 @@ fn views() -> Vec<View> {
             camera: Transform::from_xyz(-0.55, 0.28, 0.5).looking_at(Vec3::new(-0.02, -0.01, -0.15), Vec3::Y),
             gun: Transform::IDENTITY,
             fov: FOV,
+            flash: false,
         },
         View {
             name: "front",
             camera: Transform::from_xyz(0.3, 0.1, -1.1).looking_at(Vec3::new(0.0, 0.0, -0.3), Vec3::Y),
             gun: Transform::IDENTITY,
             fov: FOV,
+            flash: false,
         },
         View {
             name: "rear_left",
             camera: Transform::from_xyz(-0.35, 0.25, 0.75).looking_at(Vec3::new(-0.04, 0.0, -0.2), Vec3::Y),
             gun: Transform::IDENTITY,
             fov: FOV,
+            flash: false,
         },
     ]
 }
@@ -89,18 +99,28 @@ fn main() {
 }
 
 fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>) {
-    commands.insert_resource(GlobalAmbientLight { color: Color::srgb(0.8, 0.88, 1.0), brightness: 350.0, ..default() });
+    commands.insert_resource(GlobalAmbientLight { color: Color::srgb(0.8, 0.88, 1.0), brightness: 2600.0, ..default() });
     commands.spawn((
-        DirectionalLight { illuminance: 11_000.0, ..default() },
+        DirectionalLight { illuminance: bevy::light::light_consts::lux::RAW_SUNLIGHT, ..default() },
         Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 2.2, -0.75, 0.0)),
     ));
-    commands.spawn((Camera3d::default(), Transform::IDENTITY, Eye));
+    // The same exposure, tonemapping and bloom as the game's camera, so the flash is judged as it
+    // will look there.
+    commands.spawn((
+        Camera3d::default(),
+        Transform::IDENTITY,
+        Eye,
+        bevy::camera::Exposure { ev100: 13.0 },
+        bevy::core_pipeline::tonemapping::Tonemapping::TonyMcMapface,
+        bevy::post_process::bloom::Bloom { intensity: 0.06, ..bevy::post_process::bloom::Bloom::NATURAL },
+    ));
 
     let (metal, plastic, dark) = gun_model::build();
     let finish = |c: Color, rough: f32, metallic: f32| StandardMaterial { base_color: c, perceptual_roughness: rough, metallic, ..default() };
     commands
         .spawn((Gun, Transform::IDENTITY, Visibility::default()))
         .with_children(|gun| {
+            fps_prototype::muzzle_flash::spawn(gun, &mut meshes, &mut materials, fps_prototype::weapon::MUZZLE_LOCAL, false);
             for (parts, material) in [
                 (metal, finish(Color::srgb(0.13, 0.135, 0.145), 0.45, 0.75)),
                 (plastic, finish(Color::srgb(0.035, 0.035, 0.04), 0.35, 0.0)),
@@ -118,6 +138,8 @@ fn step(
     out: Res<Output>,
     mut eye: Query<&mut Transform, (With<Eye>, Without<Gun>)>,
     mut projections: Query<&mut Projection, With<Eye>>,
+    mut flash: Query<&mut Visibility, With<fps_prototype::muzzle_flash::MuzzleFlash>>,
+    mut flash_light: Query<&mut PointLight, With<fps_prototype::muzzle_flash::MuzzleFlashLight>>,
     mut gun: Query<&mut Transform, (With<Gun>, Without<Eye>)>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -142,6 +164,12 @@ fn step(
             p.fov = view.fov;
         }
         *gun.single_mut().unwrap() = view.gun;
+        for mut v in &mut flash {
+            *v = if view.flash { Visibility::Inherited } else { Visibility::Hidden };
+        }
+        for mut l in &mut flash_light {
+            l.intensity = if view.flash { 3_000_000.0 } else { 0.0 };
+        }
     }
     if within == PER_VIEW - 12 {
         let path = out.0.join(format!("{}.png", view.name));

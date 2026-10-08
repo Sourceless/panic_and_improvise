@@ -39,6 +39,18 @@ const KICK_RECOVERY_RATE: f32 = 6.0;
 const GUN_KICK_DECAY: f32 = 16.0;
 const GUN_KICK_BACK: f32 = 0.032;
 const GUN_KICK_TIP: f32 = 0.045;
+/// Accuracy. A shot strays from where the gun is pointed by up to this half-angle (radians),
+/// anywhere inside the cone: wide from the hip, very tight on the sights. It widens while
+/// moving, much more in the air, and as a burst "blooms" it.
+const HIP_SPREAD: f32 = 0.030; // about 1.7 degrees
+const ADS_SPREAD: f32 = 0.0035; // about 0.2 degrees
+const MOVING_SPREAD: f32 = 0.022; // extra at a full run
+const AIRBORNE_SPREAD: f32 = 0.035; // extra in the air
+const BLOOM_PER_SHOT: f32 = 0.0045;
+const BLOOM_MAX: f32 = 0.03;
+const BLOOM_DECAY: f32 = 5.5; // per second
+/// How much of the movement and bloom penalty is left when fully on the sights.
+const ADS_PENALTY_LEFT: f32 = 0.25;
 /// A shot is aimed at whatever is under the crosshair, or this far off if nothing is.
 const FAR_AIM: f32 = 300.0;
 /// ...but never closer than this, so a muzzle just past a wall can't flip the aim around.
@@ -51,7 +63,7 @@ impl Plugin for WeaponPlugin {
         app.add_systems(Startup, spawn_gun.after(spawn_player))
             .add_systems(
                 Update,
-                (aim.before(fire), fire.before(toggle_cursor_grab), recover_view, move_bullets),
+                (aim.before(fire), fire.before(toggle_cursor_grab), recover_view, animate_flash, move_bullets),
             );
     }
 }
@@ -71,9 +83,34 @@ pub struct Gun {
     pub view_kick: Vec2,
     /// Seconds since the last shot.
     pub since_shot: f32,
+    /// Extra inaccuracy from firing in a burst; builds with each shot, fades when you stop.
+    pub bloom: f32,
+    /// Seconds left of the muzzle flash, and the twist and size this shot's flash was given.
+    pub flash_time: f32,
+    pub flash_roll: f32,
+    pub flash_size: f32,
+    /// Where each shot goes is random; this is the generator's state.
+    rng: u32,
+    /// How far (radians) the latest shot strayed from where the gun was pointed, and the worst so far.
+    pub last_shot_error: f32,
+    pub worst_shot_error: f32,
     /// The gun model's jolt, 1 right after a shot, decaying to 0.
     pub gun_kick: f32,
 }
+
+impl Gun {
+    /// The next random number in 0..1 (a small xorshift generator: plenty for scatter).
+    fn random(&mut self) -> f32 {
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 17;
+        self.rng ^= self.rng << 5;
+        (self.rng >> 8) as f32 / (1u32 << 24) as f32
+    }
+}
+
+/// How fast the player runs flat out (the sprint speed), which counts as "moving fully" for
+/// accuracy purposes.
+const FULL_RUN_SPEED: f32 = 10.8;
 
 /// The gun's transform in camera space, `blend` of the way from the hip to the sights.
 pub fn gun_transform(blend: f32) -> Transform {
@@ -114,6 +151,26 @@ pub fn recover_kick(kick: Vec2, since_shot: f32, dt: f32) -> (Vec2, Vec2) {
     (settled, settled * KICK_RECOVERY_FRACTION)
 }
 
+/// How far a shot may stray from where the gun is pointed (the half-angle of the cone it lands
+/// in, in radians). `blend` is how far the gun is on its sights, `speed` how fast the player
+/// moves as a fraction of a full run, `bloom` the burst penalty built up so far.
+pub fn spread_half_angle(blend: f32, speed: f32, airborne: bool, bloom: f32) -> f32 {
+    let blend = blend.clamp(0.0, 1.0);
+    let base = HIP_SPREAD + (ADS_SPREAD - HIP_SPREAD) * blend;
+    let penalties = MOVING_SPREAD * speed.clamp(0.0, 1.0) + if airborne { AIRBORNE_SPREAD } else { 0.0 } + bloom.clamp(0.0, BLOOM_MAX);
+    base + penalties * (1.0 - (1.0 - ADS_PENALTY_LEFT) * blend)
+}
+
+/// A direction picked uniformly inside the cone of half-angle `half_angle` around `aim`, from two
+/// random numbers `u` and `v` in 0..1.
+pub fn scatter_direction(aim: Vec3, half_angle: f32, u: f32, v: f32) -> Vec3 {
+    let right = aim.cross(Vec3::Y).try_normalize().unwrap_or(Vec3::X);
+    let up = right.cross(aim);
+    // sqrt(u) spreads the shots evenly over the disc rather than bunching them in the middle.
+    let (radius, theta) = (half_angle.tan() * u.sqrt(), v * std::f32::consts::TAU);
+    (aim + right * (radius * theta.cos()) + up * (radius * theta.sin())).normalize()
+}
+
 /// Which way a bullet leaves the muzzle: straight at the point the crosshair is on, `distance`
 /// metres along the view. (The muzzle is off to one side, so firing parallel to the view
 /// would land the shot to the side of where you aim.)
@@ -152,7 +209,10 @@ pub struct Bullet {
 pub struct BulletAssets {
     pub mesh: Handle<Mesh>,
     pub material: Handle<StandardMaterial>,
+    /// The first shot recording, kept for anything that just needs one to check loading.
     pub shot_sound: Handle<AudioSource>,
+    /// All the recordings; each shot picks one, at a slightly different pitch.
+    pub shot_sounds: Vec<Handle<AudioSource>>,
 }
 
 pub fn spawn_gun(
@@ -180,6 +240,7 @@ pub fn spawn_gun(
         (meshes.add(dark.into_mesh()), materials.add(finish(Color::srgb(0.008, 0.008, 0.01), 0.9, 0.0))),
     ];
 
+    let shot_sounds: Vec<Handle<AudioSource>> = (1..=3).map(|i| asset_server.load(format!("sounds/smg/smg_shot_{i}.wav"))).collect();
     commands.insert_resource(BulletAssets {
         mesh: meshes.add(Sphere::new(0.03)),
         material: materials.add(StandardMaterial {
@@ -187,7 +248,8 @@ pub fn spawn_gun(
             emissive: LinearRgba::rgb(12.0, 9.0, 2.0),
             ..default()
         }),
-        shot_sound: asset_server.load("sounds/gunshots/pistol_shot.wav"),
+        shot_sound: shot_sounds[0].clone(),
+        shot_sounds,
     });
 
     commands.entity(cam).with_children(|cam_children| {
@@ -202,6 +264,13 @@ pub fn spawn_gun(
                     aim_blend: 0.0,
                     view_kick: Vec2::ZERO,
                     since_shot: 10.0,
+                    bloom: 0.0,
+                    flash_time: 0.0,
+                    flash_roll: 0.0,
+                    flash_size: 1.0,
+                    rng: 0x9E37_79B9,
+                    last_shot_error: 0.0,
+                    worst_shot_error: 0.0,
                     gun_kick: 0.0,
                 },
                 gun_transform(0.0),
@@ -211,6 +280,7 @@ pub fn spawn_gun(
                 for (mesh, material) in parts {
                     gun.spawn((Mesh3d(mesh), MeshMaterial3d(material), Transform::default()));
                 }
+                crate::muzzle_flash::spawn(gun, &mut meshes, &mut materials, MUZZLE_LOCAL, false);
             });
     });
 }
@@ -245,6 +315,8 @@ fn aim(
     if (gun.aim_blend - target).abs() < 0.002 {
         gun.aim_blend = target;
     }
+    gun.bloom *= (-BLOOM_DECAY * time.delta_secs()).exp();
+    gun.flash_time = (gun.flash_time - time.delta_secs()).max(0.0);
     gun.gun_kick *= (-GUN_KICK_DECAY * time.delta_secs()).exp();
     if gun.gun_kick < 0.002 {
         gun.gun_kick = 0.0;
@@ -296,14 +368,35 @@ fn fire(
     let distance = what_is_under_crosshair(eye, forward, &dummies, &map);
     let direction = launch_direction(muzzle, eye, forward, distance);
 
+    // Where the shot actually goes: anywhere inside the gun's cone of inaccuracy.
+    let half_angle = spread_half_angle(gun.aim_blend, view.speed() / FULL_RUN_SPEED, view.airborne(), gun.bloom);
+    let (u, v) = (gun.random(), gun.random());
+    let direction_shot = scatter_direction(direction, half_angle, u, v);
+    let error = direction.dot(direction_shot).clamp(-1.0, 1.0).acos();
+    gun.last_shot_error = error;
+    gun.worst_shot_error = gun.worst_shot_error.max(error);
+    gun.bloom = (gun.bloom + BLOOM_PER_SHOT).min(BLOOM_MAX);
+
     gun.cooldown = FIRE_INTERVAL;
     gun.shots_fired += 1;
     gun.last_shot_origin = Some(muzzle);
     gun.since_shot = 0.0;
-    commands.spawn((AudioPlayer(assets.shot_sound.clone()), PlaybackSettings::DESPAWN));
+    // A different recording each time, a little faster or slower, so a burst doesn't sound like
+    // one sample on repeat.
+    let take = (gun.random() * assets.shot_sounds.len() as f32) as usize % assets.shot_sounds.len();
+    let (pitch, loudness) = (0.94 + 0.12 * gun.random(), 0.9 + 0.1 * gun.random());
+    commands.spawn((
+        AudioPlayer(assets.shot_sounds[take].clone()),
+        PlaybackSettings { speed: pitch, volume: bevy::audio::Volume::Linear(loudness), ..PlaybackSettings::DESPAWN },
+    ));
+    // The muzzle flash, with a new twist and size each time (smaller through the sights, so it
+    // doesn't blot out the sight picture).
+    gun.flash_time = crate::muzzle_flash::FLASH_TIME;
+    gun.flash_roll = gun.random() * std::f32::consts::TAU;
+    gun.flash_size = (0.8 + 0.4 * gun.random()) * (1.0 - 0.45 * gun.aim_blend);
     commands.spawn((
         Bullet {
-            velocity: direction * BULLET_SPEED,
+            velocity: direction_shot * BULLET_SPEED,
             age: 0.0,
         },
         Mesh3d(assets.mesh.clone()),
@@ -320,6 +413,24 @@ fn fire(
 
 // Once the gun has been quiet a moment, most of the climb settles back by itself, like the
 // muzzle coming back down as the shooter recovers; what's left is for the player to pull down.
+// Shows the muzzle flash and its light for the few frames after a shot.
+fn animate_flash(
+    guns: Query<&Gun>,
+    mut flashes: Query<(&mut Transform, &mut Visibility), With<crate::muzzle_flash::MuzzleFlash>>,
+    mut lights: Query<&mut PointLight, With<crate::muzzle_flash::MuzzleFlashLight>>,
+) {
+    let Ok(gun) = guns.single() else { return };
+    let (scale, intensity) = crate::muzzle_flash::flash_state(gun.flash_time);
+    for (mut transform, mut visibility) in &mut flashes {
+        *visibility = if scale > 0.0 { Visibility::Inherited } else { Visibility::Hidden };
+        transform.rotation = Quat::from_rotation_z(gun.flash_roll);
+        transform.scale = Vec3::splat(scale * gun.flash_size);
+    }
+    for mut light in &mut lights {
+        light.intensity = intensity * gun.flash_size;
+    }
+}
+
 fn recover_view(time: Res<Time>, mut guns: Query<&mut Gun>, mut camera: Query<(&mut Transform, &mut FpsCamera)>) {
     let (Ok(mut gun), Ok((mut cam, mut view))) = (guns.single_mut(), camera.single_mut()) else {
         return;
@@ -520,5 +631,77 @@ mod tests {
         // Sight tops stay close to the line of sight even in the jolt.
         let blade = ads.transform_point(sight_points().1);
         assert!(blade.y.abs() < 0.03, "front blade {} off the line of sight under recoil", blade.y);
+    }
+
+    #[test]
+    fn hip_fire_is_loose_and_aimed_fire_is_tight() {
+        let hip = spread_half_angle(0.0, 0.0, false, 0.0);
+        let ads = spread_half_angle(1.0, 0.0, false, 0.0);
+        assert!((0.025..0.04).contains(&hip), "hip cone {hip} rad");
+        assert!(ads < 0.006, "sights cone {ads} rad");
+        assert!(hip > ads * 6.0, "hip should be several times looser than aimed");
+        // Easing onto the sights tightens it steadily.
+        let mut last = hip;
+        for step in 1..=10 {
+            let now = spread_half_angle(step as f32 / 10.0, 0.0, false, 0.0);
+            assert!(now < last, "spread should shrink as the gun comes up");
+            last = now;
+        }
+    }
+
+    #[test]
+    fn moving_jumping_and_long_bursts_all_widen_the_spread_but_less_on_the_sights() {
+        let still = spread_half_angle(0.0, 0.0, false, 0.0);
+        assert!(spread_half_angle(0.0, 1.0, false, 0.0) > still + 0.015, "running");
+        assert!(spread_half_angle(0.0, 0.0, true, 0.0) > still + 0.03, "in the air");
+        assert!(spread_half_angle(0.0, 0.0, false, BLOOM_MAX) > still + 0.025, "after a long burst");
+        // The same penalties cost far less when braced on the sights.
+        let hip_cost = spread_half_angle(0.0, 1.0, true, BLOOM_MAX) - still;
+        let ads_cost = spread_half_angle(1.0, 1.0, true, BLOOM_MAX) - spread_half_angle(1.0, 0.0, false, 0.0);
+        assert!(ads_cost < hip_cost * 0.3, "ads penalty {ads_cost} vs hip {hip_cost}");
+        // Bloom can't grow without bound.
+        assert_eq!(spread_half_angle(0.0, 0.0, false, 10.0), spread_half_angle(0.0, 0.0, false, BLOOM_MAX));
+    }
+
+    #[test]
+    fn scattered_shots_stay_in_the_cone_and_fill_it_evenly() {
+        let aim = Vec3::new(0.3, -0.2, -1.0).normalize();
+        let half = 0.03;
+        let mut seed = 12345u32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed >> 8) as f32 / (1u32 << 24) as f32
+        };
+        let (mut inner, mut total, mut worst, mut sum) = (0, 4000, 0.0f32, Vec3::ZERO);
+        for _ in 0..total {
+            let d = scatter_direction(aim, half, next(), next());
+            assert!((d.length() - 1.0).abs() < 1e-4);
+            let angle = aim.dot(d).clamp(-1.0, 1.0).acos();
+            worst = worst.max(angle);
+            if angle < half * 0.7071 {
+                inner += 1;
+            }
+            sum += d;
+        }
+        assert!(worst <= half + 1e-4, "a shot strayed {worst} rad, past the cone's {half}");
+        assert!(worst > half * 0.97, "the cone's edge is actually used ({worst})");
+        // Half the area of a disc lies inside radius / sqrt(2): an even fill puts half the shots there.
+        let share = inner as f32 / total as f32;
+        assert!((share - 0.5).abs() < 0.05, "{share} of shots in the inner 70% radius; an even spread gives 0.5");
+        // And the average shot goes where the gun points.
+        let mean = (sum / total as f32).normalize();
+        assert!(mean.dot(aim) > 0.9999, "average shot is off-centre");
+        total += 0;
+        let _ = total;
+    }
+
+    #[test]
+    fn zero_spread_goes_exactly_where_aimed() {
+        let aim = Vec3::new(0.0, 0.0, -1.0);
+        assert!((scatter_direction(aim, 0.0, 0.7, 0.3) - aim).length() < 1e-6);
+        // Straight up or down must not break the basis.
+        assert!(scatter_direction(Vec3::Y, 0.02, 0.5, 0.5).is_finite());
     }
 }

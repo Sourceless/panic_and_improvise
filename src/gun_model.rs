@@ -264,19 +264,19 @@ pub fn build() -> (Parts, Parts, Parts) {
     // --- Magazine housing on the left, and the magazine: a flat box, curving forward as it runs
     // out sideways (measured about 190 mm long), with ribs and an end plate ---
     let mag_z = photo(828.0, 0.0).0 + 0.03;
-    metal.add_box(Vec3::new(-0.0345, BORE_Y + 0.001, mag_z), Vec3::new(0.034, 0.052, 0.046), NONE);
-    let (mut at, segments, seg_len) = (Vec3::new(-0.0515, BORE_Y, mag_z), 5, 0.038);
+    metal.add_box(Vec3::new(-0.0335, BORE_Y + 0.001, mag_z), Vec3::new(0.032, 0.040, 0.034), NONE);
+    let (mut at, segments, seg_len) = (Vec3::new(-0.0495, BORE_Y, mag_z), 5, 0.038);
     for k in 0..segments {
         let bend = 0.055 * (k as f32 + 0.5) * (k as f32 + 1.0) * 0.5;
         let toward = Vec3::new(-bend.cos(), 0.0, -bend.sin());
         let centre = at + toward * (seg_len * 0.5);
-        metal.add_box(centre, Vec3::new(seg_len + 0.002, 0.056, 0.034), Quat::from_rotation_y(-bend));
+        metal.add_box(centre, Vec3::new(seg_len + 0.002, 0.040, 0.025), Quat::from_rotation_y(-bend));
         // A rib on the magazine's top face, as the stamped box has.
-        metal.add_box(centre + Vec3::Y * 0.0285, Vec3::new(seg_len * 0.55, 0.0016, 0.012), Quat::from_rotation_y(-bend));
+        metal.add_box(centre + Vec3::Y * 0.0205, Vec3::new(seg_len * 0.55, 0.0016, 0.010), Quat::from_rotation_y(-bend));
         at += toward * seg_len;
     }
     let end_bend = 0.055 * (segments as f32) * (segments as f32 + 1.0) * 0.5 * 0.0 + 0.055 * (segments as f32 - 0.5) * segments as f32 * 0.5;
-    metal.add_box(at + Vec3::new(-end_bend.cos(), 0.0, -end_bend.sin()) * 0.002, Vec3::new(0.007, 0.060, 0.038), Quat::from_rotation_y(-end_bend));
+    metal.add_box(at + Vec3::new(-end_bend.cos(), 0.0, -end_bend.sin()) * 0.002, Vec3::new(0.006, 0.046, 0.030), Quat::from_rotation_y(-end_bend));
 
     // --- Folding stock: two bars either side, level with the receiver at the hinge and dropping
     // away behind it (the real stock drop), two struts, and the butt plate across the back ---

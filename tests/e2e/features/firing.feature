@@ -18,11 +18,15 @@ Feature: Firing the gun
     When I hold fire for 1 second
     Then the gun fired between 7 and 9 shots
 
-  Scenario: A shot hits the target dummy
+  Scenario: An aimed shot hits the target dummy
+    Given I right click
+    And the gun is on its sights
     When I fire once
     Then the target dummy has taken 25 damage
 
   Scenario: The target dummy respawns after being destroyed
+    Given I right click
+    And the gun is on its sights
     When I fire single shots until the target dummy is down
     Then the target dummy respawns within 3 seconds
 
@@ -34,3 +38,18 @@ Feature: Firing the gun
     When I hold fire for 1 second
     Then the view has climbed noticeably
     And the view has come most of the way back down
+
+  Scenario: A shot from the hip is inaccurate
+    When I fire 12 single shots
+    Then the worst shot strayed more than 0.8 degrees
+
+  Scenario: Shots from the sights are accurate
+    Given I right click
+    And the gun is on its sights
+    When I fire 12 single shots
+    Then no shot strayed more than 0.4 degrees
+
+  Scenario: Firing shows a muzzle flash that goes away again
+    When I fire once
+    Then the muzzle flash shows
+    And the muzzle flash is gone

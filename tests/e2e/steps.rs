@@ -97,6 +97,41 @@ fn shot_from_hip(_world: &mut GameWorld) {
     assert!(right > 0.15 && up < -0.1 && ahead > 0.4, "muzzle at right {right}, up {up}, ahead {ahead}");
 }
 
+#[when(regex = r"^I fire (\d+) single shots?$")]
+fn fire_n_single_shots(_world: &mut GameWorld, count: u32) {
+    step_pause();
+    for _ in 0..count {
+        tap_fire();
+        // Long enough between shots for the burst penalty to fade and the view to settle.
+        std::thread::sleep(Duration::from_millis(700));
+    }
+}
+
+#[then(regex = r"^the worst shot strayed more than ([\d.]+) degrees$")]
+fn worst_shot_more_than(_world: &mut GameWorld, degrees: f32) {
+    let worst = snapshot().worst_shot_error.to_degrees();
+    assert!(worst > degrees, "the worst of the shots was only {worst:.2} degrees off");
+}
+
+#[then(regex = r"^no shot strayed more than ([\d.]+) degrees$")]
+fn no_shot_more_than(_world: &mut GameWorld, degrees: f32) {
+    let worst = snapshot().worst_shot_error.to_degrees();
+    assert!(worst < degrees, "a shot strayed {worst:.2} degrees");
+    assert!(snapshot().shots_fired > 0, "no shots were fired");
+}
+
+#[then("the muzzle flash shows")]
+fn flash_shows(_world: &mut GameWorld) {
+    let seen = wait_for(Duration::from_millis(400), || snapshot().flash_visible);
+    assert!(seen, "no muzzle flash appeared after the shot");
+}
+
+#[then("the muzzle flash is gone")]
+fn flash_gone(_world: &mut GameWorld) {
+    let gone = wait_for(Duration::from_secs(3), || !snapshot().flash_visible);
+    assert!(gone, "the muzzle flash stayed on");
+}
+
 #[then("the view has kicked upward")]
 fn view_kicked(_world: &mut GameWorld) {
     let kicked = wait_for(Duration::from_secs(2), || snapshot().camera_pitch > 0.003);

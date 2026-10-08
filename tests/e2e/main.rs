@@ -45,6 +45,10 @@ pub struct Snapshot {
     pub aim_blend: f32,
     /// How far up the view is pointing, radians.
     pub camera_pitch: f32,
+    /// How far (radians) the worst shot so far strayed from where the gun was pointed.
+    pub worst_shot_error: f32,
+    /// Whether the muzzle flash is showing.
+    pub flash_visible: bool,
     /// Where the last bullet started, relative to the camera (right, up, forward).
     pub last_shot_origin: Option<(f32, f32, f32)>,
 }
@@ -249,9 +253,10 @@ fn take_snapshot(world: &mut World) -> Snapshot {
         .map(|dummy| (dummy.health, dummy.hits))
         .unwrap_or((0.0, 0));
     let shot_sound_loaded = match world.get_resource::<BulletAssets>() {
-        Some(assets) => world
-            .resource::<AssetServer>()
-            .is_loaded_with_dependencies(assets.shot_sound.id()),
+        Some(assets) => {
+            let server = world.resource::<AssetServer>();
+            assets.shot_sounds.iter().all(|sound| server.is_loaded_with_dependencies(sound.id()))
+        }
         None => false,
     };
     let aiming = world.query::<&Gun>().iter(world).any(|gun| gun.aiming);
@@ -266,7 +271,14 @@ fn take_snapshot(world: &mut World) -> Snapshot {
         _ => None,
     };
     let camera_pitch = world.query::<&FpsCamera>().iter(world).next().map_or(0.0, |c| c.pitch());
+    let worst_shot_error = world.query::<&Gun>().iter(world).map(|gun| gun.worst_shot_error).fold(0.0, f32::max);
+    let flash_visible = world
+        .query_filtered::<&Visibility, With<fps_prototype::muzzle_flash::MuzzleFlash>>()
+        .iter(world)
+        .any(|v| *v != Visibility::Hidden);
     Snapshot {
+        worst_shot_error,
+        flash_visible,
         camera_pitch,
         aiming,
         aim_blend,

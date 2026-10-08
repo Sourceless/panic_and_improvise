@@ -9,6 +9,7 @@ pub mod gun_model;
 pub mod look;
 pub mod map;
 pub mod mipmaps;
+pub mod muzzle_flash;
 pub mod params;
 pub mod perf;
 pub mod player;

@@ -69,6 +69,16 @@ impl FpsCamera {
         transform.rotation = Quat::from_euler(EulerRot::YXZ, self.yaw, self.pitch, 0.0);
     }
 
+    /// How fast the player is moving along the ground, metres per second.
+    pub fn speed(&self) -> f32 {
+        self.velocity.length()
+    }
+
+    /// Whether the player's feet are off the ground.
+    pub fn airborne(&self) -> bool {
+        self.air_height > 0.0
+    }
+
     /// Where the view is pointing: up from level in radians.
     pub fn pitch(&self) -> f32 {
         self.pitch
