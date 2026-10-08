@@ -22,7 +22,9 @@ use crate::wind_material::{WindExtension, WindMaterial};
 const GRASS_CELL: f32 = 6.0;
 const STREAM_IN: f32 = 48.0;
 const STREAM_OUT: f32 = 60.0;
-const MAX_NEW_CELLS_PER_FRAME: usize = 6;
+const MAX_NEW_CELLS_PER_FRAME: usize = 4;
+/// Candidate tuft positions tried per square metre (each is kept with the cover's density / this).
+const ATTEMPTS_PER_M2: f32 = 4.0;
 
 pub struct GrassPlugin;
 
@@ -155,11 +157,11 @@ fn hash(x: i32, z: i32, salt: u32) -> f32 {
 // Tufts per square metre, and height range, by kind of cover.
 fn tuft_profile(cover: Cover) -> (f32, f32, f32) {
     match cover {
-        Cover::Meadow => (1.25, 0.45, 0.75),
-        Cover::Pasture => (1.4, 0.18, 0.32),
-        Cover::Rough => (0.75, 0.55, 0.95),
-        Cover::Verge => (0.5, 0.3, 0.55),
-        Cover::Understory => (1.5, 0.3, 0.6),
+        Cover::Meadow => (3.6, 0.45, 0.8),
+        Cover::Pasture => (4.0, 0.2, 0.36),
+        Cover::Rough => (2.4, 0.55, 1.0),
+        Cover::Verge => (1.4, 0.3, 0.6),
+        Cover::Understory => (2.8, 0.3, 0.6),
         Cover::None => (0.0, 0.0, 0.0),
     }
 }
@@ -191,7 +193,7 @@ fn build_cell_mesh(map: &TerrainMap, cover: &GroundCover, cx: i32, cz: i32) -> O
     let mut colors: Vec<[f32; 4]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
-    let attempts = (GRASS_CELL * GRASS_CELL * 1.5) as i32;
+    let attempts = (GRASS_CELL * GRASS_CELL * ATTEMPTS_PER_M2) as i32;
     for k in 0..attempts {
         let p = origin + Vec2::new(hash(cx, cz, k as u32 * 4 + 1), hash(cx, cz, k as u32 * 4 + 2)) * GRASS_CELL;
         if p.x.abs() > HALF_SIZE || p.y.abs() > HALF_SIZE {
@@ -199,8 +201,8 @@ fn build_cell_mesh(map: &TerrainMap, cover: &GroundCover, cx: i32, cz: i32) -> O
         }
         let kind = cover.at(p);
         let (density, h_lo, h_hi) = tuft_profile(kind);
-        // `attempts` candidates per cell stand in for 1.5 per square metre; thin to the density.
-        if hash(cx, cz, k as u32 * 4 + 3) > density / 1.5 {
+        // `attempts` candidates per cell stand in for ATTEMPTS_PER_M2 per square metre; thin to the density.
+        if hash(cx, cz, k as u32 * 4 + 3) > density / ATTEMPTS_PER_M2 {
             continue;
         }
         // Rest on the rendered ground: the terrain mesh's own surface, and above the field
@@ -218,7 +220,7 @@ fn build_cell_mesh(map: &TerrainMap, cover: &GroundCover, cx: i32, cz: i32) -> O
         }
         let (card, height_scale, aspect) = pick_card(kind, hash(cx, cz, k as u32 * 9 + 300));
         let height = (h_lo + (h_hi - h_lo) * hash(cx, cz, k as u32 * 4 + 4)) * height_scale;
-        let half_width = height * aspect;
+        let half_width = height * aspect * 1.15;
         let (u0, u1) = (card as f32 * 0.25, card as f32 * 0.25 + 0.25);
         let yaw0 = hash(cx, cz, k as u32 * 7 + 100) * TAU;
         let tone = 0.75 + 0.4 * hash(cx, cz, k as u32 * 7 + 101);
