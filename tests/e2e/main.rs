@@ -40,6 +40,11 @@ pub struct Snapshot {
     pub playing_sounds: usize,
     pub dummy_health: f32,
     pub dummy_hits: u32,
+    /// Whether the player has the gun raised to its sights, and how far it has got (0 to 1).
+    pub aiming: bool,
+    pub aim_blend: f32,
+    /// Where the last bullet started, relative to the camera (right, up, forward).
+    pub last_shot_origin: Option<(f32, f32, f32)>,
 }
 
 static GAME: OnceLock<Sender<Command>> = OnceLock::new();
@@ -247,7 +252,21 @@ fn take_snapshot(world: &mut World) -> Snapshot {
             .is_loaded_with_dependencies(assets.shot_sound.id()),
         None => false,
     };
+    let aiming = world.query::<&Gun>().iter(world).any(|gun| gun.aiming);
+    let aim_blend = world.query::<&Gun>().iter(world).map(|gun| gun.aim_blend).fold(0.0, f32::max);
+    let camera = world.query_filtered::<&Transform, With<FpsCamera>>().iter(world).next().copied();
+    let origin = world.query::<&Gun>().iter(world).find_map(|gun| gun.last_shot_origin);
+    let last_shot_origin = match (camera, origin) {
+        (Some(cam), Some(world_origin)) => {
+            let local = cam.compute_affine().inverse().transform_point3(world_origin);
+            Some((local.x, local.y, -local.z))
+        }
+        _ => None,
+    };
     Snapshot {
+        aiming,
+        aim_blend,
+        last_shot_origin,
         cursor_captured,
         shot_sound_loaded,
         shots_fired,

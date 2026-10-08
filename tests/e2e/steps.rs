@@ -61,9 +61,46 @@ fn shot_sound_loaded(_world: &mut GameWorld) {
 }
 
 #[given("the cursor is released")]
+#[when("the cursor is released")]
 fn cursor_released(_world: &mut GameWorld) {
     send(Command::SetCursorCaptured(false));
     step_pause();
+}
+
+#[given("I right click")]
+#[when("I right click")]
+fn right_click(_world: &mut GameWorld) {
+    step_pause();
+    send(Command::Tap(MouseButton::Right));
+}
+
+#[given("the gun is on its sights")]
+#[then("the gun is on its sights")]
+fn gun_on_sights(_world: &mut GameWorld) {
+    let raised = wait_for(Duration::from_secs(2), || snapshot().aim_blend > 0.99);
+    let state = snapshot();
+    assert!(raised && state.aiming, "gun not on its sights (aiming {}, blend {})", state.aiming, state.aim_blend);
+}
+
+#[then("the gun is back at the hip")]
+fn gun_at_hip(_world: &mut GameWorld) {
+    let lowered = wait_for(Duration::from_secs(2), || snapshot().aim_blend < 0.01);
+    let state = snapshot();
+    assert!(lowered && !state.aiming, "gun not at the hip (aiming {}, blend {})", state.aiming, state.aim_blend);
+}
+
+#[then("the shot started to the right of and below the view and ahead of the camera")]
+fn shot_from_hip(_world: &mut GameWorld) {
+    wait_for(Duration::from_secs(2), || snapshot().last_shot_origin.is_some());
+    let (right, up, ahead) = snapshot().last_shot_origin.expect("no shot was fired");
+    assert!(right > 0.15 && up < -0.1 && ahead > 0.4, "muzzle at right {right}, up {up}, ahead {ahead}");
+}
+
+#[then("the shot started in line with the view")]
+fn shot_from_sights(_world: &mut GameWorld) {
+    wait_for(Duration::from_secs(2), || snapshot().last_shot_origin.is_some());
+    let (right, up, ahead) = snapshot().last_shot_origin.expect("no shot was fired");
+    assert!(right.abs() < 0.01 && up.abs() < 0.12 && ahead > 0.4, "muzzle at right {right}, up {up}, ahead {ahead}");
 }
 
 #[when("I fire once")]

@@ -18,13 +18,23 @@ const AIR_RESPONSE: f32 = 1.6;
 /// How much wider the view gets at full sprint, as a fraction of the field of view.
 const SPRINT_FOV_KICK: f32 = 0.07;
 const MOUSE_SENSITIVITY: f32 = 0.002;
+/// Walking speed lost when fully on the sights, as a fraction.
+const AIM_SLOWDOWN: f32 = 0.4;
+/// How much the look sensitivity falls at full zoom, tracking the narrower field of view.
+const ADS_LOOK_SCALE: f32 = 0.7;
 const EYE_HEIGHT: f32 = 1.8;
+
+/// How far the gun is raised to its sights, 0 (hip) to 1 (aimed). Written by the weapon, read by
+/// the player (slower, steadier aim) and the camera (zoom).
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct AimBlend(pub f32);
 
 pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CursorIntent>()
+            .init_resource::<AimBlend>()
             .add_systems(Startup, (spawn_player, grab_cursor))
             .add_systems(
                 Update,
@@ -112,6 +122,7 @@ fn mouse_look(
     cursors: Query<&CursorOptions, With<PrimaryWindow>>,
     mut mouse_motion: MessageReader<MouseMotion>,
     mut query: Query<(&mut Transform, &mut FpsCamera)>,
+    aim: Res<AimBlend>,
 ) {
     let Ok(cursor) = cursors.single() else {
         return;
@@ -132,8 +143,9 @@ fn mouse_look(
     let Ok((mut transform, mut cam)) = query.single_mut() else {
         return;
     };
-    cam.yaw -= delta.x * MOUSE_SENSITIVITY;
-    cam.pitch -= delta.y * MOUSE_SENSITIVITY;
+    let sensitivity = MOUSE_SENSITIVITY * (1.0 - (1.0 - ADS_LOOK_SCALE) * aim.0);
+    cam.yaw -= delta.x * sensitivity;
+    cam.pitch -= delta.y * sensitivity;
     cam.pitch = cam.pitch.clamp(-1.54, 1.54);
 
     transform.rotation = Quat::from_euler(EulerRot::YXZ, cam.yaw, cam.pitch, 0.0);
@@ -146,6 +158,8 @@ pub struct MoveIntent {
     pub direction: Vec2,
     pub sprint: bool,
     pub jump: bool,
+    /// How far the gun is on its sights, 0 to 1: aiming is slower than walking.
+    pub aim: f32,
 }
 
 /// The player's movement state, apart from where they are.
@@ -171,7 +185,8 @@ impl MoveState {
 pub fn step_movement(mut state: MoveState, intent: MoveIntent, dt: f32) -> MoveState {
     let grounded = state.grounded();
     // Sprinting needs somewhere to go: it only applies while moving.
-    let speed = if intent.sprint && intent.direction != Vec2::ZERO { MOVE_SPEED * SPRINT_MULTIPLIER } else { MOVE_SPEED };
+    let sprinting = intent.sprint && intent.direction != Vec2::ZERO;
+    let speed = if sprinting { MOVE_SPEED * SPRINT_MULTIPLIER } else { MOVE_SPEED * (1.0 - AIM_SLOWDOWN * intent.aim) };
     let target = intent.direction * speed;
     let response = if grounded { GROUND_RESPONSE } else { AIR_RESPONSE };
     state.velocity = state.velocity.lerp(target, 1.0 - (-response * dt).exp());
@@ -198,6 +213,7 @@ fn player_movement(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     terrain: Res<TerrainMap>,
+    aim: Res<AimBlend>,
     mut query: Query<(&mut Transform, &mut FpsCamera)>,
 ) {
     let Ok((mut transform, mut cam)) = query.single_mut() else {
@@ -225,6 +241,7 @@ fn player_movement(
         // Sprinting is for running forward, not backpedalling.
         sprint: keys.pressed(KeyCode::ShiftLeft) && keys.pressed(KeyCode::KeyW) && !keys.pressed(KeyCode::KeyS),
         jump: keys.pressed(KeyCode::Space),
+        aim: aim.0,
     };
     let state = step_movement(
         MoveState { velocity: cam.velocity, air_height: cam.air_height, vertical_speed: cam.vertical_speed },
@@ -245,12 +262,14 @@ fn player_movement(
 }
 
 /// Widens the view a little while sprinting, which makes speed read on screen.
-fn sprint_fov(time: Res<Time>, mut cameras: Query<(&FpsCamera, &mut Projection)>, mut base: Local<Option<f32>>) {
+fn sprint_fov(time: Res<Time>, aim: Res<AimBlend>, mut cameras: Query<(&FpsCamera, &mut Projection)>, mut base: Local<Option<f32>>) {
     for (cam, mut projection) in &mut cameras {
         let Projection::Perspective(p) = &mut *projection else { continue };
         let base_fov = *base.get_or_insert(p.fov);
         let sprint = MoveState { velocity: cam.velocity, ..default() }.sprint_fraction();
-        let target = base_fov * (1.0 + SPRINT_FOV_KICK * sprint);
+        // Sprinting widens the view; aiming down the sights narrows it.
+        let zoom = 1.0 + (crate::weapon::ADS_FOV_SCALE - 1.0) * aim.0;
+        let target = base_fov * (1.0 + SPRINT_FOV_KICK * sprint) * zoom;
         p.fov += (target - p.fov) * (1.0 - (-8.0 * time.delta_secs()).exp());
     }
 }
@@ -354,6 +373,7 @@ mod tests {
         app.add_plugins(MinimalPlugins)
             .insert_resource(TerrainMap::flat(ground))
             .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<AimBlend>()
             .add_systems(Update, player_movement);
         app.world_mut().spawn((
             Transform::from_xyz(0.0, ground + EYE_HEIGHT, 0.0),
@@ -413,5 +433,14 @@ mod tests {
         // Two seconds from standing: about 12 m walking (less the ramp-up), about 21 m sprinting.
         assert!((10.0..12.5).contains(&walk), "walked {walk} m");
         assert!((18.0..22.0).contains(&run), "sprinted {run} m");
+    }
+
+    #[test]
+    fn aiming_is_slower_than_walking_and_sprinting_ignores_it() {
+        let walk = run(MoveState::default(), forward(), 1.0).velocity.length();
+        let aimed = run(MoveState::default(), MoveIntent { aim: 1.0, ..forward() }, 1.0).velocity.length();
+        assert!((aimed - walk * (1.0 - AIM_SLOWDOWN)).abs() < 0.1, "walk {walk}, aimed {aimed}");
+        let sprint = run(MoveState::default(), MoveIntent { sprint: true, aim: 1.0, ..forward() }, 1.0).velocity.length();
+        assert!(sprint > walk * 1.7, "sprinting is not slowed by aim: {sprint}");
     }
 }
