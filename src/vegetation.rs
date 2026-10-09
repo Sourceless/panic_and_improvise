@@ -882,7 +882,12 @@ const TREE_CLEARANCE: f32 = 3.5;
 #[derive(Default)]
 pub struct Keepout {
     buckets: HashMap<(i32, i32), Vec<Shape>>,
+    /// The roads and paths, which no tree grows in or leans over.
+    roads: Option<crate::roads::RoadClearance>,
 }
+
+/// How far a tree's trunk stands from the edge of a road or path, metres.
+const TREE_ROAD_MARGIN: f32 = 1.8;
 
 impl Keepout {
     const BUCKET: f32 = 32.0;
@@ -892,7 +897,13 @@ impl Keepout {
         for (centre, shape) in shapes {
             buckets.entry(Self::key(centre)).or_default().push(shape);
         }
-        Keepout { buckets }
+        Keepout { buckets, roads: None }
+    }
+
+    /// Keeps trees off these roads too.
+    pub fn with_roads(mut self, roads: crate::roads::RoadClearance) -> Self {
+        self.roads = Some(roads);
+        self
     }
 
     fn key(p: Vec2) -> (i32, i32) {
@@ -902,6 +913,9 @@ impl Keepout {
     /// Whether a tree at `p` would stand in or against something built. (Nothing is bigger than a
     /// bucket, so the neighbouring buckets are all there is to look in.)
     pub fn blocks(&self, p: Vec2) -> bool {
+        if self.roads.as_ref().is_some_and(|r| r.clearance(p) < TREE_ROAD_MARGIN) {
+            return true;
+        }
         let (kx, kz) = Self::key(p);
         (-1..=1).any(|dz| {
             (-1..=1).any(|dx| self.buckets.get(&(kx + dx, kz + dz)).is_some_and(|shapes| shapes.iter().any(|s| s.separation(p).0 < TREE_CLEARANCE)))

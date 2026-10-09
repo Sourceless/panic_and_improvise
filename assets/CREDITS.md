@@ -74,4 +74,7 @@ the Royal Armouries' collection (collections.armouries.net, object numbers PR.14
 Sterling L2A1/L2A2 entries), viewed for reference only. They are the Royal Armouries' copyright
 and are not included in this repository or in the game.
 
-`sounds/footsteps/*.wav` are synthesised by `tools/make_footsteps.py` (filtered noise and damped tones); there is nothing to credit.
+`sounds/footsteps/*.wav` and `sounds/impact/splash_*.wav` are cut by `tools/cut_footsteps.py` from three CC0 packs on OpenGameArt:
+[Different steps on wood, stone, leaves, gravel and mud](https://opengameart.org/content/different-steps-on-wood-stone-leaves-gravel-and-mud) (TinyWorlds),
+[Fantozzi's Footsteps (Grass/Sand & Stone)](https://opengameart.org/content/fantozzis-footsteps-grasssand-stone) (Fantozzi, via qubodup) and
+[Water Splash and sand footsteps](https://opengameart.org/content/water-splash-and-sand-footsteps) (Peludo).

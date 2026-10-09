@@ -1,4 +1,4 @@
-//! The sound of the player's feet: a step every stride on whatever they are walking on, softer
+//! The sound of the player's feet (recordings: see `tools/cut_footsteps.py`): a step every stride on whatever they are walking on, softer
 //! crouched and crawling, louder at a run, and a thud on landing.
 
 use std::collections::HashMap;
@@ -26,6 +26,15 @@ pub enum Surface {
 
 impl Surface {
     pub const ALL: [Surface; 7] = [Surface::Grass, Surface::Dirt, Surface::Gravel, Surface::Tarmac, Surface::Stone, Surface::Wood, Surface::Water];
+
+    /// How many recordings of a step on it there are (`sounds/footsteps/<name>_1.wav` and up).
+    fn takes(self) -> usize {
+        match self {
+            Surface::Grass | Surface::Tarmac => 4,
+            Surface::Dirt | Surface::Gravel | Surface::Stone | Surface::Wood => 3,
+            Surface::Water => 2,
+        }
+    }
 
     fn name(self) -> &'static str {
         match self {
@@ -122,7 +131,7 @@ impl Plugin for FootstepsPlugin {
 
 fn load_steps(mut commands: Commands, assets: Option<Res<AssetServer>>) {
     let Some(assets) = assets else { return };
-    let by_surface = Surface::ALL.iter().map(|&s| (s, (1..=4).map(|i| assets.load(format!("sounds/footsteps/{}_{i}.wav", s.name()))).collect())).collect();
+    let by_surface = Surface::ALL.iter().map(|&s| (s, (1..=s.takes()).map(|i| assets.load(format!("sounds/footsteps/{}_{i}.wav", s.name()))).collect())).collect();
     commands.insert_resource(StepSounds { by_surface });
 }
 

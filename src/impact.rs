@@ -527,7 +527,7 @@ fn load_assets(
         target_sounds: sounds("target", 2),
         stone_sounds: sounds("stone", 2),
         metal_sounds: sounds("metal", 2),
-        splash_sounds: sounds("splash", 3),
+        splash_sounds: sounds("splash", 2),
         ring_mesh: meshes.add(Annulus::new(0.82, 1.0)),
         rng: Rng(0x2545_F491),
         holes: VecDeque::new(),

@@ -37,7 +37,7 @@ pub fn spawn_fill(
     if !crate::world::skip("trees") {
         // No tree grows through a house, a barn or a shed.
         let built = plan.layouts.iter().flat_map(|l| &l.buildings).chain(&plan.sheds).map(|b| (b.centre, b.shape()));
-        let keepout = crate::vegetation::Keepout::new(built);
+        let keepout = crate::vegetation::Keepout::new(built).with_roads(RoadClearance::new(&road_ribbons(map, roads)));
         crate::vegetation::spawn_vegetation(commands, meshes, materials, map, zones, &hedge_points, &keepout, colliders);
     }
 }
@@ -1385,5 +1385,20 @@ mod tests {
         // One of the two feet of the second is the first's foot (the hedge is symmetric).
         let other_side = segs[1].a - (across2 / across2.dot(second_perp)) * 0.88;
         assert!(first_end.distance(second_start) < 1e-3 || first_end.distance(other_side) < 1e-3, "{first_end:?} vs {second_start:?} / {other_side:?}");
+    }
+
+    #[test]
+    fn no_tree_grows_in_a_road() {
+        let (map, zones, params) = generate();
+        let roads = RoadNetwork::generate(&map, &params);
+        let clearance = RoadClearance::new(&road_ribbons(&map, &roads));
+        let keepout = crate::vegetation::Keepout::default().with_roads(RoadClearance::new(&road_ribbons(&map, &roads)));
+        let plan = crate::vegetation::plan_vegetation(&map, &zones, &[], &keepout);
+        let bad = ground_positions(&plan).iter().filter(|&&t| clearance.clearance(t) < 1.0).count();
+        assert_eq!(bad, 0, "{bad} trees stand in or at the edge of a road");
+        let without = crate::vegetation::plan_vegetation(&map, &zones, &[], &crate::vegetation::Keepout::default());
+        let in_roads = ground_positions(&without).iter().filter(|&&t| clearance.clearance(t) < 1.0).count();
+        eprintln!("{in_roads} trees would have stood in a road");
+        assert!(plan.tree_count() * 100 > without.tree_count() * 97);
     }
 }

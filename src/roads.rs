@@ -13,6 +13,8 @@ use crate::terrain::TerrainTextures;
 const ROAD_LIFT: f32 = 0.25;
 /// How many points a road's mesh has across its width.
 const ACROSS: usize = 9;
+/// How far below its edge a road reaches: the face down its side.
+const ROAD_THICKNESS: f32 = 0.7;
 /// Farm tracks lie a hair below main roads, so that where they join, the main road wins.
 const MINOR_SINK: f32 = 0.02;
 const MAJOR_HALF_WIDTH: f32 = 4.0;
@@ -464,8 +466,11 @@ pub fn road_mesh(map: &TerrainMap, ribbons: &[RoadRibbon], kind: RoadKind) -> Me
     let n = map.grid_size();
     let mouths = junction_mouths(ribbons);
     let (mut positions, mut normals, mut uv0, mut uv1, mut colours, mut indices) = (vec![], vec![], vec![], vec![], vec![], vec![]);
-    for ribbon in ribbons.iter().filter(|r| r.kind == kind) {
+    // Where each ribbon's rows of points start, for the skirts below.
+    let mut bases: Vec<(u32, usize)> = Vec::new();
+    for (ribbon_index, ribbon) in ribbons.iter().enumerate().filter(|(_, r)| r.kind == kind) {
         let points = &ribbon.points;
+        bases.push((positions.len() as u32, ribbon_index));
         let mut along = vec![0.0f32; points.len()];
         for i in 1..points.len() {
             along[i] = along[i - 1] + points[i].distance(points[i - 1]);
@@ -503,6 +508,38 @@ pub fn road_mesh(map: &TerrainMap, ribbons: &[RoadRibbon], kind: RoadKind) -> Me
             for c in 0..across - 1 {
                 let (l0, r0, l1, r1) = (base + i * across + c, base + i * across + c + 1, base + (i + 1) * across + c, base + (i + 1) * across + c + 1);
                 indices.extend_from_slice(&[l0, r1, l1, l0, r0, r1]);
+            }
+        }
+    }
+    // The road has thickness: a face down each edge, into the ground, so that it doesn't seem to float
+    // over it where the ground falls away.
+    for (base, ribbon_index) in bases {
+        let ribbon = &ribbons[ribbon_index];
+        let across = ACROSS as u32;
+        for column in [0u32, across - 1] {
+            for i in 0..ribbon.points.len() as u32 - 1 {
+                let (t0, t1) = ((base + i * across + column) as usize, (base + (i + 1) * across + column) as usize);
+                let (p0, p1) = (Vec3::from_array(positions[t0]), Vec3::from_array(positions[t1]));
+                let run = Vec3::new(p1.x - p0.x, 0.0, p1.z - p0.z).normalize_or_zero();
+                // Facing out from the road: the left edge faces the way the road's perpendicular points away from.
+                let outward = Vec3::new(-run.z, 0.0, run.x) * if column == 0 { -1.0 } else { 1.0 };
+                let (b0, b1) = (p0 - Vec3::Y * ROAD_THICKNESS, p1 - Vec3::Y * ROAD_THICKNESS);
+                let first = positions.len() as u32;
+                let hw = ribbon.half_widths[i as usize];
+                for (q, along_at) in [(p0, i as usize), (p1, i as usize + 1), (b1, i as usize + 1), (b0, i as usize)] {
+                    positions.push(q.to_array());
+                    normals.push(outward.to_array());
+                    uv0.push([(q.x + q.z) / tile, q.y / tile]);
+                    uv1.push([0.0, ribbon.points[..=along_at].windows(2).map(|w| w[0].distance(w[1])).sum::<f32>()]);
+                    colours.push(road_vertex_data(kind, false, false, hw));
+                }
+                // Counter-clockwise seen from outside.
+                let face = (p1 - p0).cross(b0 - p0);
+                if face.dot(outward) > 0.0 {
+                    indices.extend_from_slice(&[first, first + 1, first + 2, first, first + 2, first + 3]);
+                } else {
+                    indices.extend_from_slice(&[first, first + 2, first + 1, first, first + 3, first + 2]);
+                }
             }
         }
     }
@@ -745,6 +782,11 @@ pub fn spawn_roads(
 mod tests {
     use super::*;
 
+    /// How many of a mesh's vertices are the road's top (the skirts down its sides come after).
+    fn top_vertices(ribbons: &[RoadRibbon], kind: RoadKind) -> usize {
+        ribbons.iter().filter(|r| r.kind == kind).map(|r| r.points.len() * ACROSS).sum()
+    }
+
     /// A straight east-west road of the given kind, `length` long, centred on the origin.
     fn straight(kind: RoadKind, length: f32, start_junction: bool, end_junction: bool) -> RoadRibbon {
         let points: Vec<Vec2> = (0..=(length / 2.5) as usize).map(|i| Vec2::new(-length / 2.0 + i as f32 * 2.5, 0.0)).collect();
@@ -808,8 +850,9 @@ mod tests {
         let bevy::mesh::VertexAttributeValues::Float32x2(uv0) = attr(Mesh::ATTRIBUTE_UV_0) else { panic!() };
         let bevy::mesh::VertexAttributeValues::Float32x2(uv1) = attr(Mesh::ATTRIBUTE_UV_1) else { panic!() };
         let bevy::mesh::VertexAttributeValues::Float32x4(colours) = attr(Mesh::ATTRIBUTE_COLOR) else { panic!() };
-        assert_eq!(positions.len(), ribbon.points.len() * ACROSS);
-        for i in 0..positions.len() {
+        let top = ribbon.points.len() * ACROSS;
+        assert!(positions.len() > top, "and a skirt down each side");
+        for i in 0..top {
             assert!((positions[i][1] - (10.0 + ROAD_LIFT)).abs() < 1e-4, "lifted off the ground");
             assert!((normals[i][1] - 1.0).abs() < 1e-4, "faces up on flat ground");
             // UV 0 tiles in world metres, UV 1 is metres across and along.
@@ -824,18 +867,19 @@ mod tests {
         }
         // The first and last vertices of one cross-section are on opposite sides, and along only grows.
         assert!(uv1[0][0] < 0.0 && uv1[ACROSS - 1][0] > 0.0);
-        assert!(uv1.windows(2).all(|w| w[1][1] >= w[0][1]));
-        assert!((uv1.last().unwrap()[1] - 80.0).abs() < 0.01, "metres along the whole road");
+        assert!(uv1[..top].windows(2).all(|w| w[1][1] >= w[0][1]));
+        assert!((uv1[top - 1][1] - 80.0).abs() < 0.01, "metres along the whole road");
     }
 
     #[test]
     fn lane_markings_stop_short_of_a_junction_but_run_to_a_dead_end() {
         let map = TerrainMap::flat(0.0);
         let colours = |ribbon: RoadRibbon| {
-            let mesh = road_mesh(&map, &[ribbon], RoadKind::Major);
+            let mesh = road_mesh(&map, &[ribbon.clone()], RoadKind::Major);
             let bevy::mesh::VertexAttributeValues::Float32x4(c) = mesh.attribute(Mesh::ATTRIBUTE_COLOR).expect("colour") else { panic!() };
             let bevy::mesh::VertexAttributeValues::Float32x2(uv1) = mesh.attribute(Mesh::ATTRIBUTE_UV_1).expect("uv1") else { panic!() };
-            c.iter().zip(uv1).map(|(c, uv)| (uv[1], c[0])).collect::<Vec<_>>()
+            let top = top_vertices(&[ribbon], RoadKind::Major);
+            c.iter().zip(uv1).take(top).map(|(c, uv)| (uv[1], c[0])).collect::<Vec<_>>()
         };
         let at_junction = colours(straight(RoadKind::Major, 80.0, true, true));
         for &(along, painted) in &at_junction {
@@ -863,7 +907,8 @@ mod tests {
         let bevy::mesh::VertexAttributeValues::Float32x4(c) = mesh.attribute(Mesh::ATTRIBUTE_COLOR).expect("colour") else { panic!() };
         let bevy::mesh::VertexAttributeValues::Float32x3(p) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") else { panic!() };
         let reach = MINOR_HALF_WIDTH + MOUTH_MARGIN;
-        for (colour, pos) in c.iter().zip(p) {
+        let top = main.points.len() * ACROSS;
+        for (colour, pos) in c.iter().zip(p).take(top) {
             let near_mouth = Vec2::new(pos[0], pos[2]).abs().x < reach - 0.5;
             let far = Vec2::new(pos[0], pos[2]).abs().x > reach + 3.0;
             if near_mouth {
@@ -875,9 +920,9 @@ mod tests {
             assert_eq!(colour[0], 1.0, "the centre line runs on through (the main road has the priority)");
         }
         // And a road with no side roads has its edge line all the way.
-        let alone = road_mesh(&map, &[main], RoadKind::Major);
+        let alone = road_mesh(&map, &[main.clone()], RoadKind::Major);
         let bevy::mesh::VertexAttributeValues::Float32x4(c) = alone.attribute(Mesh::ATTRIBUTE_COLOR).expect("colour") else { panic!() };
-        assert!(c.iter().all(|c| c[3] == 1.0));
+        assert!(c.iter().take(top).all(|c| c[3] == 1.0));
     }
 
     #[test]
@@ -886,8 +931,10 @@ mod tests {
         let mesh = road_mesh(&map, &[straight(RoadKind::Minor, 40.0, false, false)], RoadKind::Minor);
         let bevy::mesh::VertexAttributeValues::Float32x4(colours) = mesh.attribute(Mesh::ATTRIBUTE_COLOR).expect("colour") else { panic!() };
         let bevy::mesh::VertexAttributeValues::Float32x3(positions) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") else { panic!() };
-        assert!(colours.iter().all(|c| c[0] == 0.0 && c[2] == 1.0));
-        assert!(positions.iter().all(|p| p[1] < ROAD_LIFT && p[1] > ROAD_LIFT - 0.1));
+        let ribbon = straight(RoadKind::Minor, 40.0, false, false);
+        let top = ribbon.points.len() * ACROSS;
+        assert!(colours.iter().take(top).all(|c| c[0] == 0.0 && c[2] == 1.0));
+        assert!(positions.iter().take(top).all(|p| p[1] < ROAD_LIFT && p[1] > ROAD_LIFT - 0.1));
     }
 
     #[test]
@@ -914,7 +961,7 @@ mod tests {
         for kind in [RoadKind::Major, RoadKind::Minor] {
             let mesh = road_mesh(&map, &ribbons, kind);
             let bevy::mesh::VertexAttributeValues::Float32x3(positions) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") else { panic!() };
-            let rows: Vec<&[[f32; 3]]> = positions.chunks(ACROSS).collect();
+            let rows: Vec<&[[f32; 3]]> = positions[..top_vertices(&ribbons, kind)].chunks(ACROSS).collect();
             // Every pair of neighbouring rows of one ribbon is a strip; the first row of the next ribbon
             // follows the last of the one before, so skip a pair that jumps far.
             for pair in rows.windows(2) {
@@ -967,6 +1014,33 @@ mod tests {
             if shown >= 6 {
                 break;
             }
+        }
+    }
+
+    #[test]
+    fn a_road_has_a_face_down_each_edge_that_looks_outward_and_goes_into_the_ground() {
+        let map = TerrainMap::flat(10.0);
+        let ribbon = straight(RoadKind::Major, 40.0, false, false);
+        let mesh = road_mesh(&map, &[ribbon.clone()], RoadKind::Major);
+        let bevy::mesh::VertexAttributeValues::Float32x3(p) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") else { panic!() };
+        let bevy::mesh::VertexAttributeValues::Float32x3(n) = mesh.attribute(Mesh::ATTRIBUTE_NORMAL).expect("normals") else { panic!() };
+        let Some(Indices::U32(indices)) = mesh.indices().map(|i| match i {
+            Indices::U32(v) => Indices::U32(v.clone()),
+            Indices::U16(v) => Indices::U32(v.iter().map(|&x| x as u32).collect()),
+        }) else { panic!() };
+        let top = ribbon.points.len() * ACROSS;
+        let skirt = &p[top..];
+        assert!(!skirt.is_empty());
+        let lowest = skirt.iter().map(|v| v[1]).fold(f32::MAX, f32::min);
+        assert!((lowest - (10.0 + ROAD_LIFT - ROAD_THICKNESS)).abs() < 1e-3, "{lowest}: it reaches into the ground");
+        // Each skirt triangle is wound to face the way its vertices' normals point, which is away from the road's middle.
+        for tri in indices.chunks(3).filter(|t| t[0] as usize >= top) {
+            let v = |i: u32| Vec3::from_array(p[i as usize]);
+            let face = (v(tri[1]) - v(tri[0])).cross(v(tri[2]) - v(tri[0]));
+            let normal = Vec3::from_array(n[tri[0] as usize]);
+            assert!(face.dot(normal) > 0.0, "wound the wrong way");
+            let mid = (v(tri[0]) + v(tri[1]) + v(tri[2])) / 3.0;
+            assert!(normal.z * mid.z >= -1e-4 || normal.z.abs() < 1e-4 || mid.z.abs() < 1e-4, "faces away from the road's middle");
         }
     }
 }
