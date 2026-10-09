@@ -41,11 +41,13 @@ pub struct Mechanism {
     pub reload_time: f32,
     /// Extra seconds to charge the action when reloading a dry gun.
     pub charge_time: f32,
+    /// For a gun loaded round by round (a shotgun's tube): the seconds each missing round adds.
+    pub reload_per_round: f32,
 }
 
 /// The Sterling: open bolt, about 500 rounds a minute. Changing a magazine takes two seconds with
 /// the bolt back, and another 0.7 s to haul the bolt back on the cocking handle if it's forward.
-pub const STERLING: Mechanism = Mechanism { bolt_type: BoltType::Open, cycle_time: 0.12, reload_time: 2.0, charge_time: 0.7 };
+pub const STERLING: Mechanism = Mechanism { bolt_type: BoltType::Open, cycle_time: 0.12, reload_time: 2.0, charge_time: 0.7, reload_per_round: 0.0 };
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum State {
@@ -87,6 +89,15 @@ impl Mechanism {
         }
     }
 
+    /// Where a gun with `ammo` rounds in it is at rest: ready, or (closed bolt, empty) with its slide locked back.
+    pub fn resting_state(&self, ammo: u32) -> State {
+        if ammo == 0 && self.bolt_type == BoltType::Closed {
+            State::Dry
+        } else {
+            State::Ready
+        }
+    }
+
     /// The reload key is pressed. A magazine that is full needs no reload, unless the action does.
     pub fn press_reload(&self, state: State, ammo: u32, capacity: u32) -> State {
         let charge = match state {
@@ -94,7 +105,7 @@ impl Mechanism {
             State::Dry => self.charge_time,
             _ => return state,
         };
-        State::Reloading { elapsed: 0.0, total: self.reload_time + charge }
+        State::Reloading { elapsed: 0.0, total: self.reload_time + charge + self.reload_per_round * capacity.saturating_sub(ammo) as f32 }
     }
 
     /// A reload is abandoned (the player broke into a sprint): the magazine is as it was, and the gun

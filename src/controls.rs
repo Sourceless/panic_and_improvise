@@ -29,10 +29,21 @@ pub enum Action {
     Crouch,
     Prone,
     Reload,
+    /// The inventory screen.
+    Inventory,
+    /// Pick up what is in front of you.
+    Interact,
+    /// Take up the gun in the first or the second weapon slot.
+    Slot1,
+    Slot2,
+    /// Semi-automatic or automatic, on a gun that can do both.
+    FireMode,
+    /// The load that goes in at the next reload.
+    CycleAmmo,
 }
 
 impl Action {
-    pub const ALL: [Action; 9] = [
+    pub const ALL: [Action; 15] = [
         Action::Forward,
         Action::Back,
         Action::Left,
@@ -42,6 +53,12 @@ impl Action {
         Action::Crouch,
         Action::Prone,
         Action::Reload,
+        Action::Inventory,
+        Action::Interact,
+        Action::Slot1,
+        Action::Slot2,
+        Action::FireMode,
+        Action::CycleAmmo,
     ];
 
     /// What it's called on screen.
@@ -56,6 +73,12 @@ impl Action {
             Action::Crouch => "Crouch",
             Action::Prone => "Go prone",
             Action::Reload => "Reload",
+            Action::Inventory => "Inventory",
+            Action::Interact => "Pick up / use",
+            Action::Slot1 => "First weapon",
+            Action::Slot2 => "Second weapon",
+            Action::FireMode => "Fire mode",
+            Action::CycleAmmo => "Change ammunition",
         }
     }
 
@@ -71,6 +94,12 @@ impl Action {
             Action::Crouch => "crouch",
             Action::Prone => "prone",
             Action::Reload => "reload",
+            Action::Inventory => "inventory",
+            Action::Interact => "interact",
+            Action::Slot1 => "slot1",
+            Action::Slot2 => "slot2",
+            Action::FireMode => "fire_mode",
+            Action::CycleAmmo => "cycle_ammo",
         }
     }
 
@@ -199,6 +228,15 @@ impl Preset {
         match (self, action) {
             (_, Action::Sprint) => Bind::Shift,
             (_, Action::Jump) => Bind::Space,
+            (_, Action::Inventory) => Bind::Tab,
+            (_, Action::Slot1) => c('1'),
+            (_, Action::Slot2) => c('2'),
+            (Preset::Qwerty, Action::Interact) => c('e'),
+            (Preset::Qwerty, Action::FireMode) => c('v'),
+            (Preset::Qwerty, Action::CycleAmmo) => c('b'),
+            (Preset::ColemakModDh, Action::Interact) => c('f'),
+            (Preset::ColemakModDh, Action::FireMode) => c('d'),
+            (Preset::ColemakModDh, Action::CycleAmmo) => c('v'),
             (Preset::Qwerty, Action::Forward) => c('w'),
             (Preset::Qwerty, Action::Back) => c('s'),
             (Preset::Qwerty, Action::Left) => c('a'),

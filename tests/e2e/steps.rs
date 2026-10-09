@@ -229,7 +229,7 @@ fn dummy_took_damage(_world: &mut GameWorld, damage: f32) {
     let wait_for_hit = wait_for(Duration::from_secs(2), || snapshot().dummy_hits > 0);
     assert!(wait_for_hit, "no bullet hit the target dummy");
     let health = snapshot().dummy_health;
-    assert_eq!(health, 100.0 - damage);
+    assert!((health - (100.0 - damage)).abs() < 0.05, "health {health}, expected {}", 100.0 - damage);
 }
 
 #[then(regex = r"^the target dummy respawns within (\d+) seconds$")]

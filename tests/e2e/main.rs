@@ -387,6 +387,9 @@ fn load_room(world: &mut World) {
     world.resource_mut::<Keyboard>().clear();
     *world.resource_mut::<Controls>() = Controls::default();
     *world.resource_mut::<Menu>() = Menu::default();
+    // And the player's kit: the starting guns, full, with their rounds.
+    *world.resource_mut::<fps_prototype::inventory::Inventory>() = fps_prototype::inventory::Inventory::starting();
+    *world.resource_mut::<fps_prototype::inventory_ui::InventoryScreen>() = Default::default();
     let _ = std::fs::remove_file(controls_path());
     *world.resource_mut::<fps_prototype::wind::Wind>() = Default::default();
     world.resource_mut::<fps_prototype::collision::Colliders>().clear();

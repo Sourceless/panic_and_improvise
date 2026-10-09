@@ -110,11 +110,12 @@ impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CursorIntent>()
             .init_resource::<Menu>()
+            .init_resource::<crate::inventory_ui::InventoryScreen>()
             .init_resource::<AimBlend>()
             .add_systems(Startup, (spawn_player, grab_cursor))
             .add_systems(
                 Update,
-                (menu_keys, toggle_cursor_grab, regrab_on_focus, mouse_look, player_movement, sprint_fov).chain(),
+                (menu_keys, crate::inventory_ui::inventory_keys, toggle_cursor_grab, regrab_on_focus, mouse_look, player_movement, sprint_fov).chain(),
             );
     }
 }
@@ -290,6 +291,7 @@ fn regrab_on_focus(
 pub fn toggle_cursor_grab(
     mouse: Res<ButtonInput<MouseButton>>,
     menu: Res<Menu>,
+    screen: Res<crate::inventory_ui::InventoryScreen>,
     mut intent: ResMut<CursorIntent>,
     mut cursors: Query<&mut CursorOptions, With<PrimaryWindow>>,
     mut was_open: Local<bool>,
@@ -297,7 +299,7 @@ pub fn toggle_cursor_grab(
     let Ok(mut cursor) = cursors.single_mut() else {
         return;
     };
-    if menu.open {
+    if menu.open || screen.open {
         *was_open = true;
         intent.captured = false;
         cursor.grab_mode = CursorGrabMode::None;
@@ -423,6 +425,7 @@ fn player_movement(
     keys: Res<Keyboard>,
     controls: Res<Controls>,
     menu: Option<Res<Menu>>,
+    screen: Option<Res<crate::inventory_ui::InventoryScreen>>,
     terrain: Res<TerrainMap>,
     colliders: Option<Res<Colliders>>,
     aim: Res<AimBlend>,
@@ -440,7 +443,7 @@ fn player_movement(
     let right = Vec2::new(cam.yaw.cos(), -cam.yaw.sin());
 
     // With the menu open the keys are for the menu: the player stands where they are.
-    let in_menu = menu.is_some_and(|m| m.open);
+    let in_menu = menu.is_some_and(|m| m.open) || screen.is_some_and(|s| s.open);
     let held = |action: Action| !in_menu && controls.pressed(action, &keys);
     let tapped = |action: Action| !in_menu && controls.just_pressed(action, &keys);
     let mut direction = Vec2::ZERO;
@@ -564,13 +567,13 @@ fn player_movement(
 }
 
 /// Widens the view a little while sprinting, which makes speed read on screen.
-fn sprint_fov(time: Res<Time>, aim: Res<AimBlend>, mut cameras: Query<(&FpsCamera, &mut Projection)>, mut base: Local<Option<f32>>) {
+fn sprint_fov(time: Res<Time>, zoom_by_gun: Option<Res<crate::weapon::AimZoom>>, mut cameras: Query<(&FpsCamera, &mut Projection)>, mut base: Local<Option<f32>>) {
     for (cam, mut projection) in &mut cameras {
         let Projection::Perspective(p) = &mut *projection else { continue };
         let base_fov = *base.get_or_insert(p.fov);
         let sprint = MoveState { velocity: cam.velocity, ..default() }.sprint_fraction();
         // Sprinting widens the view; aiming down the sights narrows it.
-        let zoom = 1.0 + (crate::weapon::ADS_FOV_SCALE - 1.0) * aim.0;
+        let zoom = zoom_by_gun.as_ref().map_or(1.0, |z| z.0);
         let target = base_fov * (1.0 + SPRINT_FOV_KICK * sprint) * zoom;
         p.fov += (target - p.fov) * (1.0 - (-8.0 * time.delta_secs()).exp());
     }

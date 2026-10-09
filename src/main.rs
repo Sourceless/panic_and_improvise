@@ -19,7 +19,7 @@ fn main() {
         .add_plugins((GamePlugin, TerrainPlugin, EguiPlugin::default()))
         .add_plugins(fps_prototype::crosshair::CrosshairPlugin)
         // The menu Escape opens.
-        .add_systems(EguiPrimaryContextPass, fps_prototype::menu::draw_menu)
+        .add_systems(EguiPrimaryContextPass, (fps_prototype::menu::draw_menu, fps_prototype::inventory_ui::draw_inventory))
         .run();
 }
 

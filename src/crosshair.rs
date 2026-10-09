@@ -4,7 +4,7 @@
 use bevy::prelude::*;
 
 use crate::player::FpsCamera;
-use crate::weapon::{Gun, MAGAZINE_SIZE};
+use crate::weapon::Gun;
 
 const DASH_LENGTH: f32 = 9.0;
 const DASH_THICKNESS: f32 = 2.0;
@@ -76,21 +76,21 @@ fn spawn_ammo_counter(mut commands: Commands) {
 }
 
 /// What the ammo counter says: the rounds left in the magazine, or that a reload is going.
-pub fn ammo_text(ammo: u32, reloading: bool) -> String {
+pub fn ammo_text(ammo: u32, capacity: u32, reloading: bool) -> String {
     if reloading {
         "RELOADING".to_string()
     } else if ammo == 0 {
         // Nothing left to do but reload.
-        format!("0 / {MAGAZINE_SIZE}   R")
+        format!("0 / {capacity}   R")
     } else {
-        format!("{ammo} / {MAGAZINE_SIZE}")
+        format!("{ammo} / {capacity}")
     }
 }
 
 fn update_ammo_counter(guns: Query<&Gun>, mut counters: Query<(&mut Text, &mut TextColor), With<AmmoCounter>>) {
     let Ok(gun) = guns.single() else { return };
     for (mut text, mut colour) in &mut counters {
-        let shown = ammo_text(gun.ammo, gun.reloading());
+        let shown = ammo_text(gun.ammo, gun.def().magazine, gun.reloading());
         if text.0 != shown {
             text.0 = shown;
         }
@@ -140,10 +140,10 @@ mod tests {
 
     #[test]
     fn the_ammo_counter_reads_rounds_or_reloading() {
-        assert_eq!(ammo_text(30, false), "30 / 30");
-        assert_eq!(ammo_text(7, false), "7 / 30");
-        assert_eq!(ammo_text(7, true), "RELOADING");
-        assert!(ammo_text(0, false).ends_with('R'), "an empty magazine says how to reload");
+        assert_eq!(ammo_text(30, 30, false), "30 / 30");
+        assert_eq!(ammo_text(7, 30, false), "7 / 30");
+        assert_eq!(ammo_text(7, 30, true), "RELOADING");
+        assert!(ammo_text(0, 30, false).ends_with('R'), "an empty magazine says how to reload");
     }
 
     #[test]

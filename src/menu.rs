@@ -83,9 +83,20 @@ impl Menu {
 }
 
 /// Escape toggles the menu, and while it's open a key press goes to whatever is being rebound.
-pub fn menu_keys(keys: Res<ButtonInput<KeyCode>>, keyboard: Res<Keyboard>, mut menu: ResMut<Menu>, mut controls: ResMut<Controls>) {
+pub fn menu_keys(
+    keys: Res<ButtonInput<KeyCode>>,
+    keyboard: Res<Keyboard>,
+    mut menu: ResMut<Menu>,
+    mut controls: ResMut<Controls>,
+    mut screen: ResMut<crate::inventory_ui::InventoryScreen>,
+) {
     if keys.just_pressed(KeyCode::Escape) {
-        menu.escape();
+        // Escape shuts the inventory first.
+        if screen.open && !menu.open {
+            screen.toggle();
+        } else {
+            menu.escape();
+        }
     } else if menu.open {
         if let Some(key) = keyboard.last_press() {
             menu.key_pressed(key, &mut controls);

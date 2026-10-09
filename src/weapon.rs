@@ -1,16 +1,20 @@
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
-use crate::gun_model::{self, BORE_Y, MUZZLE_Z, REAR_PEEP_Z, SIGHT_LINE};
-use crate::ballistics::{self, Cartridge, Flight, NINE_PARA};
+use std::collections::HashMap;
+
+use crate::ammo::AmmoKind;
+use crate::ballistics::{self, Cartridge, Flight};
 use crate::collision::Colliders;
 use crate::controls::{Action, Controls, Keyboard};
-use crate::gun_state::{Bolt, Mechanism, State, STERLING};
+use crate::gun_models::{self, Finish, ModelSpec};
+use crate::gun_state::{Bolt, State};
+use crate::inventory::{Inventory, ItemKind};
+use crate::weapons::{FireMode, Handling, WeaponDef, WeaponKind};
 use crate::impact::{segment_aabb_hit, surface_hit, Impact, Rng, Surface};
 use crate::sound::play_after;
 use crate::wind::Wind;
 use crate::player::{spawn_player, toggle_cursor_grab, AimBlend, FpsCamera, Stance};
-pub use crate::gun_model::sight_points;
 use crate::map::TerrainMap;
 use crate::target::{dummy_aabb, TargetDummy};
 
@@ -56,10 +60,6 @@ const DRY_CLICK_INTERVAL: f32 = 0.6;
 const DRY_CLICK_VOLUME: f32 = 0.3;
 const BOLT_DROP_VOLUME: f32 = 0.4;
 
-/// The gun's mechanism: bolt type and timings (rate of fire, how long a reload takes).
-pub const MECHANISM: Mechanism = STERLING;
-/// Rounds in a full magazine.
-pub const MAGAZINE_SIZE: u32 = 30;
 /// Seconds the gun takes to drop away at the start of a reload, and again to come back up at the end.
 const RELOAD_LOWER_TIME: f32 = 0.45;
 /// How far the gun drops (metres) and tips muzzle-down (radians) at the bottom of a reload: far
@@ -68,58 +68,60 @@ const RELOAD_DROP: f32 = 0.6;
 const RELOAD_TIP: f32 = -0.6;
 /// A bullet that hasn't hit anything by now is long gone.
 const BULLET_LIFETIME: f32 = 5.0;
-/// The range the Sterling's sights are zeroed for: a shot crosses the line of sight here.
-pub const ZERO_DISTANCE: f32 = 20.0;
 /// How finely a bullet's flight is stepped, seconds (a frame is cut into steps this long or shorter).
 const FLIGHT_STEP: f32 = 0.002;
-/// The ammunition the gun fires.
-pub const CARTRIDGE: Cartridge = NINE_PARA;
-const BULLET_DAMAGE: f32 = 25.0;
 /// Tracers appear after the bullet has flown this far (metres), and are this long.
 const TRACER_START: f32 = 15.0;
 const TRACER_LENGTH: f32 = 3.0;
 /// The tracer's thickness at the muzzle, metres.
 const TRACER_WIDTH: f32 = 0.04;
 
-/// Where the gun sits in camera space when carried at the hip, and when aimed down its sights.
-const HIP_POSITION: Vec3 = Vec3::new(0.2, -0.2, -0.5);
-/// Centred, and low enough that the line of sight (rear peep to front blade) is the camera's axis.
-/// Eye relief: how far the eye is behind the rear peep when aiming (a real peep sight is held
-/// close, about this far, with the stock passing behind the eye).
-const EYE_RELIEF: f32 = 0.2;
-const ADS_POSITION: Vec3 = Vec3::new(0.0, -SIGHT_LINE, -EYE_RELIEF - REAR_PEEP_Z);
-/// The barrel's tip, in the gun's own space: the bullets start here.
-pub const MUZZLE_LOCAL: Vec3 = Vec3::new(0.0, BORE_Y, MUZZLE_Z);
-/// How fast the gun moves between hip and sights (per second, exponential).
-const AIM_RATE: f32 = 14.0;
-/// When aimed the view zooms to this fraction of the field of view, and look speed drops.
-pub const ADS_FOV_SCALE: f32 = 0.72;
-/// Recoil. Each shot kicks the view up (and a little sideways, at random), by this much in
-/// radians, less when braced on the sights...
-const KICK_PITCH: f32 = 0.0085;
-const KICK_YAW: f32 = 0.0028;
+/// Recoil: braced on the sights, the view kicks this fraction as much...
 const ADS_KICK_SCALE: f32 = 0.6;
 /// ...and once the gun has been quiet this long, a good part of the climb comes back down:
 /// this fraction of it, at this rate (per second). The rest is yours to pull down.
 const KICK_RECOVERY_DELAY: f32 = 0.14;
 const KICK_RECOVERY_FRACTION: f32 = 0.65;
 const KICK_RECOVERY_RATE: f32 = 6.0;
-/// The gun model itself jolts back and tips up with each shot, then settles quickly.
+/// The gun model itself jolts back and tips up with each shot (by this much, times the gun's own
+/// `model_kick`), then settles quickly.
 const GUN_KICK_DECAY: f32 = 16.0;
 const GUN_KICK_BACK: f32 = 0.032;
 const GUN_KICK_TIP: f32 = 0.045;
-/// Accuracy. A shot strays from where the gun is pointed by up to this half-angle (radians),
-/// anywhere inside the cone: wide from the hip, very tight on the sights. It widens while
-/// moving, much more in the air, and as a burst "blooms" it.
-const HIP_SPREAD: f32 = 0.030; // about 1.7 degrees
-const ADS_SPREAD: f32 = 0.0035; // about 0.2 degrees
-const MOVING_SPREAD: f32 = 0.022; // extra at a full run
-const AIRBORNE_SPREAD: f32 = 0.035; // extra in the air
-const BLOOM_PER_SHOT: f32 = 0.0045;
-const BLOOM_MAX: f32 = 0.03;
-const BLOOM_DECAY: f32 = 5.5; // per second
-/// How much of the movement and bloom penalty is left when fully on the sights.
+/// How fast a burst's bloom fades (per second), and how much of the movement and bloom penalty is
+/// left when fully on the sights.
+const BLOOM_DECAY: f32 = 5.5;
 const ADS_PENALTY_LEFT: f32 = 0.25;
+
+/// How much the view narrows on the sights of the gun in hand (1 is not at all): the player's
+/// camera follows this.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct AimZoom(pub f32);
+
+impl Default for AimZoom {
+    fn default() -> Self {
+        AimZoom(1.0)
+    }
+}
+
+/// How the gun looks when it's lifted for a look: its model's parts and where its sights are.
+pub struct LoadedModel {
+    pub spec: ModelSpec,
+    pub parts: Vec<(Finish, Handle<Mesh>)>,
+}
+
+/// Every gun's model, built once, and the materials they are drawn with.
+#[derive(Resource)]
+pub struct WeaponAssets {
+    pub models: HashMap<WeaponKind, LoadedModel>,
+    pub finishes: HashMap<Finish, Handle<StandardMaterial>>,
+}
+
+impl WeaponAssets {
+    pub fn spec(&self, kind: WeaponKind) -> ModelSpec {
+        self.models[&kind].spec
+    }
+}
 
 pub struct WeaponPlugin;
 
@@ -127,16 +129,31 @@ impl Plugin for WeaponPlugin {
     fn build(&self, app: &mut App) {
         // The wind that bullets drift in (the terrain plugin's, when that is loaded too).
         app.init_resource::<Wind>()
+            .init_resource::<AimZoom>()
+            .insert_resource(Inventory::starting())
             .add_systems(Startup, spawn_gun.after(spawn_player))
             .add_systems(
                 Update,
-                (aim.before(fire), fire.before(toggle_cursor_grab), play_gun_sounds.after(fire), recover_view, animate_flash, move_bullets),
+                (sync_with_inventory.before(refresh_gun_model), refresh_gun_model.before(aim), aim.before(fire), fire.before(toggle_cursor_grab), play_gun_sounds.after(fire), recover_view, animate_flash, move_bullets),
             );
     }
 }
 
 #[derive(Component)]
 pub struct Gun {
+    /// Which gun is in hand, what it is loaded with, and how its trigger is set.
+    pub kind: WeaponKind,
+    pub loaded: AmmoKind,
+    pub mode: FireMode,
+    /// The gun whose model is on show now; when it isn't `kind`, the model is rebuilt.
+    shown: Option<WeaponKind>,
+    /// Which carried gun this is (the number of the item in the inventory), and the load that goes in at
+    /// the next reload. With no gun in the slot that's in hand, the hands are empty.
+    pub item: Option<u32>,
+    pub selected: AmmoKind,
+    pub holstered: bool,
+    /// What the reload now under way will put in.
+    reload_with: Option<AmmoKind>,
     /// Where the gun's mechanism is: ready, cycling a shot, dry, or being reloaded.
     pub state: State,
     trigger_blocked: bool,
@@ -180,28 +197,82 @@ pub struct Gun {
 }
 
 impl Gun {
+    pub fn def(&self) -> &'static WeaponDef {
+        self.kind.def()
+    }
+
     pub fn reloading(&self) -> bool {
         self.state.is_reloading()
     }
 
+    /// Takes up another gun, `loaded` rounds of `ammo` in it. Its mechanism starts where it would be
+    /// at rest with that many rounds in it.
+    pub fn equip(&mut self, kind: WeaponKind, ammo: AmmoKind, loaded: u32) {
+        let def = kind.def();
+        self.kind = kind;
+        self.loaded = ammo;
+        self.ammo = loaded.min(def.magazine);
+        self.mode = def.modes[0];
+        self.state = def.mechanism.resting_state(self.ammo);
+        self.aiming = false;
+        self.reload_queued = false;
+        self.bloom = 0.0;
+        self.gun_kick = 0.0;
+        self.view_kick = Vec2::ZERO;
+    }
+
     /// Acts on a reload request, as soon as the mechanism is free to (not mid-shot). A request the
     /// gun can't use at all (a full magazine, a reload already going) is dropped.
-    fn try_queued_reload(&mut self) {
+    fn try_queued_reload(&mut self, inventory: &Inventory) {
         if !self.reload_queued || matches!(self.state, State::Cycling { .. }) {
             return;
         }
         self.reload_queued = false;
+        // Nothing to put in: no reload.
+        let Some(load) = self.load_for_reload(inventory) else { return };
         let was_reloading = self.reloading();
-        self.state = MECHANISM.press_reload(self.state, self.ammo, MAGAZINE_SIZE);
+        self.state = self.def().mechanism.press_reload(self.state, self.ammo, self.def().magazine);
         if !was_reloading && self.reloading() {
-            let charge = self.reload_seconds() > MECHANISM.reload_time + 0.01;
+            self.reload_with = Some(load);
+            let charge = self.reload_seconds() > self.def().mechanism.reload_time + self.def().mechanism.reload_per_round * self.def().magazine.saturating_sub(self.ammo) as f32 + 0.01;
             self.pending_sounds.push(GunEvent::ReloadStarted { charge });
         }
     }
 
+    /// The load a reload would put in: the one chosen if there are rounds of it, else any other the gun
+    /// takes that there are rounds of. (None if there are none, or the magazine is already full of the
+    /// load that would go in.)
+    pub fn load_for_reload(&self, inventory: &Inventory) -> Option<AmmoKind> {
+        let def = self.def();
+        let pick = std::iter::once(self.selected).chain(def.ammo()).find(|&k| inventory.rounds(k) > 0 && k.def().caliber == def.caliber)?;
+        // Nothing to gain from topping up a full magazine of the same load.
+        if pick == self.loaded && self.ammo >= def.magazine && self.state != State::Dry {
+            return None;
+        }
+        Some(pick)
+    }
+
+    /// A reload has finished: the old rounds that don't match go back in the grids, the new ones come
+    /// out of them and into the gun.
+    fn finish_reload(&mut self, inventory: &mut Inventory) {
+        let capacity = self.def().magazine;
+        let load = self.reload_with.take().unwrap_or(self.loaded);
+        let mut kept = self.ammo;
+        if load != self.loaded && self.ammo > 0 {
+            // A different load: what was in the magazine comes out first.
+            let mut item = inventory.make(ItemKind::Ammo(self.loaded), self.ammo);
+            item.loaded = 0;
+            let _ = inventory.add(item);
+            kept = 0;
+        }
+        let taken = inventory.take_rounds(load, capacity - kept);
+        self.ammo = kept + taken;
+        self.loaded = load;
+    }
+
     /// Where the bolt is, when the gun is at rest.
     pub fn bolt(&self) -> Option<Bolt> {
-        MECHANISM.bolt(self.state)
+        self.def().mechanism.bolt(self.state)
     }
 
     /// How long the current reload will take, or 0 when not reloading.
@@ -224,7 +295,7 @@ impl Gun {
 /// The gun's inaccuracy right now: how far a shot could stray (radians, half-angle of the cone),
 /// given how far it's on the sights, how the player is moving and standing, and the burst bloom.
 pub fn current_spread(gun: &Gun, player: &FpsCamera) -> f32 {
-    spread_half_angle(gun.aim_blend, player.speed() / FULL_RUN_SPEED, player.airborne(), gun.bloom, player.stance())
+    spread_half_angle(&gun.def().handling, gun.aim_blend, player.speed() / FULL_RUN_SPEED, player.airborne(), gun.bloom, player.stance())
 }
 
 impl Gun {
@@ -242,21 +313,21 @@ impl Gun {
 const FULL_RUN_SPEED: f32 = 10.8;
 
 /// The gun's transform in camera space, `blend` of the way from the hip to the sights.
-pub fn gun_transform(blend: f32) -> Transform {
-    Transform::from_translation(HIP_POSITION.lerp(ADS_POSITION, blend.clamp(0.0, 1.0)))
+pub fn gun_transform(spec: &ModelSpec, handling: &Handling, blend: f32) -> Transform {
+    Transform::from_translation(handling.hip_position.lerp(spec.aimed_position(), blend.clamp(0.0, 1.0)))
 }
 
 /// The gun with its recoil jolt applied: shoved back toward the shoulder and tipped muzzle-up,
 /// about half as much when braced on the sights.
-pub fn gun_pose(blend: f32, kick: f32) -> Transform {
-    gun_pose_lowered(blend, kick, 0.0)
+pub fn gun_pose(spec: &ModelSpec, handling: &Handling, blend: f32, kick: f32) -> Transform {
+    gun_pose_lowered(spec, handling, blend, kick, 0.0)
 }
 
 /// The gun's pose with `lowered` (0 to 1) of the way down for a reload: dropped away below the view
 /// and tipped muzzle-down.
-pub fn gun_pose_lowered(blend: f32, kick: f32, lowered: f32) -> Transform {
-    let k = kick * (1.0 - 0.5 * blend.clamp(0.0, 1.0));
-    let mut t = gun_transform(blend);
+pub fn gun_pose_lowered(spec: &ModelSpec, handling: &Handling, blend: f32, kick: f32, lowered: f32) -> Transform {
+    let k = kick * (1.0 - 0.5 * blend.clamp(0.0, 1.0)) * handling.model_kick;
+    let mut t = gun_transform(spec, handling, blend);
     t.translation.z += GUN_KICK_BACK * k;
     t.rotation = Quat::from_rotation_x(GUN_KICK_TIP * k + RELOAD_TIP * lowered);
     t.translation.y -= RELOAD_DROP * lowered;
@@ -272,7 +343,7 @@ pub fn reload_lowering(elapsed: f32, total: f32) -> f32 {
 
 /// How much one shot kicks the view: (pitch up, yaw), in radians. The sideways part is a fixed
 /// pseudo-random wander per shot number, so it is repeatable.
-pub fn recoil_kick(shot: u32, aiming: bool) -> Vec2 {
+pub fn recoil_kick(handling: &Handling, shot: u32, aiming: bool) -> Vec2 {
     let scale = if aiming { ADS_KICK_SCALE } else { 1.0 };
     let mut h = shot.wrapping_mul(0x9E37_79B1) ^ 0x85EB_CA6B;
     h ^= h >> 15;
@@ -281,7 +352,7 @@ pub fn recoil_kick(shot: u32, aiming: bool) -> Vec2 {
     let wander = ((h >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0;
     // A little variation in the climb too.
     let climb = 0.85 + 0.3 * (((h >> 3) & 0xFF) as f32 / 255.0);
-    Vec2::new(KICK_PITCH * climb, KICK_YAW * wander) * scale
+    Vec2::new(handling.kick_pitch * climb, handling.kick_yaw * wander) * scale
 }
 
 /// How much of the unrecovered kick comes back in `dt` seconds, once the gun has been quiet.
@@ -298,10 +369,10 @@ pub fn recover_kick(kick: Vec2, since_shot: f32, dt: f32) -> (Vec2, Vec2) {
 /// in, in radians). `blend` is how far the gun is on its sights, `speed` how fast the player
 /// moves as a fraction of a full run, `bloom` the burst penalty built up so far, and `stance`
 /// whether they're standing, crouched or prone (each steadier than the last).
-pub fn spread_half_angle(blend: f32, speed: f32, airborne: bool, bloom: f32, stance: Stance) -> f32 {
+pub fn spread_half_angle(h: &Handling, blend: f32, speed: f32, airborne: bool, bloom: f32, stance: Stance) -> f32 {
     let blend = blend.clamp(0.0, 1.0);
-    let base = HIP_SPREAD + (ADS_SPREAD - HIP_SPREAD) * blend;
-    let penalties = MOVING_SPREAD * speed.clamp(0.0, 1.0) + if airborne { AIRBORNE_SPREAD } else { 0.0 } + bloom.clamp(0.0, BLOOM_MAX);
+    let base = h.hip_spread + (h.ads_spread - h.hip_spread) * blend;
+    let penalties = h.moving_spread * speed.clamp(0.0, 1.0) + if airborne { h.airborne_spread } else { 0.0 } + bloom.clamp(0.0, h.bloom_max);
     (base + penalties * (1.0 - (1.0 - ADS_PENALTY_LEFT) * blend)) * stance.spread_scale()
 }
 
@@ -317,10 +388,15 @@ pub fn scatter_direction(aim: Vec3, half_angle: f32, u: f32, v: f32) -> Vec3 {
 
 #[derive(Component)]
 pub struct Bullet {
+    /// What it is: its weight and shape decide how it flies, its kind what it does when it hits.
+    cartridge: Cartridge,
+    ammo: AmmoKind,
     velocity: Vec3,
     age: f32,
     /// How far it has flown, metres. The tracer isn't drawn until it's flown a way.
     travelled: f32,
+    /// Whether it shows as a streak at all (a load of pellets doesn't).
+    glows: bool,
     /// Whether it is in foliage right now (so that a burst of leaves is made when it goes in, and not
     /// again every step it is in there).
     in_foliage: bool,
@@ -363,11 +439,16 @@ pub fn tracer_visible(distance: f32) -> bool {
 pub struct BulletAssets {
     pub mesh: Handle<Mesh>,
     pub material: Handle<StandardMaterial>,
+    pub tracer_material: Handle<StandardMaterial>,
     /// The first shot recording, kept for anything that just needs one to check loading.
     pub shot_sound: Handle<AudioSource>,
     /// All the recordings; each shot picks one, at a slightly different pitch.
     pub shot_sounds: Vec<Handle<AudioSource>>,
 }
+
+/// Marks the parts of the gun model, which are replaced when the gun in hand changes.
+#[derive(Component)]
+pub struct GunMesh;
 
 pub fn spawn_gun(
     mut commands: Commands,
@@ -380,22 +461,39 @@ pub fn spawn_gun(
         return;
     };
 
-    // The Sterling, merged into three meshes by material (see gun_model.rs).
-    let (metal, plastic, dark) = gun_model::build();
+    // Every gun's model, merged into a mesh for each finish, built once.
     let finish = |color: Color, roughness: f32, metallic: f32| StandardMaterial {
         base_color: color,
         perceptual_roughness: roughness,
         metallic,
         ..default()
     };
-    let parts = [
-        (meshes.add(metal.into_mesh()), materials.add(finish(Color::srgb(0.13, 0.135, 0.145), 0.45, 0.75))),
-        (meshes.add(plastic.into_mesh()), materials.add(finish(Color::srgb(0.035, 0.035, 0.04), 0.35, 0.0))),
-        (meshes.add(dark.into_mesh()), materials.add(finish(Color::srgb(0.008, 0.008, 0.01), 0.9, 0.0))),
-    ];
+    let finishes: HashMap<Finish, Handle<StandardMaterial>> = [
+        (Finish::Metal, finish(Color::srgb(0.13, 0.135, 0.145), 0.45, 0.75)),
+        (Finish::Black, finish(Color::srgb(0.035, 0.035, 0.04), 0.35, 0.0)),
+        (Finish::Dark, finish(Color::srgb(0.008, 0.008, 0.01), 0.9, 0.0)),
+        (Finish::Wood, finish(Color::srgb(0.2, 0.1, 0.05), 0.6, 0.0)),
+        (Finish::Olive, finish(Color::srgb(0.14, 0.17, 0.08), 0.6, 0.3)),
+        (Finish::Glass, StandardMaterial { base_color: Color::srgb(0.05, 0.08, 0.12), perceptual_roughness: 0.08, metallic: 0.3, reflectance: 0.9, ..default() }),
+    ]
+    .into_iter()
+    .map(|(f, m)| (f, materials.add(m)))
+    .collect();
+    let models: HashMap<WeaponKind, LoadedModel> = WeaponKind::ALL
+        .iter()
+        .map(|&kind| {
+            let model = gun_models::build(kind);
+            let parts = model.parts.into_iter().map(|(finish, parts)| (finish, meshes.add(parts.into_mesh()))).collect();
+            (kind, LoadedModel { spec: model.spec, parts })
+        })
+        .collect();
+    let start = WeaponKind::Sterling;
+    let start_spec = models[&start].spec;
+    commands.insert_resource(WeaponAssets { models, finishes });
 
-    // The shot sounds: real recordings of a 9 mm Carl Gustav M45 submachine gun. FPS_SHOT_SOUNDS=old
-    // plays the original single pistol shot instead, for comparison.
+    // The shot sounds: real recordings of a 9 mm Carl Gustav M45 submachine gun, played lower and
+    // louder for the bigger guns. FPS_SHOT_SOUNDS=old plays the original single pistol shot instead,
+    // for comparison.
     let shot_sounds: Vec<Handle<AudioSource>> = match std::env::var("FPS_SHOT_SOUNDS").as_deref() {
         Ok("old") => vec![asset_server.load("sounds/gunshots/pistol_shot.wav")],
         Ok(set) if !set.is_empty() => (1..=3).map(|i| asset_server.load(format!("sounds/{set}/smg_shot_{i}.wav"))).collect(),
@@ -416,14 +514,30 @@ pub fn spawn_gun(
             alpha_mode: AlphaMode::Add,
             ..default()
         }),
+        // A tracer round burns red.
+        tracer_material: materials.add(StandardMaterial {
+            base_color: Color::linear_rgb(60.0, 8.0, 4.0),
+            unlit: true,
+            alpha_mode: AlphaMode::Add,
+            ..default()
+        }),
         shot_sound: shot_sounds[0].clone(),
         shot_sounds,
     });
 
+    let def = start.def();
     commands.entity(cam).with_children(|cam_children| {
         cam_children
             .spawn((
                 Gun {
+                    kind: start,
+                    loaded: def.default_ammo,
+                    mode: def.modes[0],
+                    shown: None,
+                    item: None,
+                    selected: def.default_ammo,
+                    holstered: false,
+                    reload_with: None,
                     state: State::Ready,
                     trigger_blocked: false,
                     shots_fired: 0,
@@ -439,25 +553,123 @@ pub fn spawn_gun(
                     rng: 0x9E37_79B9,
                     last_shot_error: 0.0,
                     worst_shot_error: 0.0,
-                    current_spread: HIP_SPREAD,
+                    current_spread: def.handling.hip_spread,
                     gun_kick: 0.0,
-                    ammo: MAGAZINE_SIZE,
+                    ammo: def.magazine,
                     reload_queued: false,
                     pending_sounds: Vec::new(),
                     dry_click_cooldown: 0.0,
                     sound_log: SoundLog::default(),
                     lowered: 0.0,
                 },
-                gun_transform(0.0),
+                gun_transform(&start_spec, &def.handling, 0.0),
                 Visibility::default(),
             ))
             .with_children(|gun| {
-                for (mesh, material) in parts {
-                    gun.spawn((Mesh3d(mesh), MeshMaterial3d(material), Transform::default()));
-                }
-                crate::muzzle_flash::spawn(gun, &mut meshes, &mut materials, MUZZLE_LOCAL, false);
+                crate::muzzle_flash::spawn(gun, &mut meshes, &mut materials, start_spec.muzzle, false);
             });
     });
+}
+
+/// Keeps the gun in hand and the inventory agreeing: the keys that pick a slot, a fire mode or a load,
+/// the rounds in the gun written back to the item they belong to, and the gun in the slot that is in
+/// hand taken up when it is not the one already there.
+fn sync_with_inventory(
+    keys: Res<Keyboard>,
+    controls: Res<Controls>,
+    menu: Option<Res<crate::menu::Menu>>,
+    screen: Option<Res<crate::inventory_ui::InventoryScreen>>,
+    mut inventory: ResMut<Inventory>,
+    mut guns: Query<(&mut Gun, &mut Visibility)>,
+) {
+    let Ok((mut gun, mut visibility)) = guns.single_mut() else { return };
+    // What the gun has in it is the item's, whichever way it was last changed.
+    if let Some(id) = gun.item {
+        for slot in inventory.slots.iter_mut().flatten().filter(|i| i.id == id) {
+            slot.loaded = gun.ammo;
+            slot.loaded_with = Some(gun.loaded);
+        }
+    }
+    let free = !menu.is_some_and(|m| m.open) && !screen.is_some_and(|s| s.open);
+    if free {
+        for (action, slot) in [(Action::Slot1, 0), (Action::Slot2, 1)] {
+            if controls.just_pressed(action, &keys) {
+                inventory.active = slot;
+            }
+        }
+        if controls.just_pressed(Action::FireMode, &keys) && !gun.holstered {
+            let modes = gun.def().modes;
+            if let Some(i) = modes.iter().position(|&m| m == gun.mode) {
+                gun.mode = modes[(i + 1) % modes.len()];
+            }
+        }
+        if controls.just_pressed(Action::CycleAmmo, &keys) && !gun.holstered {
+            // The next load the gun takes that there are rounds of (or the one in it).
+            let loads: Vec<AmmoKind> = gun.def().ammo().filter(|&k| inventory.rounds(k) > 0 || k == gun.loaded).collect();
+            if let Some(i) = loads.iter().position(|&k| k == gun.selected) {
+                gun.selected = loads[(i + 1) % loads.len()];
+            } else if let Some(&first) = loads.first() {
+                gun.selected = first;
+            }
+        }
+    }
+    // Take up what is in the slot that is in hand.
+    let wanted = inventory.slots[inventory.active];
+    match wanted {
+        None => {
+            if !gun.holstered || gun.item.is_some() {
+                gun.holstered = true;
+                gun.item = None;
+            }
+        }
+        Some(item) => {
+            if gun.item != Some(item.id) {
+                if let ItemKind::Weapon(kind) = item.kind {
+                    let load = item.loaded_with.unwrap_or(kind.def().default_ammo);
+                    gun.equip(kind, load, item.loaded);
+                    gun.selected = load;
+                    gun.item = Some(item.id);
+                }
+            }
+            gun.holstered = false;
+        }
+    }
+    *visibility = if gun.holstered { Visibility::Hidden } else { Visibility::Inherited };
+}
+
+/// Puts the model of the gun in hand on the gun entity, when it isn't the one that's there: the old
+/// parts go, the new ones come, and the muzzle flash moves to the new muzzle.
+fn refresh_gun_model(
+    mut commands: Commands,
+    assets: Option<Res<WeaponAssets>>,
+    mut guns: Query<(Entity, &mut Gun, Option<&Children>)>,
+    parts: Query<(), With<GunMesh>>,
+    mut flashes: Query<&mut Transform, (With<crate::muzzle_flash::MuzzleFlash>, Without<crate::muzzle_flash::MuzzleFlashLight>)>,
+    mut lights: Query<&mut Transform, (With<crate::muzzle_flash::MuzzleFlashLight>, Without<crate::muzzle_flash::MuzzleFlash>)>,
+) {
+    let (Some(assets), Ok((entity, mut gun, children))) = (assets, guns.single_mut()) else { return };
+    if gun.shown == Some(gun.kind) {
+        return;
+    }
+    for child in children.into_iter().flatten().copied() {
+        if parts.get(child).is_ok() {
+            commands.entity(child).despawn();
+        }
+    }
+    let model = &assets.models[&gun.kind];
+    commands.entity(entity).with_children(|g| {
+        for (finish, mesh) in &model.parts {
+            g.spawn((GunMesh, Mesh3d(mesh.clone()), MeshMaterial3d(assets.finishes[finish].clone()), Transform::default()));
+        }
+    });
+    // The flash is at the muzzle, its light a little in front of it.
+    for mut t in &mut flashes {
+        t.translation = model.spec.muzzle;
+    }
+    for mut t in &mut lights {
+        t.translation = model.spec.muzzle + Vec3::new(0.0, 0.0, -0.1);
+    }
+    gun.shown = Some(gun.kind);
 }
 
 // Right click toggles aiming down the sights (only while the mouse is captured, so the click
@@ -465,6 +677,9 @@ pub fn spawn_gun(
 // gun then eases toward its target, and the blend is shared (as AimBlend) so the camera can
 // zoom and the player slow down in step with it.
 fn aim(
+    assets: Res<WeaponAssets>,
+    inventory: Res<Inventory>,
+    mut zoom: ResMut<AimZoom>,
     time: Res<Time>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<Keyboard>,
@@ -479,6 +694,15 @@ fn aim(
         return;
     };
     let captured = cursors.single().is_ok_and(|c| c.grab_mode == CursorGrabMode::Locked);
+    // With nothing in hand there is nothing to aim, reload or lower.
+    if gun.holstered {
+        gun.aiming = false;
+        gun.reload_queued = false;
+        gun.aim_blend = 0.0;
+        zoom.0 = 1.0;
+        blend.0 = 0.0;
+        return;
+    }
     // Sprinting and reloading don't mix. Asking for a reload in the middle of a sprint drops the sprint
     // (it stays off until the sprint key is let go) and reloads; breaking into a sprint during a reload
     // abandons the reload, the magazine staying as it was.
@@ -494,12 +718,12 @@ fn aim(
         *was_airborne = airborne;
         if jumped {
             gun.reload_queued = false;
-            gun.state = MECHANISM.cancel_reload(gun.state, gun.ammo);
+            gun.state = gun.def().mechanism.cancel_reload(gun.state, gun.ammo);
         }
         if sprinting {
             gun.reload_queued = false;
             if gun.reloading() {
-                gun.state = MECHANISM.cancel_reload(gun.state, gun.ammo);
+                gun.state = gun.def().mechanism.cancel_reload(gun.state, gun.ammo);
             }
         }
     }
@@ -507,7 +731,7 @@ fn aim(
     if reload_pressed {
         gun.reload_queued = true;
     }
-    gun.try_queued_reload();
+    gun.try_queued_reload(&inventory);
     gun.lowered = gun.lowering();
     // The sights come down for a reload, and can't be raised again until it's done.
     if captured && mouse.just_pressed(MouseButton::Right) && !gun.reloading() {
@@ -523,7 +747,7 @@ fn aim(
         gun.aiming = false;
     }
     let target = if gun.aiming { 1.0 } else { 0.0 };
-    gun.aim_blend += (target - gun.aim_blend) * (1.0 - (-AIM_RATE * time.delta_secs()).exp());
+    gun.aim_blend += (target - gun.aim_blend) * (1.0 - (-gun.def().handling.aim_rate * time.delta_secs()).exp());
     if (gun.aim_blend - target).abs() < 0.002 {
         gun.aim_blend = target;
     }
@@ -533,8 +757,12 @@ fn aim(
     if gun.gun_kick < 0.002 {
         gun.gun_kick = 0.0;
     }
-    *transform = gun_pose_lowered(gun.aim_blend, gun.gun_kick, gun.lowered);
+    let spec = assets.spec(gun.kind);
+    *transform = gun_pose_lowered(&spec, &gun.def().handling, gun.aim_blend, gun.gun_kick, gun.lowered);
     blend.0 = gun.aim_blend;
+    // The view narrows on the sights: a little on iron sights, a lot through a telescope.
+    let narrowed = gun.def().scope.map_or(gun.def().handling.ads_fov_scale, |s| s.fov_scale);
+    zoom.0 = 1.0 + (narrowed - 1.0) * gun.aim_blend;
     if let Ok(player) = player.single() {
         gun.current_spread = current_spread(&gun, player);
     }
@@ -548,17 +776,23 @@ fn fire(
     mut camera: Query<(&mut Transform, &mut FpsCamera)>,
     mut guns: Query<&mut Gun>,
     assets: Res<BulletAssets>,
+    weapons: Res<WeaponAssets>,
+    mut inventory: ResMut<Inventory>,
 ) {
     let Ok(mut gun) = guns.single_mut() else {
         return;
     };
+    if gun.holstered {
+        return;
+    }
+    let def = gun.def();
     // The mechanism moves on with time: a shot finishes cycling, a reload finishes.
-    let (state, reload_done) = MECHANISM.tick(gun.state, gun.ammo, mouse.pressed(MouseButton::Left), time.delta_secs());
+    let (state, reload_done) = def.mechanism.tick(gun.state, gun.ammo, mouse.pressed(MouseButton::Left), time.delta_secs());
     gun.state = state;
     if reload_done {
-        gun.ammo = MAGAZINE_SIZE;
+        gun.finish_reload(&mut inventory);
     }
-    gun.try_queued_reload();
+    gun.try_queued_reload(&inventory);
     gun.since_shot += time.delta_secs();
     gun.dry_click_cooldown = (gun.dry_click_cooldown - time.delta_secs()).max(0.0);
 
@@ -577,13 +811,17 @@ fn fire(
     if gun.trigger_blocked {
         return;
     }
+    // A semi-automatic gun fires once to a pull; holding the trigger down does nothing more.
+    if gun.mode == FireMode::Semi && !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
     let Ok((mut cam, mut view)) = camera.single_mut() else {
         return;
     };
     // The trigger: the mechanism decides whether that fires a round (it won't while cycling,
     // reloading or dry, and on an empty open-bolt gun it just lets the bolt go forward).
     let before = gun.state;
-    let (state, fires) = MECHANISM.pull_trigger(gun.state, gun.ammo);
+    let (state, fires) = def.mechanism.pull_trigger(gun.state, gun.ammo);
     gun.state = state;
     if !fires {
         let clicked = if before == State::Ready && state == State::Dry {
@@ -600,12 +838,17 @@ fn fire(
         return;
     }
 
+    // What is fired: the load in the gun, from this gun's barrel.
+    let round = gun.loaded.def();
+    let cartridge = Cartridge { muzzle_velocity: round.cartridge.muzzle_velocity * def.velocity_scale, ..round.cartridge };
+    let spec = weapons.spec(gun.kind);
+
     // The bullet leaves the end of the barrel, wherever the gun is right now (hip or sights).
-    let gun_in_world = cam.mul_transform(gun_pose(gun.aim_blend, gun.gun_kick));
-    let muzzle = gun_in_world.transform_point(MUZZLE_LOCAL);
+    let gun_in_world = cam.mul_transform(gun_pose(&spec, &def.handling, gun.aim_blend, gun.gun_kick));
+    let muzzle = gun_in_world.transform_point(spec.muzzle);
     let (eye, forward) = (cam.translation, *cam.forward());
     // The barrel points where the bullet must start to cross the line of sight at the zero range.
-    let direction = ballistics::zeroed_direction(&CARTRIDGE, muzzle, eye, forward, ZERO_DISTANCE);
+    let direction = ballistics::zeroed_direction(&cartridge, muzzle, eye, forward, def.zero);
 
     // Where the shot actually goes: anywhere inside the gun's cone of inaccuracy.
     let half_angle = current_spread(&gun, &view);
@@ -614,16 +857,16 @@ fn fire(
     let error = direction.dot(direction_shot).clamp(-1.0, 1.0).acos();
     gun.last_shot_error = error;
     gun.worst_shot_error = gun.worst_shot_error.max(error);
-    gun.bloom = (gun.bloom + BLOOM_PER_SHOT).min(BLOOM_MAX);
+    gun.bloom = (gun.bloom + def.handling.bloom_per_shot).min(def.handling.bloom_max);
 
     gun.shots_fired += 1;
     gun.ammo -= 1;
     gun.last_shot_origin = Some(muzzle);
     gun.since_shot = 0.0;
     // A different recording each time, a little faster or slower, so a burst doesn't sound like
-    // one sample on repeat.
+    // one sample on repeat; lower and louder for the bigger guns.
     let take = (gun.random() * assets.shot_sounds.len() as f32) as usize % assets.shot_sounds.len();
-    let (pitch, loudness) = (0.97 + 0.06 * gun.random(), 0.9 + 0.1 * gun.random());
+    let (pitch, loudness) = ((0.97 + 0.06 * gun.random()) * def.shot_pitch, (0.9 + 0.1 * gun.random()) * def.shot_volume);
     commands.spawn((
         AudioPlayer(assets.shot_sounds[take].clone()),
         PlaybackSettings { speed: pitch, volume: bevy::audio::Volume::Linear(loudness), ..PlaybackSettings::DESPAWN },
@@ -633,23 +876,32 @@ fn fire(
     gun.flash_time = crate::muzzle_flash::FLASH_TIME;
     gun.flash_roll = gun.random() * std::f32::consts::TAU;
     gun.flash_size = (0.8 + 0.4 * gun.random()) * (1.0 - 0.45 * gun.aim_blend);
-    commands.spawn((
-        Bullet {
-            velocity: direction_shot * CARTRIDGE.muzzle_velocity,
-            age: 0.0,
-            travelled: 0.0,
-            in_foliage: false,
-        },
-        Mesh3d(assets.mesh.clone()),
-        MeshMaterial3d(assets.material.clone()),
-        bevy::light::NotShadowCaster,
-        // Hidden until it has flown a way (see `tracer_visible`).
-        Visibility::Hidden,
-        Transform::from_translation(muzzle).looking_to(direction_shot, Vec3::Y),
-    ));
+    // A round throws one bullet, or a load of pellets, each scattered a little more from the shot's line.
+    for pellet in 0..round.pellets {
+        let heading = if round.pellets > 1 { scatter_direction(direction_shot, round.pellet_spread, gun.random(), gun.random()) } else { direction_shot };
+        let tracer = round.pellets == 1;
+        commands.spawn((
+            Bullet {
+                cartridge,
+                ammo: round.kind,
+                velocity: heading * cartridge.muzzle_velocity,
+                age: 0.0,
+                travelled: 0.0,
+                in_foliage: false,
+                glows: tracer,
+            },
+            Mesh3d(assets.mesh.clone()),
+            MeshMaterial3d(if round.tracer { assets.tracer_material.clone() } else { assets.material.clone() }),
+            bevy::light::NotShadowCaster,
+            // Hidden until it has flown a way (see `tracer_visible`).
+            Visibility::Hidden,
+            Transform::from_translation(muzzle).looking_to(heading, Vec3::Y),
+        ));
+        let _ = pellet;
+    }
 
     // Recoil: the shot has left; now the gun jolts and the view climbs.
-    let kick = recoil_kick(gun.shots_fired, gun.aiming);
+    let kick = recoil_kick(&def.handling, gun.shots_fired, gun.aiming);
     gun.gun_kick = (gun.gun_kick + 1.0).min(1.6);
     gun.view_kick += kick;
     view.nudge(&mut cam, kick.x, kick.y);
@@ -736,7 +988,7 @@ fn move_bullets(
         let mut finished = false;
         for _ in 0..steps {
             let start = flight.position;
-            flight = ballistics::step(&CARTRIDGE, flight, air, h);
+            flight = ballistics::step(&bullet.cartridge, flight, air, h);
             bullet.age += h;
             bullet.travelled += (flight.position - start).length();
             let speed = flight.velocity.length();
@@ -768,7 +1020,7 @@ fn move_bullets(
                 if let Some(target) = impact.target {
                     let hit_speed = impact.speed;
                     if let Ok((_, _, mut dummy)) = dummies.get_mut(target) {
-                        dummy.take_hit(ballistics::damage_at_speed(BULLET_DAMAGE, hit_speed));
+                        dummy.take_hit(bullet.ammo.def().damage_at(hit_speed));
                     }
                 }
                 impacts.write(impact);
@@ -811,7 +1063,7 @@ fn move_bullets(
             transform.look_to(heading, Vec3::Y);
         }
         transform.scale = tracer_scale(bullet.travelled);
-        if tracer_visible(bullet.travelled) && *visibility == Visibility::Hidden {
+        if bullet.glows && tracer_visible(bullet.travelled) && *visibility == Visibility::Hidden {
             *visibility = Visibility::Inherited;
         }
     }
@@ -821,14 +1073,19 @@ fn move_bullets(
 mod tests {
     use super::*;
 
+    fn sterling() -> (&'static WeaponDef, ModelSpec) {
+        (WeaponKind::Sterling.def(), gun_models::build(WeaponKind::Sterling).spec)
+    }
+
     // A point in the gun's space, as seen in the camera's space at a given aim blend.
     fn in_camera(blend: f32, gun_space: Vec3) -> Vec3 {
-        gun_transform(blend).transform_point(gun_space)
+        let (def, spec) = sterling();
+        gun_transform(&spec, &def.handling, blend).transform_point(gun_space)
     }
 
     #[test]
     fn on_the_sights_the_peep_and_the_front_blade_both_sit_on_the_cameras_axis() {
-        let (rear_gun, front_gun) = sight_points();
+        let (rear_gun, front_gun) = sterling().1.sight_points();
         let (rear, front) = (in_camera(1.0, rear_gun), in_camera(1.0, front_gun));
         for (name, p) in [("rear peep", rear), ("front blade", front)] {
             assert!(p.x.abs() < 1e-4 && p.y.abs() < 1e-4, "{name} at ({}, {}) in camera space", p.x, p.y);
@@ -842,15 +1099,15 @@ mod tests {
 
     #[test]
     fn at_the_hip_the_gun_is_off_to_the_right_and_below() {
-        let p = in_camera(0.0, MUZZLE_LOCAL);
+        let p = in_camera(0.0, sterling().1.muzzle);
         assert!(p.x > 0.1 && p.y < -0.1 && p.z < -0.3, "muzzle at {p:?}");
-        let aimed = in_camera(1.0, MUZZLE_LOCAL);
+        let aimed = in_camera(1.0, sterling().1.muzzle);
         assert!(aimed.x.abs() < 1e-4 && aimed.y > -0.1, "aimed muzzle at {aimed:?}");
     }
 
     #[test]
     fn the_zero_is_twenty_metres() {
-        assert_eq!(ZERO_DISTANCE, 20.0);
+        assert_eq!(sterling().0.zero, 20.0);
     }
 
     #[test]
@@ -858,11 +1115,13 @@ mod tests {
         // From the hip, the muzzle is off to one side and below; from the sights it is nearly on
         // the line of sight. Either way a shot crosses the line of sight at the zero range.
         let (eye, forward) = (Vec3::new(10.0, 5.0, 3.0), Vec3::NEG_Z);
+        let (def, _) = sterling();
+        let cartridge = def.default_ammo.def().cartridge;
         for muzzle in [eye + Vec3::new(0.2, -0.18, -0.5), eye + Vec3::new(0.0, -0.04, -0.5)] {
-            let dir = ballistics::zeroed_direction(&CARTRIDGE, muzzle, eye, forward, ZERO_DISTANCE);
-            let target = eye + forward * ZERO_DISTANCE;
+            let dir = ballistics::zeroed_direction(&cartridge, muzzle, eye, forward, def.zero);
+            let target = eye + forward * def.zero;
             let line = (target - muzzle).normalize();
-            let flight = ballistics::point_at_range(&CARTRIDGE, muzzle, dir, line, (target - muzzle).length());
+            let flight = ballistics::point_at_range(&cartridge, muzzle, dir, line, (target - muzzle).length());
             let miss = (flight.position - target).length();
             assert!(miss < 0.005, "missed the zero point by {miss}");
         }
@@ -871,17 +1130,18 @@ mod tests {
     #[test]
     fn every_shot_kicks_the_view_up_and_less_on_the_sights() {
         for shot in 1..200 {
-            let hip = recoil_kick(shot, false);
-            let ads = recoil_kick(shot, true);
+            let h = &sterling().0.handling;
+            let hip = recoil_kick(h, shot, false);
+            let ads = recoil_kick(h, shot, true);
             assert!(hip.x > 0.006 && hip.x < 0.012, "pitch kick {}", hip.x);
-            assert!(hip.y.abs() <= KICK_YAW + 1e-6);
+            assert!(hip.y.abs() <= h.kick_yaw + 1e-6);
             assert!((ads.x - hip.x * ADS_KICK_SCALE).abs() < 1e-6 && ads.x < hip.x);
-            assert_eq!(recoil_kick(shot, false), hip, "repeatable");
+            assert_eq!(recoil_kick(h, shot, false), hip, "repeatable");
         }
         // Sideways wander goes both ways and averages out near nothing.
-        let sum: f32 = (1..400).map(|s| recoil_kick(s, false).y).sum();
+        let sum: f32 = (1..400).map(|s| recoil_kick(&sterling().0.handling, s, false).y).sum();
         assert!(sum.abs() < 0.2, "yaw drifts one way: {sum}");
-        assert!((1..50).any(|s| recoil_kick(s, false).y > 0.0) && (1..50).any(|s| recoil_kick(s, false).y < 0.0));
+        assert!((1..50).any(|s| recoil_kick(&sterling().0.handling, s, false).y > 0.0) && (1..50).any(|s| recoil_kick(&sterling().0.handling, s, false).y < 0.0));
     }
 
     #[test]
@@ -903,30 +1163,31 @@ mod tests {
 
     #[test]
     fn the_gun_jolts_back_and_up_on_a_shot_and_less_on_the_sights() {
-        let (rest, hip, ads) = (gun_pose(0.0, 0.0), gun_pose(0.0, 1.0), gun_pose(1.0, 1.0));
-        assert_eq!(rest.translation, gun_transform(0.0).translation);
+        let (def, spec) = sterling();
+        let (rest, hip, ads) = (gun_pose(&spec, &def.handling, 0.0, 0.0), gun_pose(&spec, &def.handling, 0.0, 1.0), gun_pose(&spec, &def.handling, 1.0, 1.0));
+        assert_eq!(rest.translation, gun_transform(&spec, &def.handling, 0.0).translation);
         assert!(hip.translation.z > rest.translation.z, "shoved back toward the shoulder");
         // Tipped muzzle-up: the muzzle (at -Z) rises.
-        assert!(hip.transform_point(MUZZLE_LOCAL).y > rest.transform_point(MUZZLE_LOCAL).y);
+        assert!(hip.transform_point(spec.muzzle).y > rest.transform_point(spec.muzzle).y);
         let hip_shove = hip.translation.z - rest.translation.z;
-        let ads_shove = ads.translation.z - gun_transform(1.0).translation.z;
+        let ads_shove = ads.translation.z - gun_transform(&spec, &def.handling, 1.0).translation.z;
         assert!(ads_shove < hip_shove);
         // Sight tops stay close to the line of sight even in the jolt.
-        let blade = ads.transform_point(sight_points().1);
+        let blade = ads.transform_point(spec.sight_points().1);
         assert!(blade.y.abs() < 0.03, "front blade {} off the line of sight under recoil", blade.y);
     }
 
     #[test]
     fn hip_fire_is_loose_and_aimed_fire_is_tight() {
-        let hip = spread_half_angle(0.0, 0.0, false, 0.0, Stance::Stand);
-        let ads = spread_half_angle(1.0, 0.0, false, 0.0, Stance::Stand);
+        let hip = spread_half_angle(&sterling().0.handling, 0.0, 0.0, false, 0.0, Stance::Stand);
+        let ads = spread_half_angle(&sterling().0.handling, 1.0, 0.0, false, 0.0, Stance::Stand);
         assert!((0.025..0.04).contains(&hip), "hip cone {hip} rad");
         assert!(ads < 0.006, "sights cone {ads} rad");
         assert!(hip > ads * 6.0, "hip should be several times looser than aimed");
         // Easing onto the sights tightens it steadily.
         let mut last = hip;
         for step in 1..=10 {
-            let now = spread_half_angle(step as f32 / 10.0, 0.0, false, 0.0, Stance::Stand);
+            let now = spread_half_angle(&sterling().0.handling, step as f32 / 10.0, 0.0, false, 0.0, Stance::Stand);
             assert!(now < last, "spread should shrink as the gun comes up");
             last = now;
         }
@@ -934,16 +1195,16 @@ mod tests {
 
     #[test]
     fn moving_jumping_and_long_bursts_all_widen_the_spread_but_less_on_the_sights() {
-        let still = spread_half_angle(0.0, 0.0, false, 0.0, Stance::Stand);
-        assert!(spread_half_angle(0.0, 1.0, false, 0.0, Stance::Stand) > still + 0.015, "running");
-        assert!(spread_half_angle(0.0, 0.0, true, 0.0, Stance::Stand) > still + 0.03, "in the air");
-        assert!(spread_half_angle(0.0, 0.0, false, BLOOM_MAX, Stance::Stand) > still + 0.025, "after a long burst");
+        let still = spread_half_angle(&sterling().0.handling, 0.0, 0.0, false, 0.0, Stance::Stand);
+        assert!(spread_half_angle(&sterling().0.handling, 0.0, 1.0, false, 0.0, Stance::Stand) > still + 0.015, "running");
+        assert!(spread_half_angle(&sterling().0.handling, 0.0, 0.0, true, 0.0, Stance::Stand) > still + 0.03, "in the air");
+        assert!(spread_half_angle(&sterling().0.handling, 0.0, 0.0, false, sterling().0.handling.bloom_max, Stance::Stand) > still + 0.025, "after a long burst");
         // The same penalties cost far less when braced on the sights.
-        let hip_cost = spread_half_angle(0.0, 1.0, true, BLOOM_MAX, Stance::Stand) - still;
-        let ads_cost = spread_half_angle(1.0, 1.0, true, BLOOM_MAX, Stance::Stand) - spread_half_angle(1.0, 0.0, false, 0.0, Stance::Stand);
+        let hip_cost = spread_half_angle(&sterling().0.handling, 0.0, 1.0, true, sterling().0.handling.bloom_max, Stance::Stand) - still;
+        let ads_cost = spread_half_angle(&sterling().0.handling, 1.0, 1.0, true, sterling().0.handling.bloom_max, Stance::Stand) - spread_half_angle(&sterling().0.handling, 1.0, 0.0, false, 0.0, Stance::Stand);
         assert!(ads_cost < hip_cost * 0.3, "ads penalty {ads_cost} vs hip {hip_cost}");
         // Bloom can't grow without bound.
-        assert_eq!(spread_half_angle(0.0, 0.0, false, 10.0, Stance::Stand), spread_half_angle(0.0, 0.0, false, BLOOM_MAX, Stance::Stand));
+        assert_eq!(spread_half_angle(&sterling().0.handling, 0.0, 0.0, false, 10.0, Stance::Stand), spread_half_angle(&sterling().0.handling, 0.0, 0.0, false, sterling().0.handling.bloom_max, Stance::Stand));
     }
 
     #[test]
@@ -990,7 +1251,7 @@ mod tests {
 
     #[test]
     fn lower_stances_are_steadier() {
-        let spread = |stance| spread_half_angle(0.0, 0.0, false, 0.0, stance);
+        let spread = |stance| spread_half_angle(&sterling().0.handling, 0.0, 0.0, false, 0.0, stance);
         assert!(spread(Stance::Crouch) < spread(Stance::Stand) * 0.75, "crouching");
         assert!(spread(Stance::Prone) < spread(Stance::Crouch) * 0.75, "prone");
     }
@@ -998,18 +1259,18 @@ mod tests {
     #[test]
     fn stances_scale_every_source_of_inaccuracy() {
         // Running, jumping and a long burst are each less wild when crouched or prone.
-        for (speed, airborne, bloom) in [(1.0, false, 0.0), (0.0, true, 0.0), (0.0, false, BLOOM_MAX)] {
-            let stand = spread_half_angle(0.0, speed, airborne, bloom, Stance::Stand);
-            let crouch = spread_half_angle(0.0, speed, airborne, bloom, Stance::Crouch);
-            let prone = spread_half_angle(0.0, speed, airborne, bloom, Stance::Prone);
+        for (speed, airborne, bloom) in [(1.0, false, 0.0), (0.0, true, 0.0), (0.0, false, sterling().0.handling.bloom_max)] {
+            let stand = spread_half_angle(&sterling().0.handling, 0.0, speed, airborne, bloom, Stance::Stand);
+            let crouch = spread_half_angle(&sterling().0.handling, 0.0, speed, airborne, bloom, Stance::Crouch);
+            let prone = spread_half_angle(&sterling().0.handling, 0.0, speed, airborne, bloom, Stance::Prone);
             assert!(prone < crouch && crouch < stand, "{speed} {airborne} {bloom}");
         }
     }
 
     #[test]
     fn crouched_and_moving_is_still_worse_than_crouched_and_still() {
-        let still = spread_half_angle(0.0, 0.0, false, 0.0, Stance::Crouch);
-        assert!(spread_half_angle(0.0, 0.3, false, 0.0, Stance::Crouch) > still);
+        let still = spread_half_angle(&sterling().0.handling, 0.0, 0.0, false, 0.0, Stance::Crouch);
+        assert!(spread_half_angle(&sterling().0.handling, 0.0, 0.3, false, 0.0, Stance::Crouch) > still);
     }
 
     #[test]
@@ -1053,17 +1314,18 @@ mod tests {
 
     #[test]
     fn a_lowered_gun_is_below_the_view() {
-        let rest = gun_pose_lowered(0.0, 0.0, 0.0);
-        let down = gun_pose_lowered(0.0, 0.0, 1.0);
-        assert_eq!(rest, gun_pose(0.0, 0.0));
+        let (def, spec) = sterling();
+        let rest = gun_pose_lowered(&spec, &def.handling, 0.0, 0.0, 0.0);
+        let down = gun_pose_lowered(&spec, &def.handling, 0.0, 0.0, 1.0);
+        assert_eq!(rest, gun_pose(&spec, &def.handling, 0.0, 0.0));
         // Even the muzzle end is well below the bottom of a 45-degree-or-so view.
-        let muzzle = down.transform_point(MUZZLE_LOCAL);
+        let muzzle = down.transform_point(spec.muzzle);
         assert!(-muzzle.y / -muzzle.z > 1.0, "muzzle at {muzzle:?}");
         assert!(down.transform_point(Vec3::ZERO).y < rest.translation.y - 0.4);
     }
 
     #[test]
     fn the_magazine_holds_thirty_rounds() {
-        assert_eq!(MAGAZINE_SIZE, 30);
+        assert_eq!(sterling().0.magazine, 30);
     }
 }
