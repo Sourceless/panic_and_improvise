@@ -293,7 +293,8 @@ fn base_height(p: Vec2, seed: u64, params: &GenParams) -> f32 {
     let broad = fbm(q.x / 1400.0, q.y / 1400.0, seed, 3) - 0.5;
     let rolling = fbm(q.x / 500.0, q.y / 500.0, seed ^ 0x3, 4) - 0.5;
     let small = fbm(q.x / 140.0, q.y / 140.0, seed ^ 0x4, 4) - 0.5;
-    (broad * 320.0 + rolling * 120.0 + small * 35.0) * params.relief_scale + 50.0
+    // All of it scales together, sea level included, so that less relief means gentler land and not less sea.
+    (broad * 320.0 + rolling * 120.0 + small * 35.0 + 50.0) * params.relief_scale
 }
 
 // How far below sea level the sea floor drops at the very edge of the map.

@@ -40,7 +40,7 @@ pub struct GenParams {
 impl Default for GenParams {
     fn default() -> Self {
         Self {
-            relief_scale: 1.0,
+            relief_scale: 0.65,
             erosion_droplets: 300_000,
             river_slope_weight: 6.0,
             field_spacing: 95.0,

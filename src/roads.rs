@@ -11,6 +11,8 @@ use crate::road_material::{RoadExtension, RoadMaterial};
 use crate::terrain::TerrainTextures;
 
 const ROAD_LIFT: f32 = 0.25;
+/// How many points a road's mesh has across its width.
+const ACROSS: usize = 9;
 /// Farm tracks lie a hair below main roads, so that where they join, the main road wins.
 const MINOR_SINK: f32 = 0.02;
 const MAJOR_HALF_WIDTH: f32 = 4.0;
@@ -477,10 +479,17 @@ pub fn road_mesh(map: &TerrainMap, ribbons: &[RoadRibbon], kind: RoadKind) -> Me
             let perp = Vec2::new(-tangent.y, tangent.x);
             let hw = ribbon.half_widths[i];
             let painted = !(ribbon.start_junction && along[i] < JUNCTION_CLEAR || ribbon.end_junction && total - along[i] < JUNCTION_CLEAR);
-            for side in [-1.0_f32, 1.0] {
+            // Several points across, each on the terrain mesh itself (not the smooth surface it is cut
+            // from), so that nothing underneath pokes through the road between its edges.
+            for column in 0..ACROSS {
+                let side = column as f32 / (ACROSS - 1) as f32 * 2.0 - 1.0;
                 let q = p + perp * hw * side;
                 let cell = nearest_cell(map, q);
-                let ground = map.height_at(q).max(map.water_level(cell % n, cell / n).unwrap_or(f32::MIN));
+                // The highest of the mesh at this point and a little way along and across it, so that a crease
+                // in the ground between two of the road's points doesn't come up through it.
+                let around = [Vec2::ZERO, tangent * 1.2, -tangent * 1.2, perp * 0.7, -perp * 0.7];
+                let mesh_height = around.iter().map(|d| map.surface_height_at(q + *d)).fold(f32::MIN, f32::max);
+                let ground = mesh_height.max(map.water_level(cell % n, cell / n).unwrap_or(f32::MIN));
                 positions.push([q.x, ground + lift, q.y]);
                 normals.push(map.normal_at(q).to_array());
                 uv0.push([q.x / tile, q.y / tile]);
@@ -489,9 +498,12 @@ pub fn road_mesh(map: &TerrainMap, ribbons: &[RoadRibbon], kind: RoadKind) -> Me
                 colours.push(road_vertex_data(kind, painted, edge_line, hw));
             }
         }
+        let across = ACROSS as u32;
         for i in 0..points.len() as u32 - 1 {
-            let (l0, r0, l1, r1) = (base + i * 2, base + i * 2 + 1, base + i * 2 + 2, base + i * 2 + 3);
-            indices.extend_from_slice(&[l0, r1, l1, l0, r0, r1]);
+            for c in 0..across - 1 {
+                let (l0, r0, l1, r1) = (base + i * across + c, base + i * across + c + 1, base + (i + 1) * across + c, base + (i + 1) * across + c + 1);
+                indices.extend_from_slice(&[l0, r1, l1, l0, r0, r1]);
+            }
         }
     }
     Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
@@ -796,20 +808,23 @@ mod tests {
         let bevy::mesh::VertexAttributeValues::Float32x2(uv0) = attr(Mesh::ATTRIBUTE_UV_0) else { panic!() };
         let bevy::mesh::VertexAttributeValues::Float32x2(uv1) = attr(Mesh::ATTRIBUTE_UV_1) else { panic!() };
         let bevy::mesh::VertexAttributeValues::Float32x4(colours) = attr(Mesh::ATTRIBUTE_COLOR) else { panic!() };
-        assert_eq!(positions.len(), ribbon.points.len() * 2);
+        assert_eq!(positions.len(), ribbon.points.len() * ACROSS);
         for i in 0..positions.len() {
             assert!((positions[i][1] - (10.0 + ROAD_LIFT)).abs() < 1e-4, "lifted off the ground");
             assert!((normals[i][1] - 1.0).abs() < 1e-4, "faces up on flat ground");
             // UV 0 tiles in world metres, UV 1 is metres across and along.
             assert!((uv0[i][0] * ASPHALT_TILE - positions[i][0]).abs() < 1e-3);
-            assert!((uv1[i][0].abs() - MAJOR_HALF_WIDTH).abs() < 1e-4, "across: the road's half width either side");
+            assert!(uv1[i][0].abs() <= MAJOR_HALF_WIDTH + 1e-4, "across: within the road's half width");
+            if i % ACROSS == 0 || i % ACROSS == ACROSS - 1 {
+                assert!((uv1[i][0].abs() - MAJOR_HALF_WIDTH).abs() < 1e-4, "the outer points are at the road's edges");
+            }
             assert_eq!(colours[i][0], 1.0, "painted all along a road with no junctions");
             assert!((colours[i][1] * 10.0 - MAJOR_HALF_WIDTH).abs() < 1e-4);
             assert_eq!(colours[i][2], 0.0, "tarmac, not a track");
         }
-        // Left and right vertices of one cross-section are on opposite sides, and along only grows.
-        assert!(uv1[0][0] < 0.0 && uv1[1][0] > 0.0);
-        assert!(uv1.windows(2).step_by(2).all(|w| w[1][1] >= w[0][1]));
+        // The first and last vertices of one cross-section are on opposite sides, and along only grows.
+        assert!(uv1[0][0] < 0.0 && uv1[ACROSS - 1][0] > 0.0);
+        assert!(uv1.windows(2).all(|w| w[1][1] >= w[0][1]));
         assert!((uv1.last().unwrap()[1] - 80.0).abs() < 0.01, "metres along the whole road");
     }
 
@@ -885,5 +900,73 @@ mod tests {
         assert!(shader.contains("const LINE_HALF_WIDTH: f32 = 0.05;"));
         // A road wide enough for a centre line (5.5 m) has one: the main roads are 8 m.
         assert!(MAJOR_HALF_WIDTH * 2.0 >= 5.5);
+    }
+
+    #[test]
+    fn no_ground_pokes_up_through_a_road() {
+        let params = GenParams::default();
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
+        let roads = RoadNetwork::generate(&map, &params);
+        let ribbons = road_ribbons(&map, &roads);
+        let mut worst = f32::MIN;
+        let mut samples = 0;
+        let (mut above, mut shown) = (0, 0);
+        for kind in [RoadKind::Major, RoadKind::Minor] {
+            let mesh = road_mesh(&map, &ribbons, kind);
+            let bevy::mesh::VertexAttributeValues::Float32x3(positions) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") else { panic!() };
+            let rows: Vec<&[[f32; 3]]> = positions.chunks(ACROSS).collect();
+            // Every pair of neighbouring rows of one ribbon is a strip; the first row of the next ribbon
+            // follows the last of the one before, so skip a pair that jumps far.
+            for pair in rows.windows(2) {
+                let (a, b) = (pair[0], pair[1]);
+                if Vec2::new(a[0][0] - b[0][0], a[0][2] - b[0][2]).length() > 6.0 {
+                    continue;
+                }
+                for t in [0.25f32, 0.5, 0.75] {
+                    for c in 0..ACROSS - 1 {
+                        for u in [0.25f32, 0.5, 0.75] {
+                            let lerp = |p: [f32; 3], q: [f32; 3], f: f32| Vec3::from_array(p).lerp(Vec3::from_array(q), f);
+                            let top = lerp(a[c], b[c], t).lerp(lerp(a[c + 1], b[c + 1], t), u);
+                            let ground = map.surface_height_at(Vec2::new(top.x, top.z));
+                            worst = worst.max(ground - top.y);
+                            samples += 1;
+                            if ground > top.y {
+                                above += 1;
+                            }
+                            if ground > top.y + 0.1 && shown < 5 {
+                                shown += 1;
+                                eprintln!("ground {:.2} over road {:.2} at ({:.1}, {:.1}) kind {kind:?}", ground, top.y, top.x, top.z);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("{samples} samples; {above} have ground over the road, by {worst:.3} m at worst");
+        assert!(worst < -0.03, "ground reaches {worst} m above the road somewhere");
+    }
+
+    /// Prints places on country roads to stand and look along them (for FPS_AT and FPS_YAW).
+    #[test]
+    #[ignore = "prints places to look at"]
+    fn where_to_look_at_a_country_road() {
+        let params = GenParams::default();
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
+        let roads = RoadNetwork::generate(&map, &params);
+        let ribbons = road_ribbons(&map, &roads);
+        let mut shown = 0;
+        for r in ribbons.iter().filter(|r| matches!(r.kind, RoadKind::Major | RoadKind::Minor) && r.points.len() > 20) {
+            let mid = r.points[r.points.len() / 2];
+            if map.pois.iter().any(|p| p.position.distance(mid) < p.radius * 1.5) || map.water_surface_at(mid).is_some() {
+                continue;
+            }
+            let d = (r.points[r.points.len() / 2 + 3] - r.points[r.points.len() / 2]).normalize();
+            // Looking along it: yaw 0 looks toward -z, so yaw = atan2(-d.x, -d.y).
+            eprintln!("{:?}: FPS_AT={:.0},{:.0} FPS_YAW={:.2}", r.kind, mid.x, mid.y, (-d.x).atan2(-d.y));
+            shown += 1;
+            if shown >= 6 {
+                break;
+            }
+        }
     }
 }

@@ -257,6 +257,19 @@ fn auto_screenshot(
             }
         }
     }
+    // FPS_AT=x,z stands anywhere (FPS_YAW turns, FPS_PITCH tips).
+    if *frame == 300 {
+        if let (Ok(at), Ok((mut transform, mut cam))) = (std::env::var("FPS_AT"), camera.single_mut()) {
+            let mut parts = at.split(',').filter_map(|v| v.trim().parse::<f32>().ok());
+            if let (Some(x), Some(z)) = (parts.next(), parts.next()) {
+                cam.yaw = std::env::var("FPS_YAW").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                cam.pitch = std::env::var("FPS_PITCH").ok().and_then(|v| v.parse().ok()).unwrap_or(-0.04);
+                let ground = map.height_at(Vec2::new(x, z));
+                transform.translation = Vec3::new(x, ground + std::env::var("FPS_HEIGHT").ok().and_then(|v| v.parse().ok()).unwrap_or(1.8), z);
+                transform.rotation = Quat::from_euler(EulerRot::YXZ, cam.yaw, cam.pitch, 0.0);
+            }
+        }
+    }
     // The world takes a while to build and stream in, so shoot well after startup.
     let first: u32 = std::env::var("FPS_SHOT_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(900);
     if *frame == first {

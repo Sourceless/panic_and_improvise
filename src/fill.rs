@@ -13,7 +13,7 @@ use crate::contour::{clip_to_terrain_triangle, triangulate, Contour, Seg, Smooth
 use crate::field_material::{FieldExtension, FieldMaterial};
 use crate::map::{fbm, grid_pos, TerrainMap, CELL, TILE_CELLS};
 use crate::params::GenParams;
-use crate::roads::{road_ribbons, RoadClearance, RoadNetwork};
+use crate::roads::{road_ribbons, RoadClearance, RoadKind, RoadNetwork, RoadRibbon};
 use crate::terrain::{TerrainRoot, TerrainTextures};
 use crate::zones::{Zone, ZoneMap};
 
@@ -124,12 +124,79 @@ fn spawn_field_tiling(
     }
     // Walls and hedges stop where a road is: the road's real outline (smoothed, and wider on bends
     // than the grid cells it was traced through) is kept clear.
-    let clearance = RoadClearance::new(&road_ribbons(map, roads));
-    let wall_segs = clear_of_roads(&contour.segs, &clearance);
+    let ribbons = road_ribbons(map, roads);
+    let clearance = RoadClearance::new(&ribbons);
+    let mut wall_segs = clear_of_roads(&contour.segs, &clearance);
+    // Out in the country a road has a hedge, a wall or a fence down each side of it.
+    let roadside = roadside_barriers(map, &ribbons, &wall_segs);
+    wall_segs.extend(clear_of_roads(&roadside, &clearance));
     if !crate::world::skip("boundaries") {
         spawn_field_boundaries(commands, meshes, materials, textures, map, &wall_segs, colliders);
     }
     hedge_tree_points(&wall_segs)
+}
+
+/// How far from a road's edge a barrier along it stands, centre line: the margin walls keep from roads,
+/// and a little more.
+const ROADSIDE_OFFSET: f32 = WALL_ROAD_MARGIN + 0.5;
+/// How many sides of country roads have a barrier, of those that could.
+const ROADSIDE_CHANCE: f32 = 0.85;
+
+/// Barriers along both sides of every main road and farm track in the open country: not in a
+/// settlement, not over water, and not where a field's own boundary already runs beside the road.
+/// (Where another road meets it, `clear_of_roads` leaves the gap.)
+pub fn roadside_barriers(map: &TerrainMap, ribbons: &[RoadRibbon], existing: &[Seg]) -> Vec<Seg> {
+    // The field boundaries by where they are, so that a barrier isn't doubled up beside one.
+    let mut buckets: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+    let bucket = |p: Vec2| ((p.x / 8.0).floor() as i32, (p.y / 8.0).floor() as i32);
+    for (i, s) in existing.iter().enumerate() {
+        buckets.entry(bucket((s.a + s.b) * 0.5)).or_default().push(i);
+    }
+    let boundary_near = |p: Vec2| {
+        let (bx, bz) = bucket(p);
+        (-1..=1).any(|dz| {
+            (-1..=1).any(|dx| {
+                buckets.get(&(bx + dx, bz + dz)).is_some_and(|ids| {
+                    ids.iter().any(|&i| {
+                        let s = &existing[i];
+                        let ab = s.b - s.a;
+                        let t = if ab.length_squared() > 1e-9 { ((p - s.a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+                        p.distance(s.a + ab * t) < 2.5
+                    })
+                })
+            })
+        })
+    };
+    let in_a_settlement = |p: Vec2| map.pois.iter().any(|poi| poi.position.distance(p) < poi.radius * 1.1 + 6.0);
+    let mut out = Vec::new();
+    for (index, ribbon) in ribbons.iter().enumerate() {
+        if !matches!(ribbon.kind, RoadKind::Major | RoadKind::Minor) || ribbon.points.len() < 2 {
+            continue;
+        }
+        for (side_index, side) in [-1.0f32, 1.0].into_iter().enumerate() {
+            if hash01(index, side_index, 77) > ROADSIDE_CHANCE {
+                continue;
+            }
+            // The barrier is its own run, one pair of labels to a road side, so that its kind is its own.
+            let pair = (60_000 + index as u32 * 2 + side_index as u32, 999_999);
+            let offset: Vec<Vec2> = (0..ribbon.points.len())
+                .map(|i| {
+                    let (prev, next) = (ribbon.points[i.saturating_sub(1)], ribbon.points[(i + 1).min(ribbon.points.len() - 1)]);
+                    let tangent = (next - prev).normalize_or_zero();
+                    ribbon.points[i] + Vec2::new(-tangent.y, tangent.x) * side * (ribbon.half_widths[i] + ROADSIDE_OFFSET)
+                })
+                .collect();
+            for w in offset.windows(2) {
+                let mid = (w[0] + w[1]) * 0.5;
+                let wet = map.water_surface_at(w[0]).is_some() || map.water_surface_at(mid).is_some() || map.water_surface_at(w[1]).is_some();
+                if wet || in_a_settlement(mid) || w[0].distance(w[1]) < 0.05 || boundary_near(mid) {
+                    continue;
+                }
+                out.push(Seg { a: w[0], b: w[1], pair });
+            }
+        }
+    }
+    out
 }
 
 /// How far walls and hedges stay from a road's edge, metres: a hedge reaches about 0.9 m from its
@@ -740,7 +807,40 @@ fn spawn_field_boundaries(
         *touching.entry(key(seg.a, kind)).or_default() += 1;
         *touching.entry(key(seg.b, kind)).or_default() += 1;
     }
-    for seg in segs {
+    // Where two segments of one run meet, the hedge's cross-section is cut along the line that halves
+    // the bend, so that they join without a gap on the outside of the bend or a lump on the inside.
+    let mut meeting: HashMap<(i64, i64, u32), Vec<(usize, bool)>> = HashMap::new();
+    for (i, seg) in segs.iter().enumerate() {
+        let kind = pair_hash(seg.pair.0, seg.pair.1) % 3;
+        meeting.entry(key(seg.a, kind)).or_default().push((i, false));
+        meeting.entry(key(seg.b, kind)).or_default().push((i, true));
+    }
+    let miter = |i: usize, at_b: bool| -> Option<Vec2> {
+        let seg = &segs[i];
+        let kind = pair_hash(seg.pair.0, seg.pair.1) % 3;
+        let here = if at_b { seg.b } else { seg.a };
+        let others = meeting.get(&key(here, kind))?;
+        if others.len() != 2 {
+            return None;
+        }
+        let &(j, other_at_b) = others.iter().find(|&&(j, _)| j != i)?;
+        let away = |s: &Seg, from_b: bool| if from_b { (s.a - s.b).normalize_or_zero() } else { (s.b - s.a).normalize_or_zero() };
+        let (d_i, d_j) = (away(seg, at_b), away(&segs[j], other_at_b));
+        // The way the run goes through the joint, and the line across it.
+        let through = (d_j - d_i).normalize_or_zero();
+        if through == Vec2::ZERO {
+            return None;
+        }
+        let own = (seg.b - seg.a).normalize_or_zero();
+        let own_perp = Vec2::new(-own.y, own.x);
+        let mut across = Vec2::new(-through.y, through.x);
+        if across.dot(own_perp) < 0.0 {
+            across = -across;
+        }
+        let along = across.dot(own_perp);
+        (along > 0.5).then(|| across / along)
+    };
+    for (index, seg) in segs.iter().enumerate() {
         let (ga, gb) = (map.height_at(seg.a), map.height_at(seg.b));
         let kind = pair_hash(seg.pair.0, seg.pair.1) % 3;
         let mid = (seg.a + seg.b) * 0.5;
@@ -753,7 +853,7 @@ fn spawn_field_boundaries(
         let (half_thickness, height, material) = boundary_solid(kind);
         colliders.add(Solid::wall(seg.a, seg.b, half_thickness, ga + height, gb + height).of(material));
         match kind {
-            0 => push_hedge_segment(buf, map, seg.a, ga, seg.b, gb, touching[&key(seg.a, kind)] == 1, touching[&key(seg.b, kind)] == 1),
+            0 => push_hedge_segment(buf, map, seg.a, ga, seg.b, gb, touching[&key(seg.a, kind)] == 1, touching[&key(seg.b, kind)] == 1, miter(index, false), miter(index, true)),
             1 => push_box_segment(buf, seg.a, ga, seg.b, gb, 0.6, 0.0, 1.1, 1.6),
             _ => push_fence_segment(buf, seg.a, ga, seg.b, gb, touching[&key(seg.b, kind)] == 1),
         }
@@ -846,7 +946,7 @@ fn push_fence_segment(buf: &mut WallBuf, a: Vec2, ga: f32, b: Vec2, gb: f32, las
 // A hedge: a rounded, slightly irregular profile extruded between two points, textured with
 // real leaves (the texture repeats every 2 m).
 #[allow(clippy::too_many_arguments)]
-fn push_hedge_segment(buf: &mut WallBuf, map: &TerrainMap, a: Vec2, ga: f32, b: Vec2, gb: f32, cap_a: bool, cap_b: bool) {
+fn push_hedge_segment(buf: &mut WallBuf, map: &TerrainMap, a: Vec2, ga: f32, b: Vec2, gb: f32, cap_a: bool, cap_b: bool, perp_a: Option<Vec2>, perp_b: Option<Vec2>) {
     // (distance from the centreline, height) of the cross-section, left foot to right foot.
     const PROFILE: [(f32, f32); 9] = [
         (-0.6, 0.0), (-0.88, 0.55), (-0.78, 1.3), (-0.42, 1.78), (0.0, 1.92),
@@ -874,8 +974,8 @@ fn push_hedge_segment(buf: &mut WallBuf, map: &TerrainMap, a: Vec2, ga: f32, b: 
             let p = PROFILE[i - 1];
             arc += ((x - p.0).powi(2) + (y - p.1).powi(2)).sqrt();
         }
-        let pa = a + perp * x;
-        let pb = b + perp * x;
+        let pa = a + perp_a.unwrap_or(perp) * x;
+        let pb = b + perp_b.unwrap_or(perp) * x;
         rings.push(([Vec3::new(pa.x, ga + y * wa, pa.y), Vec3::new(pb.x, gb + y * wb, pb.y)], normal_at(i), arc / 2.0));
     }
     let base = buf.positions.len() as u32;
@@ -1236,5 +1336,54 @@ mod tests {
         eprintln!("trees in buildings: {before} before, {after} after");
         assert_eq!(after, 0);
         assert!(with.tree_count() * 100 > without.tree_count() * 98, "far too many trees removed");
+    }
+
+    #[test]
+    fn country_roads_have_barriers_along_them_but_settlements_do_not() {
+        let (map, zones, params) = generate();
+        let _ = zones;
+        let roads = RoadNetwork::generate(&map, &params);
+        let ribbons = road_ribbons(&map, &roads);
+        let clearance = RoadClearance::new(&ribbons);
+        let barriers = clear_of_roads(&roadside_barriers(&map, &ribbons, &[]), &clearance);
+        let road_length: f32 = ribbons.iter().filter(|r| matches!(r.kind, RoadKind::Major | RoadKind::Minor)).map(|r| r.points.windows(2).map(|w| w[0].distance(w[1])).sum::<f32>()).sum();
+        let barrier_length: f32 = barriers.iter().map(|s| s.a.distance(s.b)).sum();
+        eprintln!("{:.1} km of road, {:.1} km of roadside barrier", road_length / 1000.0, barrier_length / 1000.0);
+        // Two sides, most of them, with gaps for settlements, water and junctions.
+        assert!(barrier_length > road_length * 0.8, "{barrier_length} m of barrier for {road_length} m of road");
+        // None in the middle of a settlement, none on a road.
+        for s in &barriers {
+            let mid = (s.a + s.b) * 0.5;
+            assert!(map.pois.iter().all(|p| p.position.distance(mid) > p.radius * 0.9), "a roadside barrier inside a settlement at {mid:?}");
+            assert!(clearance.clearance(mid) > WALL_ROAD_MARGIN - 0.1, "barrier on the road at {mid:?}");
+        }
+    }
+
+    #[test]
+    fn two_hedge_segments_that_bend_meet_without_a_gap() {
+        // A run that turns a right angle at the origin: the ring of cross-section points at the end of
+        // the first must be the ring at the start of the second.
+        let segs = [Seg { a: Vec2::new(-10.0, 0.0), b: Vec2::ZERO, pair: (1, 2) }, Seg { a: Vec2::ZERO, b: Vec2::new(0.0, 10.0), pair: (1, 2) }];
+        // The same joint as `spawn_field_boundaries` finds it.
+        let (d_i, d_j) = ((segs[0].a - segs[0].b).normalize(), (segs[1].b - segs[1].a).normalize());
+        let through = (d_j - d_i).normalize();
+        let own = (segs[0].b - segs[0].a).normalize();
+        let own_perp = Vec2::new(-own.y, own.x);
+        let mut across = Vec2::new(-through.y, through.x);
+        if across.dot(own_perp) < 0.0 {
+            across = -across;
+        }
+        let miter = across / across.dot(own_perp);
+        // The first's end foot, the second's start foot, on the same side of the bend, at the hedge's width.
+        let first_end = segs[0].b + miter * 0.88;
+        let second_perp = Vec2::new(-(segs[1].b - segs[1].a).normalize().y, (segs[1].b - segs[1].a).normalize().x);
+        let mut across2 = Vec2::new(-through.y, through.x);
+        if across2.dot(second_perp) < 0.0 {
+            across2 = -across2;
+        }
+        let second_start = segs[1].a + (across2 / across2.dot(second_perp)) * 0.88 * across2.dot(second_perp).signum().max(-1.0);
+        // One of the two feet of the second is the first's foot (the hedge is symmetric).
+        let other_side = segs[1].a - (across2 / across2.dot(second_perp)) * 0.88;
+        assert!(first_end.distance(second_start) < 1e-3 || first_end.distance(other_side) < 1e-3, "{first_end:?} vs {second_start:?} / {other_side:?}");
     }
 }
