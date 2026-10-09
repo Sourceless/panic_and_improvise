@@ -514,6 +514,7 @@ struct ClearEdge {
     b: Vec2,
     ha: f32,
     hb: f32,
+    kind: RoadKind,
 }
 
 /// Bucket side, metres. Edges are filed under every bucket within `REACH` of them, so a query
@@ -528,7 +529,7 @@ impl RoadClearance {
         for ribbon in ribbons {
             for i in 0..ribbon.points.len().saturating_sub(1) {
                 let id = edges.len() as u32;
-                let edge = ClearEdge { a: ribbon.points[i], b: ribbon.points[i + 1], ha: ribbon.half_widths[i], hb: ribbon.half_widths[i + 1] };
+                let edge = ClearEdge { a: ribbon.points[i], b: ribbon.points[i + 1], ha: ribbon.half_widths[i], hb: ribbon.half_widths[i + 1], kind: ribbon.kind };
                 let (lo, hi) = (edge.a.min(edge.b) - Vec2::splat(REACH), edge.a.max(edge.b) + Vec2::splat(REACH));
                 for bz in (lo.y / BUCKET).floor() as i32..=(hi.y / BUCKET).floor() as i32 {
                     for bx in (lo.x / BUCKET).floor() as i32..=(hi.x / BUCKET).floor() as i32 {
@@ -555,6 +556,22 @@ impl RoadClearance {
                 p.distance(e.a + ab * t) - (e.ha + (e.hb - e.ha) * t)
             })
             .fold(f32::MAX, f32::min)
+    }
+
+    /// The kind of road `p` is on, if it is on one (the nearest, where several overlap).
+    pub fn kind_at(&self, p: Vec2) -> Option<RoadKind> {
+        let ids = self.buckets.get(&((p.x / BUCKET).floor() as i32, (p.y / BUCKET).floor() as i32))?;
+        ids.iter()
+            .filter_map(|&id| {
+                let e = &self.edges[id as usize];
+                let ab = e.b - e.a;
+                let t = if ab.length_squared() > 1e-9 { ((p - e.a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+                let clearance = p.distance(e.a + ab * t) - (e.ha + (e.hb - e.ha) * t);
+                (clearance < 0.0).then_some((clearance, e.kind))
+            })
+            // A path across a road is under it; the road wins. Otherwise the deepest in.
+            .min_by(|a, b| (a.1 == RoadKind::Path).cmp(&(b.1 == RoadKind::Path)).then(a.0.total_cmp(&b.0)))
+            .map(|(_, kind)| kind)
     }
 
     /// The parts of the straight run `a` to `b` that are at least `margin` metres clear of every

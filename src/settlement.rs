@@ -8,6 +8,7 @@ use bevy::prelude::*;
 use crate::building::geom::{Layer, Model};
 use crate::building::{self, Site};
 use crate::collision::Colliders;
+use crate::loot::{LootAssets, LootBox, Rarity};
 use crate::map::TerrainMap;
 use crate::settlement_plan::{footprint_points, Building, Rng, SettlementPlan};
 
@@ -89,11 +90,21 @@ pub fn spawn_settlements(
         .zip(&plan.layouts)
         .flat_map(|(poi, layout)| layout.buildings.iter().enumerate().map(move |(i, b)| (b, Vec2::splat(i as f32 * 0.37) + poi.position * 0.001)))
         .chain(plan.sheds.iter().map(|b| (b, Vec2::ZERO)));
+    // There is only one unique thing in the whole map: the second and later rolls become legendary.
+    let mut unique_found = false;
     for (b, jitter) in all {
         let ground = ground_under(map, b);
         let origin = Vec3::new(b.centre.x, ground.floor, b.centre.y);
         let mut rng = Rng::from_position(b.centre + jitter);
-        let model = building::build(b, &ground.site, &mut rng);
+        let mut model = building::build(b, &ground.site, &mut rng);
+        for (_, rarity) in &mut model.loot {
+            if *rarity == Rarity::Unique {
+                if unique_found {
+                    *rarity = Rarity::Legendary;
+                }
+                unique_found = true;
+            }
+        }
         for solid in model.solids(origin, b.yaw) {
             colliders.add(solid);
         }
@@ -114,6 +125,7 @@ fn stream_interiors(
     buildings: Option<ResMut<Buildings>>,
     camera: Query<&GlobalTransform, With<Camera3d>>,
     mut meshes: ResMut<Assets<Mesh>>,
+    loot: Option<Res<LootAssets>>,
 ) {
     let (Some(mut buildings), Ok(eye)) = (buildings, camera.single()) else { return };
     buildings.since_look += time.delta_secs();
@@ -165,6 +177,20 @@ fn stream_interiors(
                         Transform::from_translation(entry.origin).with_rotation(Quat::from_rotation_y(entry.yaw)),
                     ))
                     .id();
+                // The loot lying about inside, in the building's own frame.
+                if let Some(loot) = &loot {
+                    commands.entity(id).with_children(|parent| {
+                        for &(at, rarity) in &entry.model.loot {
+                            let size = rarity.size();
+                            parent.spawn((
+                                LootBox { rarity },
+                                Mesh3d(loot.mesh.clone()),
+                                MeshMaterial3d(loot.material(rarity)),
+                                Transform::from_translation(at + Vec3::Y * (size * 0.5 + 0.03)).with_scale(Vec3::splat(size)),
+                            ));
+                        }
+                    });
+                }
                 entry.interior = Some(id);
             }
             Some(id) if distance > INTERIOR_HIDE => {

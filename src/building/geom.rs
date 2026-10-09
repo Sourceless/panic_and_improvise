@@ -103,6 +103,8 @@ pub struct Model {
     pub items: Vec<Item>,
     /// Where lights hang inside, and how far each reaches: (position, range).
     pub lights: Vec<(Vec3, f32)>,
+    /// Where loot lies, in the building's frame: the middle of the underside of each box.
+    pub loot: Vec<(Vec3, crate::loot::Rarity)>,
 }
 
 impl Model {
@@ -161,6 +163,7 @@ impl Model {
     pub fn extend(&mut self, other: Model) {
         self.items.extend(other.items);
         self.lights.extend(other.lights);
+        self.loot.extend(other.loot);
     }
 
     pub fn has(&self, layer: Layer) -> bool {

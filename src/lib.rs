@@ -8,12 +8,14 @@ pub mod contour;
 pub mod crosshair;
 pub mod field_material;
 pub mod fill;
+pub mod footsteps;
 pub mod grass;
 pub mod impact;
 pub mod gun_state;
 pub mod ground_textures;
 pub mod gun_model;
 pub mod look;
+pub mod loot;
 pub mod map;
 pub mod meshbake;
 pub mod menu;
@@ -75,6 +77,8 @@ impl Plugin for GamePlugin {
         }
         app.add_plugins((
             player::PlayerPlugin,
+            footsteps::FootstepsPlugin,
+            loot::LootPlugin,
             weapon::WeaponPlugin,
             collision::CollisionPlugin,
             controls::ControlsPlugin::default(),

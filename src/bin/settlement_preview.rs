@@ -49,7 +49,7 @@ fn main() {
             }),
             ..default()
         }))
-        .add_plugins((MipmapPlugin, SettlementPlugin, MaterialPlugin::<RoadMaterial>::default()))
+        .add_plugins((MipmapPlugin, SettlementPlugin, fps_prototype::loot::LootPlugin, MaterialPlugin::<RoadMaterial>::default()))
         .insert_resource(Output(out, only))
         .insert_resource(ClearColor(Color::srgb(0.55, 0.68, 0.82)))
         .add_systems(Startup, setup)

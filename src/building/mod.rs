@@ -89,6 +89,13 @@ fn style_for(b: &Building, rng: &mut Rng) -> Style {
         }
         _ => {}
     }
+    style.richness = match b.kind {
+        BuildingKind::Cottage | BuildingKind::House | BuildingKind::Terrace | BuildingKind::Farmhouse => 0.0,
+        BuildingKind::Pub | BuildingKind::Shop | BuildingKind::Barn | BuildingKind::Shed | BuildingKind::PetrolStation => 0.6,
+        BuildingKind::School | BuildingKind::Hall => 1.0,
+        BuildingKind::Church | BuildingKind::Mill => 1.8,
+        _ => 0.0,
+    };
     style.inner = [style.outer[0] * 0.5 + 0.45, style.outer[1] * 0.5 + 0.45, style.outer[2] * 0.5 + 0.45];
     style
 }
@@ -414,7 +421,8 @@ mod tests {
         let mut checked = 0;
         let mut failures = Vec::new();
         for (i, b) in plan.layouts.iter().flat_map(|l| &l.buildings).chain(&plan.sheds).filter(|b| !matches!(b.kind, BuildingKind::Silo | BuildingKind::Mill)).enumerate() {
-            if i % 4 != 0 {
+            // A quarter of them, to keep the test quick; WALK_ALL=1 walks every one.
+            if i % 4 != 0 && std::env::var("WALK_ALL").is_err() {
                 continue;
             }
             checked += 1;
@@ -425,7 +433,7 @@ mod tests {
         eprintln!("{checked} buildings checked, {} failures", failures.len());
         if let Ok(which) = std::env::var("SHOW_FAILURE") {
             let which: usize = which.parse().unwrap_or(0);
-            let b = plan.layouts.iter().flat_map(|l| &l.buildings).filter(|b| !matches!(b.kind, BuildingKind::Silo | BuildingKind::Mill)).enumerate().filter(|(i, b)| i % 4 == 0 && check_every_room_is_reachable(b, &map).is_err()).map(|(_, b)| b).nth(which).unwrap();
+            let b = plan.layouts.iter().flat_map(|l| &l.buildings).filter(|b| !matches!(b.kind, BuildingKind::Silo | BuildingKind::Mill)).enumerate().filter(|(i, b)| (i % 4 == 0 || std::env::var("WALK_ALL").is_ok()) && check_every_room_is_reachable(b, &map).is_err()).map(|(_, b)| b).nth(which).unwrap();
             if let Ok(path) = std::env::var("SHOW_DUMP") {
                 std::fs::write(path, model_json(b, &map).0).unwrap();
             }
@@ -482,7 +490,7 @@ mod tests {
                 .flat_map(|l| &l.buildings)
                 .filter(|b| !matches!(b.kind, BuildingKind::Silo | BuildingKind::Mill))
                 .enumerate()
-                .filter(|(i, b)| i % 4 == 0 && check_every_room_is_reachable(b, &map).is_err())
+                .filter(|(i, b)| (i % 4 == 0 || std::env::var("WALK_ALL").is_ok()) && check_every_room_is_reachable(b, &map).is_err())
                 .map(|(_, b)| b)
                 .nth(n.parse().unwrap())
                 .unwrap(),
@@ -574,5 +582,34 @@ mod tests {
             count += 1;
         }
         eprintln!("{count} buildings in {:.2?}: {items} items, {solids} solids, about {shell_tris} shell triangles", start.elapsed());
+    }
+
+    #[test]
+    fn loot_lies_about_in_every_kind_of_building_and_the_rarer_it_is_the_fewer() {
+        use crate::loot::Rarity;
+        let params = GenParams::default();
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
+        let roads = crate::roads::RoadNetwork::generate(&map, &params);
+        let plan = SettlementPlan::generate(&map, &roads);
+        let mut counts = [0usize; 6];
+        let mut kinds_with_loot = HashSet::new();
+        for b in plan.layouts.iter().flat_map(|l| &l.buildings) {
+            let ground = crate::settlement::ground_under(&map, b);
+            let mut rng = Rng::from_position(b.centre);
+            let model = build(b, &ground.site, &mut rng);
+            if !model.loot.is_empty() {
+                kinds_with_loot.insert(b.kind);
+            }
+            for (at, rarity) in &model.loot {
+                counts[*rarity as usize] += 1;
+                assert!(at.y >= -0.01 && at.y < 12.0, "{at:?} floats or sinks");
+            }
+        }
+        eprintln!("loot: {} common, {} uncommon, {} rare, {} very rare, {} legendary, {} unique", counts[0], counts[1], counts[2], counts[3], counts[4], counts[5]);
+        assert!(counts[0] > counts[1] && counts[1] > counts[2] && counts[2] > counts[3], "{counts:?}");
+        assert!(counts[Rarity::Legendary as usize] >= 1, "{counts:?}");
+        for kind in [BuildingKind::House, BuildingKind::Cottage, BuildingKind::Pub, BuildingKind::Shop, BuildingKind::Church, BuildingKind::Farmhouse] {
+            assert!(kinds_with_loot.contains(&kind), "no loot in a {kind:?}");
+        }
     }
 }

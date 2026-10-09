@@ -97,6 +97,15 @@ pub struct Stair {
 }
 
 impl Stair {
+    /// The stair's footprint with `side` more at each side and `end` at each end: the floor that is
+    /// kept free round it so that it can be got on and off and walked round.
+    pub fn clear_zone(&self, side: f32, end: f32) -> Rect {
+        match self.climbs {
+            Climb::PosZ | Climb::NegZ => Rect { x0: self.rect.x0 - side, x1: self.rect.x1 + side, z0: self.rect.z0 - end, z1: self.rect.z1 + end },
+            Climb::PosX | Climb::NegX => Rect { z0: self.rect.z0 - side, z1: self.rect.z1 + side, x0: self.rect.x0 - end, x1: self.rect.x1 + end },
+        }
+    }
+
     /// The stair's footprint with `by` more at each end, along the way it runs.
     pub fn along_its_run(&self, by: f32) -> Rect {
         match self.climbs {
@@ -144,6 +153,8 @@ pub struct Style {
     /// Rooms above the ground floor get windows too.
     /// Whether the outside walls have windows (a barn's don't).
     pub windows: bool,
+    /// How good the loot is here: 0 in an ordinary home.
+    pub richness: f32,
 }
 
 impl Default for Style {
@@ -162,6 +173,7 @@ impl Default for Style {
             wall_thickness: 0.3,
             door_width: 1.1,
             windows: true,
+            richness: 0.0,
         }
     }
 }
@@ -495,7 +507,8 @@ fn wall(model: &mut Model, axis: Axis, at: f32, lo: f32, hi: f32, thickness: f32
     let mut cursor = lo - thickness * 0.5;
     for o in openings.iter() {
         piece(cursor, o.lo, bottom, y1);
-        piece(o.lo, o.hi, bottom, floor + o.sill.max(0.0));
+        // The wall under a doorway lies a hair below the floor, so that its top doesn't fight the floor's.
+        piece(o.lo, o.hi, bottom, floor + o.sill.max(0.0) - if o.sill <= 0.0 { 0.01 } else { 0.0 });
         piece(o.lo, o.hi, floor + o.head, y1);
         cursor = o.hi;
     }
@@ -509,6 +522,8 @@ pub fn assemble(layout: &Layout, skirt: f32, rng: &mut Rng) -> Model {
     let mut model = Model::default();
     let style = &layout.style;
     let outside = layout.inside.grown(style.wall_thickness * 0.5);
+    // Floors stop a hair short of the outside of the walls, so that their edges don't fight the walls' faces.
+    let slab_area = outside.grown(-0.03);
     let top = layout.height();
 
     for (s, storey) in layout.storeys.iter().enumerate() {
@@ -516,9 +531,10 @@ pub fn assemble(layout: &Layout, skirt: f32, rng: &mut Rng) -> Model {
         let y1 = y0 + storey.height;
         let edges = edges(&storey.rooms);
         // The stair up from here, and the one that arrives from below: nothing is put in their way.
-        let mut keep_clear: Vec<Rect> = storey.stairs_up.iter().map(|st| st.rect.grown(0.55)).collect();
+        // (Clear of the sides by half a metre and of each end by a metre and a half, to get on and off.)
+        let mut keep_clear: Vec<Rect> = storey.stairs_up.iter().map(|st| st.clear_zone(0.95, 0.9)).collect();
         if s > 0 {
-            keep_clear.extend(layout.storeys[s - 1].stairs_up.iter().map(|st| st.rect.grown(0.55)));
+            keep_clear.extend(layout.storeys[s - 1].stairs_up.iter().map(|st| st.clear_zone(0.95, 0.9)));
         }
         // Doors may open beside a stair but not onto either end of it.
         let stair_footprints: Vec<Rect> = storey
@@ -543,8 +559,8 @@ pub fn assemble(layout: &Layout, skirt: f32, rng: &mut Rng) -> Model {
             model.block(Vec3::new(cx, mid, cz), size(w.width, 0.03, h), colour::GLASS_PANE, Layer::Glass, None);
             // The frame: a bar up the middle and one across, and the sill.
             model.block(Vec3::new(cx, mid, cz), size(0.05, 0.08, h), style.trim_light(), Layer::Shell, None);
-            model.block(Vec3::new(cx, mid, cz), size(w.width, 0.08, 0.05), style.trim_light(), Layer::Shell, None);
-            model.block(Vec3::new(cx, y0 + style.window_sill - 0.03, cz), size(w.width + 0.16, style.wall_thickness + 0.12, 0.06), style.trim_light(), Layer::Shell, None);
+            model.block(Vec3::new(cx, mid, cz), size(w.width, 0.07, 0.05), style.trim_light(), Layer::Shell, None);
+            model.block(Vec3::new(cx, y0 + style.window_sill - 0.015, cz), size(w.width + 0.16, style.wall_thickness + 0.12, 0.07), style.trim_light(), Layer::Shell, None);
         }
         for (k, e) in edges.iter().enumerate() {
             let exterior = e.b.is_none();
@@ -555,7 +571,8 @@ pub fn assemble(layout: &Layout, skirt: f32, rng: &mut Rng) -> Model {
             for w in windows.iter().filter(|w| w.edge == k) {
                 openings.push(Opening { lo: w.centre - w.width * 0.5, hi: w.centre + w.width * 0.5, sill: style.window_sill, head: style.window_head.min(storey.height - 0.4) });
             }
-            let bottom = if s == 0 { -skirt } else { y0 - SLAB };
+            // Each storey's wall stands on the one below, which ends exactly where it begins.
+            let bottom = if s == 0 { -skirt } else { y0 };
             if exterior {
                 wall(&mut model, e.axis, e.at, e.lo, e.hi, style.wall_thickness, bottom, y0, y1, &mut openings, style.outer, Layer::Shell, Material::Stone);
             } else {
@@ -569,9 +586,9 @@ pub fn assemble(layout: &Layout, skirt: f32, rng: &mut Rng) -> Model {
             holes.extend(layout.storeys[s - 1].stairs_up.iter().map(|st| st.rect));
         }
         if s == 0 {
-            model.slab(&outside, 0.0, 0.5 + skirt, style.floor, Layer::Shell, Some(Material::Stone));
+            model.slab(&slab_area, 0.0, 0.5 + skirt, style.floor, Layer::Shell, Some(Material::Stone));
         } else {
-            model.slab_with_holes(&outside, &holes, y0, SLAB, style.floor, Layer::Shell, Some(Material::Wood));
+            model.slab_with_holes(&slab_area, &holes, y0, SLAB, style.floor, Layer::Shell, Some(Material::Wood));
             // A rail round every hole in the floor, open at the top of a stair.
             for void in &storey.voids {
                 balustrade(&mut model, void, None, y0, style, &layout.inside);
@@ -623,7 +640,7 @@ pub fn assemble(layout: &Layout, skirt: f32, rng: &mut Rng) -> Model {
     }
 
     // The top ceiling.
-    model.slab(&outside, top, 0.15, style.ceiling, Layer::Shell, Some(Material::Wood));
+    model.slab(&slab_area, top, 0.15, style.ceiling, Layer::Shell, Some(Material::Wood));
     model
 }
 

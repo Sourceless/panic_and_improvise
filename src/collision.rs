@@ -547,6 +547,16 @@ impl Colliders {
             .max_by(f32::total_cmp)
     }
 
+    /// What a body at `p` whose feet are at `feet` stands on, if it stands on a solid: how high it is
+    /// and what it is made of. (The same solid `support` finds.)
+    pub fn support_material(&self, p: Vec2, feet: f32, step: f32) -> Option<(f32, Material)> {
+        self.near(p, LEDGE)
+            .filter(|solid| solid.shape.separation(p).0 <= LEDGE)
+            .map(|solid| (solid.top_at(p), solid.material))
+            .filter(|&(top, _)| top <= feet + step)
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+    }
+
     /// Something ahead (in direction `facing`) of a body at `p` that it can climb: its top is more
     /// than `step` above the feet (otherwise it would just be stepped onto) and no more than
     /// `reach` above the `floor` they are over (a jump doesn't lengthen an arm), and close enough

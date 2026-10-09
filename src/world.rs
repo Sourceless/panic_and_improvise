@@ -42,6 +42,7 @@ pub fn build_world(
     spawn_terrain(commands, meshes, standard, terrain, textures, map, &zones, waters, images, &plan, &mut colliders);
     spawn_roads(commands, meshes, road_materials, textures, map, &roads);
     spawn_fill(commands, meshes, standard, fields, textures, map, &zones, &roads, params, &plan, &mut colliders);
+    commands.insert_resource(crate::footsteps::RoadSurfaces(crate::roads::RoadClearance::new(&crate::roads::road_ribbons(map, &roads))));
     commands.insert_resource(colliders);
     commands.insert_resource(plan);
     commands.insert_resource(zones);

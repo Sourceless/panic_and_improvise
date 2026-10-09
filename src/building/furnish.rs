@@ -27,6 +27,8 @@ pub struct Ctx<'a> {
     /// Places that must stay open (doorways, stairs).
     avoid: &'a [Rect],
     taken: Vec<Rect>,
+    /// The tops of the furniture put in, where loot could lie: (the top's rectangle, its height).
+    tops: Vec<(Rect, f32)>,
     pub floor: f32,
     pub height: f32,
     pub rng: &'a mut Rng,
@@ -125,6 +127,9 @@ impl Ctx<'_> {
 
     /// Adds a box standing on the floor.
     pub fn solid_box(&mut self, r: &Rect, y0: f32, h: f32, colour: Rgb, material: Option<Material>) {
+        if material.is_some() && y0 + h >= 0.3 && y0 + h <= 1.3 && r.area() >= 0.15 && r.width().min(r.depth()) >= 0.35 {
+            self.tops.push((*r, y0 + h));
+        }
         self.model.span(Vec3::new(r.x0, self.floor + y0, r.z0), Vec3::new(r.x1, self.floor + y0 + h, r.z1), colour, Layer::Interior, material);
     }
 
@@ -134,8 +139,8 @@ impl Ctx<'_> {
     }
 }
 
-pub fn furnish(model: &mut Model, room: &Room, avoid: &[Rect], floor: f32, height: f32, _style: &Style, rng: &mut Rng) {
-    let mut ctx = Ctx { model, clear: room.rect.grown(-0.22), avoid, taken: Vec::new(), floor, height, rng };
+pub fn furnish(model: &mut Model, room: &Room, avoid: &[Rect], floor: f32, height: f32, style: &Style, rng: &mut Rng) {
+    let mut ctx = Ctx { model, clear: room.rect.grown(-0.22), avoid, taken: Vec::new(), tops: Vec::new(), floor, height, rng };
     match room.kind {
         RoomKind::Bedroom => bedroom(&mut ctx),
         RoomKind::Living => living(&mut ctx),
@@ -160,6 +165,55 @@ pub fn furnish(model: &mut Model, room: &Room, avoid: &[Rect], floor: f32, heigh
         RoomKind::Nave => nave(&mut ctx),
         RoomKind::Chancel => chancel(&mut ctx),
         _ => {}
+    }
+    scatter_loot(&mut ctx, room.kind, style.richness);
+}
+
+/// How many things lie about in a room of this kind and size.
+fn loot_count(kind: RoomKind, area: f32) -> usize {
+    let base = match kind {
+        RoomKind::Bedroom | RoomKind::Living | RoomKind::Dining | RoomKind::Cloakroom | RoomKind::Lounge | RoomKind::Nave | RoomKind::Chancel => 1.0,
+        RoomKind::Kitchen | RoomKind::Bar | RoomKind::Classroom | RoomKind::Office | RoomKind::StaffRoom | RoomKind::MainHall => 2.0,
+        RoomKind::Shop | RoomKind::Store | RoomKind::Barn | RoomKind::Workshop | RoomKind::Mill | RoomKind::Cellar => 3.0,
+        RoomKind::Bathroom | RoomKind::Hall | RoomKind::Landing | RoomKind::Corridor => 0.5,
+        _ => 0.0,
+    };
+    // Bigger rooms hold more.
+    (base * (0.6 + area / 30.0)).round() as usize
+}
+
+/// Puts boxes of loot on tables and counters and shelves, or on the floor where there's nothing to
+/// put them on.
+fn scatter_loot(c: &mut Ctx, kind: RoomKind, richness: f32) {
+    let wanted = loot_count(kind, c.clear.area());
+    for _ in 0..wanted {
+        let rarity = crate::loot::Rarity::roll(c.rng.unit(), richness);
+        let size = rarity.size();
+        let on_furniture = !c.tops.is_empty() && c.rng.unit() < 0.75;
+        let at = if on_furniture {
+            let (r, top) = c.tops[(c.rng.unit() * c.tops.len() as f32) as usize % c.tops.len()];
+            let m = r.centre();
+            Vec3::new(m.x + c.rng.range(-0.1, 0.1) * r.width().min(1.0), c.floor + top, m.y + c.rng.range(-0.1, 0.1) * r.depth().min(1.0))
+        } else {
+            // On the floor, in a free spot.
+            let r = c.clear;
+            let mut found = None;
+            for _ in 0..12 {
+                let x = c.rng.range(r.x0 + 0.4, (r.x1 - 0.4).max(r.x0 + 0.41));
+                let z = c.rng.range(r.z0 + 0.4, (r.z1 - 0.4).max(r.z0 + 0.41));
+                let spot = Rect::new(x - size, z - size, x + size, z + size);
+                if c.free(&spot) {
+                    c.taken.push(spot);
+                    found = Some(Vec3::new(x, c.floor, z));
+                    break;
+                }
+            }
+            match found {
+                Some(p) => p,
+                None => continue,
+            }
+        };
+        c.model.loot.push((at, rarity));
     }
 }
 

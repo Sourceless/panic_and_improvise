@@ -29,6 +29,8 @@ const EYE_HEIGHT: f32 = 1.8;
 /// Crouching in to a sprint starts a slide: a burst a little faster than the sprint that the ground
 /// takes away at `SLIDE_DECEL` metres per second squared, over about a second and a few metres. It
 /// ends, crouched, once down to walking pace. Only a fast enough run can start one.
+/// How fast (per second, exponentially) the view settles onto a new floor height when walking.
+const VIEW_EASE: f32 = 24.0;
 const SLIDE_SPEED: f32 = 11.5;
 const SLIDE_DECEL: f32 = 9.0;
 const SLIDE_MIN_SPEED: f32 = MOVE_SPEED * 1.4;
@@ -148,6 +150,9 @@ pub struct FpsCamera {
     pub(crate) sprint_suppressed: bool,
     /// A slide is under way: the player is carried along the way they were running, slowing.
     pub(crate) sliding: bool,
+    /// Where the eye is carried from: the height of the feet, but eased over steps and stairs so
+    /// that going up them glides rather than judders.
+    pub(crate) view_feet: f32,
 }
 
 /// A climb in progress: the player is carried from where they were to the top of what they climb.
@@ -179,6 +184,21 @@ pub fn mantle_duration(height: f32) -> f32 {
 }
 
 impl FpsCamera {
+    /// How fast the body is rising (positive) or falling (negative), metres per second.
+    pub fn vertical_speed(&self) -> f32 {
+        self.vertical_speed
+    }
+
+    /// Whether a climb up onto something is under way.
+    pub fn climbing(&self) -> bool {
+        self.mantle.is_some()
+    }
+
+    /// Whether a slide is under way.
+    pub fn sliding(&self) -> bool {
+        self.sliding
+    }
+
     /// Turns the view up by `pitch` and left by `yaw` radians, as recoil does, keeping the
     /// camera's rotation in step.
     pub fn nudge(&mut self, transform: &mut Transform, pitch: f32, yaw: f32) {
@@ -234,7 +254,7 @@ pub fn spawn_player(mut commands: Commands, map: Res<TerrainMap>) {
         // The player's ears, for sounds placed in the world.
         bevy::audio::SpatialListener::new(0.2),
         Transform::from_translation(eye).looking_at(eye - Vec3::Z, Vec3::Y),
-        FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false, floor: map.height_at(start), mantle: None, mantles: 0, sprint_suppressed: false, sliding: false },
+        FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false, floor: map.height_at(start), mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: map.height_at(start) },
     ));
 }
 
@@ -493,7 +513,8 @@ fn player_movement(
             cam.air_height = (feet - cam.floor).max(0.0);
         }
         cam.velocity = Vec2::ZERO;
-        transform.translation = Vec3::new(at.x, cam.floor + cam.air_height + cam.eye_height, at.y);
+        cam.view_feet = cam.floor + cam.air_height;
+        transform.translation = Vec3::new(at.x, cam.view_feet + cam.eye_height, at.y);
         return;
     }
 
@@ -532,7 +553,14 @@ fn player_movement(
     cam.floor = floor;
     cam.air_height = air_height;
     cam.vertical_speed = if grounded { 0.0 } else { state.vertical_speed };
-    transform.translation = Vec3::new(pos.x, floor + air_height + cam.eye_height, pos.y);
+    // Where the eye is: on the ground it glides over steps; in the air it goes with the body.
+    let feet_now = floor + air_height;
+    if grounded && (feet_now - cam.view_feet).abs() < 1.0 {
+        cam.view_feet += (feet_now - cam.view_feet) * (1.0 - (-VIEW_EASE * dt).exp());
+    } else {
+        cam.view_feet = feet_now;
+    }
+    transform.translation = Vec3::new(pos.x, cam.view_feet + cam.eye_height, pos.y);
 }
 
 /// Widens the view a little while sprinting, which makes speed read on screen.
@@ -684,7 +712,7 @@ mod tests {
             .add_systems(Update, player_movement);
         app.world_mut().spawn((
             Transform::from_xyz(0.0, ground + EYE_HEIGHT, 0.0),
-            FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false },
+            FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 0.0 },
         ));
         // Every update advances the clock by exactly 1/60 s, whatever the real time taken.
         app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_secs_f32(1.0 / 60.0)));
@@ -834,5 +862,19 @@ mod tests {
     fn higher_things_take_longer_to_climb() {
         assert!(mantle_duration(1.8) > mantle_duration(1.0) && mantle_duration(1.0) > mantle_duration(0.6));
         assert!(mantle_duration(1.8) < 1.2, "but a climb is never a long wait");
+    }
+
+    #[test]
+    fn the_view_glides_up_a_step_rather_than_jumping() {
+        // The rule the camera follows: each frame it closes a fraction of the gap to the feet.
+        let (mut view, feet) = (0.0f32, 0.2f32);
+        let dt = 1.0 / 60.0;
+        let mut previous = view;
+        for _ in 0..30 {
+            view += (feet - view) * (1.0 - (-VIEW_EASE * dt).exp());
+            assert!(view - previous < 0.2 * 0.5, "no frame covers more than half the step");
+            previous = view;
+        }
+        assert!((feet - view).abs() < 0.01, "and it arrives");
     }
 }

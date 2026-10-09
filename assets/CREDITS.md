@@ -73,3 +73,5 @@ The magazine's size and position were measured from photographs of Sterling L2A2
 the Royal Armouries' collection (collections.armouries.net, object numbers PR.1434 and the
 Sterling L2A1/L2A2 entries), viewed for reference only. They are the Royal Armouries' copyright
 and are not included in this repository or in the game.
+
+`sounds/footsteps/*.wav` are synthesised by `tools/make_footsteps.py` (filtered noise and damped tones); there is nothing to credit.
