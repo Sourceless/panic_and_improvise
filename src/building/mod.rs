@@ -591,7 +591,7 @@ mod tests {
         let map = TerrainMap::generate(crate::MAP_SEED, &params);
         let roads = crate::roads::RoadNetwork::generate(&map, &params);
         let plan = SettlementPlan::generate(&map, &roads);
-        let mut counts = [0usize; 6];
+        let mut counts = [0usize; 5];
         let mut kinds_with_loot = HashSet::new();
         for b in plan.layouts.iter().flat_map(|l| &l.buildings) {
             let ground = crate::settlement::ground_under(&map, b);
@@ -605,7 +605,7 @@ mod tests {
                 assert!(at.y >= -0.01 && at.y < 12.0, "{at:?} floats or sinks");
             }
         }
-        eprintln!("loot: {} common, {} uncommon, {} rare, {} very rare, {} legendary, {} unique", counts[0], counts[1], counts[2], counts[3], counts[4], counts[5]);
+        eprintln!("loot: {} common, {} uncommon, {} rare, {} very rare, {} legendary", counts[0], counts[1], counts[2], counts[3], counts[4]);
         assert!(counts[0] > counts[1] && counts[1] > counts[2] && counts[2] > counts[3], "{counts:?}");
         assert!(counts[Rarity::Legendary as usize] >= 1, "{counts:?}");
         for kind in [BuildingKind::House, BuildingKind::Cottage, BuildingKind::Pub, BuildingKind::Shop, BuildingKind::Church, BuildingKind::Farmhouse] {

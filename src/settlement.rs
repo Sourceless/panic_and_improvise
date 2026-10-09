@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use crate::building::geom::{Layer, Model};
 use crate::building::{self, Site};
 use crate::collision::Colliders;
-use crate::loot::{LootAssets, LootBox, Rarity};
+use crate::loot::{LootAssets, LootBox};
 use crate::map::TerrainMap;
 use crate::settlement_plan::{footprint_points, Building, Rng, SettlementPlan};
 
@@ -90,21 +90,11 @@ pub fn spawn_settlements(
         .zip(&plan.layouts)
         .flat_map(|(poi, layout)| layout.buildings.iter().enumerate().map(move |(i, b)| (b, Vec2::splat(i as f32 * 0.37) + poi.position * 0.001)))
         .chain(plan.sheds.iter().map(|b| (b, Vec2::ZERO)));
-    // There is only one unique thing in the whole map: the second and later rolls become legendary.
-    let mut unique_found = false;
     for (b, jitter) in all {
         let ground = ground_under(map, b);
         let origin = Vec3::new(b.centre.x, ground.floor, b.centre.y);
         let mut rng = Rng::from_position(b.centre + jitter);
-        let mut model = building::build(b, &ground.site, &mut rng);
-        for (_, rarity) in &mut model.loot {
-            if *rarity == Rarity::Unique {
-                if unique_found {
-                    *rarity = Rarity::Legendary;
-                }
-                unique_found = true;
-            }
-        }
+        let model = building::build(b, &ground.site, &mut rng);
         for solid in model.solids(origin, b.yaw) {
             colliders.add(solid);
         }

@@ -9,11 +9,10 @@ pub enum Rarity {
     Rare,
     VeryRare,
     Legendary,
-    Unique,
 }
 
 impl Rarity {
-    pub const ALL: [Rarity; 6] = [Rarity::Common, Rarity::Uncommon, Rarity::Rare, Rarity::VeryRare, Rarity::Legendary, Rarity::Unique];
+    pub const ALL: [Rarity; 5] = [Rarity::Common, Rarity::Uncommon, Rarity::Rare, Rarity::VeryRare, Rarity::Legendary];
 
     /// How often each turns up, of everything that does, in an ordinary house.
     fn base_weight(self) -> f32 {
@@ -23,11 +22,10 @@ impl Rarity {
             Rarity::Rare => 0.12,
             Rarity::VeryRare => 0.05,
             Rarity::Legendary => 0.015,
-            Rarity::Unique => 0.002,
         }
     }
 
-    /// The colour of its box: grey, green, blue, purple, orange and a hot red.
+    /// The colour of its box: grey, green, blue, purple and orange.
     pub fn colour(self) -> Color {
         match self {
             Rarity::Common => Color::srgb(0.78, 0.78, 0.8),
@@ -35,7 +33,6 @@ impl Rarity {
             Rarity::Rare => Color::srgb(0.2, 0.45, 1.0),
             Rarity::VeryRare => Color::srgb(0.7, 0.25, 0.95),
             Rarity::Legendary => Color::srgb(1.0, 0.6, 0.1),
-            Rarity::Unique => Color::srgb(1.0, 0.08, 0.2),
         }
     }
 
@@ -51,7 +48,6 @@ impl Rarity {
             Rarity::Rare => "rare",
             Rarity::VeryRare => "very rare",
             Rarity::Legendary => "legendary",
-            Rarity::Unique => "unique",
         }
     }
 
@@ -118,12 +114,12 @@ mod tests {
 
     #[test]
     fn most_loot_is_common_and_the_ladder_thins_out() {
-        let mut counts = [0usize; 6];
+        let mut counts = [0usize; 5];
         for i in 0..10_000 {
             counts[Rarity::roll(i as f32 / 10_000.0, 0.0) as usize] += 1;
         }
         assert!(counts.windows(2).all(|w| w[0] > w[1]), "each rung rarer than the one below: {counts:?}");
-        assert!(counts[0] > 5000 && counts[5] > 0 && counts[5] < 60, "{counts:?}");
+        assert!(counts[0] > 5000 && counts[4] > 0 && counts[4] < 400, "{counts:?}");
     }
 
     #[test]
