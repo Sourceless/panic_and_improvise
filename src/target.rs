@@ -59,6 +59,11 @@ pub fn spawn_dummy(
         })
         .unwrap_or(-15.0);
     let position = Vec3::new(start.x, map.height_at(start + Vec2::new(0.0, z)), start.y + z);
+    spawn_dummy_at(&mut commands, &mut meshes, &mut materials, position);
+}
+
+/// A dummy standing with its feet at `position`.
+pub fn spawn_dummy_at(commands: &mut Commands, meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>, position: Vec3) {
     let material = materials.add(StandardMaterial {
         base_color: Color::srgb(0.85, 0.75, 0.6),
         ..default()

@@ -23,8 +23,6 @@ const SPRINT_FOV_KICK: f32 = 0.07;
 const MOUSE_SENSITIVITY: f32 = 0.002;
 /// Walking speed lost when fully on the sights, as a fraction.
 const AIM_SLOWDOWN: f32 = 0.4;
-/// How much the look sensitivity falls at full zoom, tracking the narrower field of view.
-const ADS_LOOK_SCALE: f32 = 0.7;
 const EYE_HEIGHT: f32 = 1.8;
 /// Crouching in to a sprint starts a slide: a burst a little faster than the sprint that the ground
 /// takes away at `SLIDE_DECEL` metres per second squared, over about a second and a few metres. It
@@ -318,7 +316,7 @@ fn mouse_look(
     cursors: Query<&CursorOptions, With<PrimaryWindow>>,
     mut mouse_motion: MessageReader<MouseMotion>,
     mut query: Query<(&mut Transform, &mut FpsCamera)>,
-    aim: Res<AimBlend>,
+    zoom: Option<Res<crate::weapon::AimZoom>>,
 ) {
     let Ok(cursor) = cursors.single() else {
         return;
@@ -339,7 +337,8 @@ fn mouse_look(
     let Ok((mut transform, mut cam)) = query.single_mut() else {
         return;
     };
-    let sensitivity = MOUSE_SENSITIVITY * (1.0 - (1.0 - ADS_LOOK_SCALE) * aim.0);
+    // Looking through a narrower view the mouse turns the view less, in step with it (but never to a crawl).
+    let sensitivity = MOUSE_SENSITIVITY * zoom.map_or(1.0, |z| z.0.max(0.22));
     cam.yaw -= delta.x * sensitivity;
     cam.pitch -= delta.y * sensitivity;
     cam.pitch = cam.pitch.clamp(-1.54, 1.54);

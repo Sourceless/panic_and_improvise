@@ -2,6 +2,11 @@
 
 use bevy::prelude::*;
 
+use crate::ammo::AmmoKind;
+use crate::inventory::{ItemKind, PackKind, Supply};
+use crate::settlement_plan::Rng;
+use crate::weapons::WeaponKind;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Rarity {
     Common,
@@ -67,6 +72,126 @@ impl Rarity {
     }
 }
 
+/// What a spot of loot turns out to be when it is looked at: what it is, how many (rounds, for ammunition),
+/// and for a gun how many rounds are in it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Found {
+    pub kind: ItemKind,
+    pub count: u32,
+    pub loaded: u32,
+}
+
+/// A thing that can be found, and how likely: its weight among those of its rarity.
+struct Entry {
+    weight: f32,
+    kind: ItemKind,
+    /// How many rounds, for ammunition: (least, most).
+    rounds: (u32, u32),
+}
+
+const fn ammo(weight: f32, kind: AmmoKind, least: u32, most: u32) -> Entry {
+    Entry { weight, kind: ItemKind::Ammo(kind), rounds: (least, most) }
+}
+
+const fn thing(weight: f32, kind: ItemKind) -> Entry {
+    Entry { weight, kind, rounds: (1, 1) }
+}
+
+/// What turns up at each rarity: ordinary rounds and bits and pieces are common; the other loads,
+/// bags and pistols less so; rifles, shotguns and bigger packs are rarer; machine guns, the sniper rifle and the
+/// best ammunition are legendary.
+fn table(rarity: Rarity) -> Vec<Entry> {
+    use AmmoKind::*;
+    use ItemKind::{Pack, Supply as Sup, Weapon};
+    match rarity {
+        Rarity::Common => vec![
+            ammo(3.0, NineFmj, 15, 50),
+            ammo(2.0, BritishBall, 5, 20),
+            ammo(1.5, NatoBall, 5, 20),
+            ammo(1.5, Birdshot, 3, 10),
+            thing(2.0, Sup(Supply::Bandage)),
+            thing(1.5, Sup(Supply::TinnedFood)),
+            thing(1.0, Sup(Supply::Canteen)),
+            thing(0.5, Sup(Supply::Compass)),
+        ],
+        Rarity::Uncommon => vec![
+            ammo(1.0, NineHollowPoint, 15, 50),
+            ammo(1.0, NinePlusP, 15, 40),
+            ammo(0.8, BritishTracer, 5, 20),
+            ammo(0.8, NatoTracer, 5, 20),
+            ammo(1.2, Buckshot, 3, 10),
+            ammo(0.6, Slug, 3, 10),
+            thing(1.5, Sup(Supply::FirstAid)),
+            thing(1.0, Sup(Supply::Torch)),
+            thing(1.5, Pack(PackKind::Satchel)),
+        ],
+        Rarity::Rare => vec![
+            thing(2.0, Weapon(WeaponKind::HiPower)),
+            thing(2.0, Weapon(WeaponKind::LeeEnfield)),
+            thing(1.5, Weapon(WeaponKind::Auto5)),
+            thing(1.5, Pack(PackKind::Daypack)),
+            ammo(1.0, NatoBall, 15, 20),
+            ammo(0.5, BritishArmourPiercing, 5, 20),
+            ammo(0.5, Slug, 5, 10),
+        ],
+        Rarity::VeryRare => vec![
+            thing(2.0, Weapon(WeaponKind::Slr)),
+            thing(1.5, Weapon(WeaponKind::Sterling)),
+            thing(1.5, Weapon(WeaponKind::Bren)),
+            thing(1.5, Pack(PackKind::Bergen)),
+            ammo(1.0, NatoArmourPiercing, 10, 20),
+        ],
+        Rarity::Legendary => vec![
+            thing(2.0, Weapon(WeaponKind::Mag)),
+            thing(2.0, Weapon(WeaponKind::L42)),
+            ammo(1.5, NatoMatch, 10, 20),
+            thing(1.0, Pack(PackKind::Bergen)),
+        ],
+    }
+}
+
+/// What is at a spot of loot of `rarity`, from a source of numbers in 0..1.
+pub fn roll_item(rarity: Rarity, mut next: impl FnMut() -> f32) -> Found {
+    let entries = table(rarity);
+    let total: f32 = entries.iter().map(|e| e.weight).sum();
+    let mut left = next() * total;
+    let entry = entries.iter().find(|e| {
+        left -= e.weight;
+        left < 0.0
+    });
+    let entry = entry.unwrap_or(&entries[0]);
+    let count = if entry.rounds.0 == entry.rounds.1 { entry.rounds.0 } else { entry.rounds.0 + (next() * (entry.rounds.1 - entry.rounds.0 + 1) as f32) as u32 };
+    // A gun is found with something in it, from empty to full.
+    let loaded = match entry.kind {
+        ItemKind::Weapon(w) => (next() * (w.def().magazine + 1) as f32) as u32,
+        _ => 0,
+    };
+    Found { kind: entry.kind, count: count.max(1), loaded }
+}
+
+/// A repeatable source of numbers for one spot of loot: the same spot is the same thing every time.
+pub fn spot_numbers(building: usize, index: usize) -> impl FnMut() -> f32 {
+    let mut rng = Rng::from_position(Vec2::new(building as f32 * 1.37 + 0.11, index as f32 * 2.71 + 0.53));
+    // The first few numbers of a fresh generator are alike for near seeds: let it settle.
+    for _ in 0..4 {
+        rng.unit();
+    }
+    move || rng.unit()
+}
+
+/// A box of loot lying where it was put, and what is in it.
+#[derive(Component)]
+pub struct Pickup {
+    pub rarity: Rarity,
+    pub found: Found,
+    /// Which spot it is, so that it stays gone once taken.
+    pub spot: (usize, usize),
+}
+
+/// Spots of loot that have been picked up.
+#[derive(Resource, Default)]
+pub struct TakenLoot(pub std::collections::HashSet<(usize, usize)>);
+
 /// A box of loot lying where it was put.
 #[derive(Component)]
 pub struct LootBox {
@@ -90,7 +215,7 @@ pub struct LootPlugin;
 
 impl Plugin for LootPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, make_assets).add_systems(Update, spin);
+        app.init_resource::<TakenLoot>().add_systems(Startup, make_assets).add_systems(Update, spin);
     }
 }
 
@@ -134,6 +259,47 @@ mod tests {
         for (i, a) in Rarity::ALL.iter().enumerate() {
             for b in &Rarity::ALL[i + 1..] {
                 assert_ne!(a.colour(), b.colour());
+            }
+        }
+    }
+
+    #[test]
+    fn what_is_found_is_the_same_every_time_for_the_same_spot() {
+        let a = roll_item(Rarity::Rare, spot_numbers(12, 3));
+        let b = roll_item(Rarity::Rare, spot_numbers(12, 3));
+        assert_eq!(a, b);
+        let many: std::collections::HashSet<String> = (0..40).map(|i| format!("{:?}", roll_item(Rarity::Rare, spot_numbers(i, 0)).kind)).collect();
+        assert!(many.len() >= 3, "there is a choice: {many:?}");
+    }
+
+    #[test]
+    fn the_rarer_the_spot_the_better_what_is_in_it() {
+        // Count the guns that turn up at each rarity.
+        let guns = |rarity| (0..400).filter(|&i| matches!(roll_item(rarity, spot_numbers(i, 1)).kind, ItemKind::Weapon(_))).count();
+        assert_eq!(guns(Rarity::Common), 0);
+        assert_eq!(guns(Rarity::Uncommon), 0);
+        assert!(guns(Rarity::Rare) > 100 && guns(Rarity::VeryRare) > 200 && guns(Rarity::Legendary) > 150);
+        // The machine gun and the sniper rifle are only found at the top.
+        for rarity in [Rarity::Common, Rarity::Uncommon, Rarity::Rare, Rarity::VeryRare] {
+            for i in 0..300 {
+                let kind = roll_item(rarity, spot_numbers(i, 2)).kind;
+                assert!(!matches!(kind, ItemKind::Weapon(WeaponKind::Mag | WeaponKind::L42)), "{rarity:?} gave {kind:?}");
+            }
+        }
+        assert!((0..300).any(|i| matches!(roll_item(Rarity::Legendary, spot_numbers(i, 2)).kind, ItemKind::Weapon(WeaponKind::Mag))));
+        assert!((0..300).any(|i| matches!(roll_item(Rarity::Legendary, spot_numbers(i, 2)).kind, ItemKind::Weapon(WeaponKind::L42))));
+    }
+
+    #[test]
+    fn rounds_come_in_amounts_a_square_can_hold_and_guns_have_no_more_than_a_magazine_in_them() {
+        for rarity in Rarity::ALL {
+            for i in 0..300 {
+                let found = roll_item(rarity, spot_numbers(i, 5));
+                match found.kind {
+                    ItemKind::Ammo(a) => assert!(found.count >= 1 && found.count <= a.def().per_stack, "{a:?} x{}", found.count),
+                    ItemKind::Weapon(w) => assert!(found.loaded <= w.def().magazine),
+                    _ => assert_eq!(found.count, 1),
+                }
             }
         }
     }

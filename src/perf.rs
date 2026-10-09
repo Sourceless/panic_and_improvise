@@ -243,6 +243,8 @@ fn auto_screenshot(
     plan: Option<Res<VegetationPlan>>,
     cover: Option<Res<GroundCover>>,
     mut camera: Query<(&mut Transform, &mut FpsCamera)>,
+    mut inventory: ResMut<crate::inventory::Inventory>,
+    mut screen: ResMut<crate::inventory_ui::InventoryScreen>,
     mut exit: MessageWriter<AppExit>,
 ) {
     *frame += 1;
@@ -255,6 +257,30 @@ fn auto_screenshot(
                 transform.translation = Vec3::new(at.x, map.height_at(at) + 1.8, at.y);
                 transform.rotation = Quat::from_euler(EulerRot::YXZ, cam.yaw, cam.pitch, 0.0);
             }
+        }
+    }
+    // FPS_GUN=sterling|hi_power|slr|bren|mag|l42|auto5|lee_enfield puts that gun, loaded, in the first slot
+    // (FPS_GUN2 the second); FPS_INVENTORY=1 opens the inventory. (FPS_AIM=1, read by the gun, holds it on its sights.)
+    if *frame == 100 {
+        let kind_of = |name: &str| match name {
+            "hi_power" => Some(crate::weapons::WeaponKind::HiPower),
+            "slr" => Some(crate::weapons::WeaponKind::Slr),
+            "bren" => Some(crate::weapons::WeaponKind::Bren),
+            "mag" => Some(crate::weapons::WeaponKind::Mag),
+            "l42" => Some(crate::weapons::WeaponKind::L42),
+            "auto5" => Some(crate::weapons::WeaponKind::Auto5),
+            "lee_enfield" => Some(crate::weapons::WeaponKind::LeeEnfield),
+            "sterling" => Some(crate::weapons::WeaponKind::Sterling),
+            _ => None,
+        };
+        for (slot, var) in [(0usize, "FPS_GUN"), (1, "FPS_GUN2")] {
+            if let Some(kind) = std::env::var(var).ok().and_then(|n| kind_of(&n)) {
+                let gun = inventory.make_gun(kind, kind.def().default_ammo, kind.def().magazine);
+                inventory.slots[slot] = Some(gun);
+            }
+        }
+        if std::env::var("FPS_INVENTORY").is_ok() {
+            screen.open = true;
         }
     }
     // FPS_AT=x,z stands anywhere (FPS_YAW turns, FPS_PITCH tips).

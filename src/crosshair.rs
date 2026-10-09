@@ -76,21 +76,33 @@ fn spawn_ammo_counter(mut commands: Commands) {
 }
 
 /// What the ammo counter says: the rounds left in the magazine, or that a reload is going.
-pub fn ammo_text(ammo: u32, capacity: u32, reloading: bool) -> String {
+pub fn ammo_text(ammo: u32, reserve: u32, reloading: bool) -> String {
     if reloading {
         "RELOADING".to_string()
+    } else if ammo == 0 && reserve == 0 {
+        "0 / 0   NO AMMO".to_string()
     } else if ammo == 0 {
         // Nothing left to do but reload.
-        format!("0 / {capacity}   R")
+        format!("0 / {reserve}   R")
     } else {
-        format!("{ammo} / {capacity}")
+        format!("{ammo} / {reserve}")
     }
 }
 
-fn update_ammo_counter(guns: Query<&Gun>, mut counters: Query<(&mut Text, &mut TextColor), With<AmmoCounter>>) {
+fn update_ammo_counter(guns: Query<&Gun>, inventory: Res<crate::inventory::Inventory>, mut counters: Query<(&mut Text, &mut TextColor), With<AmmoCounter>>) {
     let Ok(gun) = guns.single() else { return };
     for (mut text, mut colour) in &mut counters {
-        let shown = ammo_text(gun.ammo, gun.def().magazine, gun.reloading());
+        if gun.holstered {
+            if !text.0.is_empty() {
+                text.0.clear();
+            }
+            continue;
+        }
+        let reserve = inventory.rounds(gun.selected);
+        // Which gun, with what, and how the trigger is set; a second line under the count.
+        let load = gun.selected.def().short;
+        let mode = if gun.def().modes.len() > 1 { format!("  {}", gun.mode.name()) } else { String::new() };
+        let shown = format!("{}\n{}  {}{}", ammo_text(gun.ammo, reserve, gun.reloading()), gun.def().name, load, mode);
         if text.0 != shown {
             text.0 = shown;
         }
@@ -140,9 +152,10 @@ mod tests {
 
     #[test]
     fn the_ammo_counter_reads_rounds_or_reloading() {
-        assert_eq!(ammo_text(30, 30, false), "30 / 30");
-        assert_eq!(ammo_text(7, 30, false), "7 / 30");
+        assert_eq!(ammo_text(30, 120, false), "30 / 120");
+        assert_eq!(ammo_text(7, 0, false), "7 / 0");
         assert_eq!(ammo_text(7, 30, true), "RELOADING");
+        assert!(ammo_text(0, 0, false).contains("NO AMMO"));
         assert!(ammo_text(0, 30, false).ends_with('R'), "an empty magazine says how to reload");
     }
 

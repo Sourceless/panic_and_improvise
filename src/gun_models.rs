@@ -149,7 +149,7 @@ fn slr() -> GunModel {
     // The receiver, its cover and the aperture sight on the back of it.
     slab(&mut metal, Vec3::new(0.0, -0.002, -0.14), Vec3::new(0.04, 0.06, 0.26));
     slab(&mut metal, Vec3::new(0.0, 0.034, -0.15), Vec3::new(0.032, 0.012, 0.22));
-    slab(&mut metal, Vec3::new(0.0, 0.045, -0.002), Vec3::new(0.016, 0.022, 0.012));
+    slab(&mut metal, Vec3::new(0.0, 0.0355, -0.002), Vec3::new(0.016, 0.011, 0.012));
     metal.add_ring(Vec3::new(0.0, 0.052, 0.0), 0.011, 0.0035, 0.004, 14, NONE);
     slab(&mut dark, Vec3::new(0.0207, 0.008, -0.1), Vec3::new(0.001, 0.014, 0.07));
     // The barrel, the gas tube above it and the gas block.
@@ -163,7 +163,7 @@ fn slr() -> GunModel {
     }
     // The front sight: a blade in a hood on a post.
     slab(&mut metal, Vec3::new(0.0, 0.03, -0.555), Vec3::new(0.006, 0.05, 0.012));
-    metal.add_ring(Vec3::new(0.0, 0.048, -0.56), 0.011, 0.0085, 0.01, 12, NONE);
+    metal.add_ring(Vec3::new(0.0, 0.052, -0.56), 0.011, 0.0085, 0.01, 12, NONE);
     // The wooden hand guard and fore end.
     slab(&mut wood, Vec3::new(0.0, -0.003, -0.38), Vec3::new(0.044, 0.048, 0.22));
     slab(&mut wood, Vec3::new(0.0, 0.026, -0.38), Vec3::new(0.034, 0.012, 0.22));
@@ -233,8 +233,8 @@ fn mag() -> GunModel {
     slab(&mut metal, Vec3::new(0.0, 0.055, -0.19), Vec3::new(0.068, 0.026, 0.3));
     slab(&mut dark, Vec3::new(0.0, 0.0695, -0.19), Vec3::new(0.05, 0.002, 0.2));
     // The sights: a leaf on the cover and a blade on the barrel.
-    slab(&mut metal, Vec3::new(0.0, 0.082, -0.07), Vec3::new(0.012, 0.03, 0.014));
-    metal.add_ring(Vec3::new(0.0, 0.092, -0.07), 0.01, 0.0035, 0.004, 14, NONE);
+    slab(&mut metal, Vec3::new(0.0, 0.06, -0.07), Vec3::new(0.012, 0.012, 0.014));
+    metal.add_ring(Vec3::new(0.0, 0.0775, -0.07), 0.01, 0.0035, 0.004, 14, NONE);
     slab(&mut metal, Vec3::new(0.0, 0.0445, -0.82), Vec3::new(0.006, 0.062, 0.012));
     metal.add_ring(Vec3::new(0.0, 0.0775, -0.82), 0.0105, 0.008, 0.01, 12, NONE);
     // The barrel with a carrying handle, the flash hider, and the gas cylinder beneath.
@@ -261,7 +261,7 @@ fn mag() -> GunModel {
     slab(&mut metal, Vec3::new(0.0, -0.052, -0.04), Vec3::new(0.008, 0.006, 0.08));
     slab(&mut black, Vec3::new(0.0, -0.01, 0.17), Vec3::new(0.062, 0.1, 0.24));
     slab(&mut black, Vec3::new(0.0, -0.01, 0.298), Vec3::new(0.066, 0.108, 0.016));
-    let spec = ModelSpec { muzzle: Vec3::new(0.0, 0.0, -0.985), sight_x: 0.0, sight_y: 0.092, rear_z: -0.07, front_z: -0.82, eye_relief: 0.16 };
+    let spec = ModelSpec { muzzle: Vec3::new(0.0, 0.0, -0.985), sight_x: 0.0, sight_y: 0.0775, rear_z: -0.07, front_z: -0.82, eye_relief: 0.16 };
     finish_model(spec, vec![(Finish::Metal, metal), (Finish::Black, black), (Finish::Dark, dark), (Finish::Olive, olive)])
 }
 
@@ -308,11 +308,11 @@ fn bolt_rifle(scoped: bool) -> GunModel {
         (sight_y, rear_z, front_z, eye_relief) = (0.065, 0.097, -0.4, 0.07);
     } else {
         // A flip-up aperture on the receiver's bridge and a blade between protecting ears at the muzzle.
-        slab(&mut metal, Vec3::new(0.0, 0.04, -0.015), Vec3::new(0.014, 0.02, 0.012));
+        slab(&mut metal, Vec3::new(0.0, 0.0325, -0.015), Vec3::new(0.014, 0.011, 0.012));
         metal.add_ring(Vec3::new(0.0, 0.049, -0.015), 0.011, 0.0035, 0.004, 14, NONE);
-        slab(&mut metal, Vec3::new(0.0, 0.017, muzzle + 0.04), Vec3::new(0.007, 0.028, 0.012));
+        slab(&mut metal, Vec3::new(0.0, 0.0245, muzzle + 0.04), Vec3::new(0.005, 0.049, 0.012));
         for side in [-1.0f32, 1.0] {
-            slab(&mut metal, Vec3::new(side * 0.011, 0.02, muzzle + 0.04), Vec3::new(0.003, 0.034, 0.012));
+            slab(&mut metal, Vec3::new(side * 0.011, 0.026, muzzle + 0.04), Vec3::new(0.003, 0.052, 0.012));
         }
         (sight_y, rear_z, front_z, eye_relief) = (0.049, -0.015, muzzle + 0.04, 0.2);
     }
@@ -334,14 +334,14 @@ fn auto5() -> GunModel {
     let (mut metal, mut black, mut dark, mut wood) = (Parts::default(), Parts::default(), Parts::default(), Parts::default());
     // The receiver and its hump, the carrier below.
     slab(&mut metal, Vec3::new(0.0, -0.004, -0.12), Vec3::new(0.04, 0.066, 0.26));
-    tilted(&mut metal, Vec3::new(0.0, 0.03, 0.04), Vec3::new(0.036, 0.05, 0.14), 0.12);
+    tilted(&mut metal, Vec3::new(0.0, 0.0105, 0.04), Vec3::new(0.036, 0.05, 0.14), 0.12);
     slab(&mut dark, Vec3::new(0.0207, 0.002, -0.12), Vec3::new(0.001, 0.016, 0.07));
     // The barrel with its rib, the tube below it, the clamp between, the muzzle bead.
     barrel(&mut metal, 0.0, -0.78, -0.25, 0.013);
     slab(&mut metal, Vec3::new(0.0, 0.0165, -0.52), Vec3::new(0.009, 0.004, 0.53));
     barrel(&mut metal, -0.034, -0.73, -0.25, 0.0115);
     slab(&mut metal, Vec3::new(0.0, -0.016, -0.7), Vec3::new(0.014, 0.036, 0.018));
-    slab(&mut metal, Vec3::new(0.0, 0.0195, -0.775), Vec3::new(0.004, 0.006, 0.006));
+    slab(&mut metal, Vec3::new(0.0, 0.0335, -0.775), Vec3::new(0.004, 0.037, 0.006));
     // The wooden fore end round the tube.
     slab(&mut wood, Vec3::new(0.0, -0.034, -0.42), Vec3::new(0.05, 0.05, 0.25));
     // The trigger guard and a pistol-grip wrist, the stock with its comb and butt pad.
@@ -351,7 +351,7 @@ fn auto5() -> GunModel {
     slab(&mut black, Vec3::new(0.0, -0.075, 0.51), Vec3::new(0.044, 0.125, 0.014));
     // The cocking handle, small, on the right of the bolt.
     slab(&mut metal, Vec3::new(0.026, 0.01, -0.02), Vec3::new(0.012, 0.01, 0.02));
-    let spec = ModelSpec { muzzle: Vec3::new(0.0, 0.0, -0.785), sight_x: 0.0, sight_y: 0.0575, rear_z: 0.0, front_z: -0.775, eye_relief: 0.17 };
+    let spec = ModelSpec { muzzle: Vec3::new(0.0, 0.0, -0.785), sight_x: 0.0, sight_y: 0.052, rear_z: 0.0, front_z: -0.775, eye_relief: 0.17 };
     finish_model(spec, vec![(Finish::Metal, metal), (Finish::Black, black), (Finish::Dark, dark), (Finish::Wood, wood)])
 }
 

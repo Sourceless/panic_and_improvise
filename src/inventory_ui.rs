@@ -109,7 +109,7 @@ fn hover_at(layout: &Layout, p: egui::Pos2) -> Option<Hover> {
 
 fn item_label(item: &Item) -> String {
     match item.kind {
-        ItemKind::Ammo(a) => format!("{} x{}", a.def().short, item.count),
+        ItemKind::Ammo(a) => format!("{}\n{}", a.def().short, item.count),
         ItemKind::Weapon(w) => {
             let load = item.loaded_with.map_or("", |a| a.def().short);
             format!("{}\n{}/{} {}", w.def().name, item.loaded, w.def().magazine, load)
@@ -130,8 +130,11 @@ fn paint_item(painter: &egui::Painter, rect: egui::Rect, item: &Item, faded: boo
     }
     painter.rect_filled(rect.shrink(2.0), 4.0, fill);
     painter.rect_stroke(rect.shrink(2.0), 4.0, egui::Stroke::new(1.5, egui::Color32::from_gray(25)), egui::StrokeKind::Inside);
-    let size = if matches!(item.kind, ItemKind::Ammo(_)) { 12.0 } else { 13.0 };
-    painter.text(rect.center(), egui::Align2::CENTER_CENTER, item_label(item), egui::FontId::proportional(size), egui::Color32::WHITE);
+    // The label, wrapped to the item's width, in the middle of it.
+    let size = if matches!(item.kind, ItemKind::Ammo(_)) { 11.0 } else { 13.0 };
+    let galley = painter.layout(item_label(item), egui::FontId::proportional(size), egui::Color32::WHITE, (rect.width() - 6.0).max(10.0));
+    let at = rect.center() - galley.size() * 0.5;
+    painter.galley(at, galley, egui::Color32::WHITE);
 }
 
 fn paint_container(painter: &egui::Painter, rect: egui::Rect, container: &Container, held: Option<u32>) {

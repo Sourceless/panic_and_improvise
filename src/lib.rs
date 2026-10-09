@@ -17,6 +17,7 @@ pub mod inventory_ui;
 pub mod gun_state;
 pub mod ground_textures;
 pub mod gun_model;
+pub mod hud;
 pub mod gun_models;
 pub mod look;
 pub mod loot;
@@ -26,6 +27,8 @@ pub mod menu;
 pub mod mipmaps;
 pub mod muzzle_flash;
 pub mod params;
+pub mod pickup;
+pub mod range;
 pub mod perf;
 pub mod player;
 pub mod road_material;
@@ -84,6 +87,8 @@ impl Plugin for GamePlugin {
             player::PlayerPlugin,
             footsteps::FootstepsPlugin,
             loot::LootPlugin,
+            pickup::PickupPlugin,
+            range::RangePlugin,
             weapon::WeaponPlugin,
             collision::CollisionPlugin,
             controls::ControlsPlugin::default(),

@@ -39,6 +39,8 @@ pub enum Command {
     MenuStartRebind(Action),
     MenuSave,
     RemoveDummies,
+    /// Take every round out of the pockets.
+    EmptyPockets,
     /// Put something solid in the test room.
     AddSolid(fps_prototype::collision::Solid),
     AddCanopy(fps_prototype::collision::Canopy),
@@ -98,6 +100,14 @@ pub struct Snapshot {
     pub ammo: u32,
     pub reloading: bool,
     pub gun_lowered: f32,
+    /// Which gun is in hand (empty if none), what it is loaded with, how many rounds of the load chosen for the next
+    /// reload are carried, how its trigger is set, and whether the inventory screen is open.
+    pub gun_name: String,
+    pub loaded_with: String,
+    pub next_load: String,
+    pub reserve: u32,
+    pub fire_mode: String,
+    pub inventory_open: bool,
     /// Where the bolt rests when the gun is at rest, and how long the current reload will take.
     pub bolt: Option<fps_prototype::gun_state::Bolt>,
     pub reload_seconds: f32,
@@ -265,6 +275,9 @@ fn logical_key(code: KeyCode) -> Key {
         KeyCode::ShiftLeft | KeyCode::ShiftRight => Key::Shift,
         KeyCode::ControlLeft | KeyCode::ControlRight => Key::Control,
         KeyCode::Escape => Key::Escape,
+        KeyCode::Tab => Key::Tab,
+        KeyCode::Digit1 => Key::Character("1".into()),
+        KeyCode::Digit2 => Key::Character("2".into()),
         other => match format!("{other:?}").strip_prefix("Key") {
             Some(letter) if letter.len() == 1 => Key::Character(letter.to_lowercase().into()),
             _ => Key::Unidentified(NativeKey::Unidentified),
@@ -345,6 +358,10 @@ fn drive(world: &mut World) {
                 for dummy in dummies {
                     world.despawn(dummy);
                 }
+            }
+            Command::EmptyPockets => {
+                let mut inventory = world.resource_mut::<fps_prototype::inventory::Inventory>();
+                inventory.pockets.items.clear();
             }
             Command::SetCursorCaptured(captured) => set_cursor(world, captured),
             Command::LoadRoom => load_room(world),
@@ -477,6 +494,24 @@ fn take_snapshot(world: &mut World) -> Snapshot {
         .iter(world)
         .next()
         .map_or((0, false, 0.0, None, 0.0), |g| (g.ammo, g.reloading(), g.lowered, g.bolt(), g.reload_seconds()));
+    let (gun_name, loaded_with, next_load, reserve, fire_mode) = {
+        let inventory = world.resource::<fps_prototype::inventory::Inventory>().clone();
+        world
+            .query::<&Gun>()
+            .iter(world)
+            .next()
+            .map(|g| {
+                (
+                    if g.holstered { String::new() } else { g.def().name.to_string() },
+                    g.loaded.def().name.to_string(),
+                    g.selected.def().name.to_string(),
+                    inventory.rounds(g.selected),
+                    g.mode.name().to_string(),
+                )
+            })
+            .unwrap_or_default()
+    };
+    let inventory_open = world.resource::<fps_prototype::inventory_ui::InventoryScreen>().open;
     let impacts = world.get_resource::<fps_prototype::impact::ImpactStats>().copied().unwrap_or_default();
     let holes_live = world.query::<&fps_prototype::impact::BulletHole>().iter(world).count();
     let holes_on_target = {
@@ -521,6 +556,12 @@ fn take_snapshot(world: &mut World) -> Snapshot {
         ammo,
         reloading,
         gun_lowered,
+        gun_name,
+        loaded_with,
+        next_load,
+        reserve,
+        fire_mode,
+        inventory_open,
         stance,
         eye_height,
         ground_speed,

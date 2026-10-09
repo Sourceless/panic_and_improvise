@@ -634,7 +634,9 @@ fn sync_with_inventory(
             gun.holstered = false;
         }
     }
-    *visibility = if gun.holstered { Visibility::Hidden } else { Visibility::Inherited };
+    // With a telescope up to the eye the gun itself is out of sight.
+    let looking_through = gun.def().scope.is_some() && gun.aim_blend > 0.9;
+    *visibility = if gun.holstered || looking_through { Visibility::Hidden } else { Visibility::Inherited };
 }
 
 /// Puts the model of the gun in hand on the gun entity, when it isn't the one that's there: the old
@@ -745,6 +747,10 @@ fn aim(
     }
     if !captured {
         gun.aiming = false;
+    }
+    // (A development switch: FPS_AIM holds the gun on its sights, for screenshots.)
+    if std::env::var_os("FPS_AIM").is_some() && !gun.reloading() {
+        gun.aiming = true;
     }
     let target = if gun.aiming { 1.0 } else { 0.0 };
     gun.aim_blend += (target - gun.aim_blend) * (1.0 - (-gun.def().handling.aim_rate * time.delta_secs()).exp());

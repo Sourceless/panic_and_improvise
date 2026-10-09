@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use crate::building::geom::{Layer, Model};
 use crate::building::{self, Site};
 use crate::collision::Colliders;
-use crate::loot::{LootAssets, LootBox};
+use crate::loot::{roll_item, spot_numbers, LootAssets, LootBox, Pickup, TakenLoot};
 use crate::map::TerrainMap;
 use crate::settlement_plan::{footprint_points, Building, Rng, SettlementPlan};
 
@@ -116,6 +116,7 @@ fn stream_interiors(
     camera: Query<&GlobalTransform, With<Camera3d>>,
     mut meshes: ResMut<Assets<Mesh>>,
     loot: Option<Res<LootAssets>>,
+    taken: Res<TakenLoot>,
 ) {
     let (Some(mut buildings), Ok(eye)) = (buildings, camera.single()) else { return };
     buildings.since_look += time.delta_secs();
@@ -155,7 +156,7 @@ fn stream_interiors(
             }
         }
     }
-    for entry in &mut buildings.entries {
+    for (index, entry) in buildings.entries.iter_mut().enumerate() {
         let distance = Vec2::new(entry.origin.x - here.x, entry.origin.z - here.z).length();
         match entry.interior {
             None if distance < INTERIOR_SHOW && entry.model.has(Layer::Interior) => {
@@ -170,10 +171,15 @@ fn stream_interiors(
                 // The loot lying about inside, in the building's own frame.
                 if let Some(loot) = &loot {
                     commands.entity(id).with_children(|parent| {
-                        for &(at, rarity) in &entry.model.loot {
+                        for (spot, &(at, rarity)) in entry.model.loot.iter().enumerate() {
+                            // What was picked up stays picked up.
+                            if taken.0.contains(&(index, spot)) {
+                                continue;
+                            }
                             let size = rarity.size();
                             parent.spawn((
                                 LootBox { rarity },
+                                Pickup { rarity, found: roll_item(rarity, spot_numbers(index, spot)), spot: (index, spot) },
                                 Mesh3d(loot.mesh.clone()),
                                 MeshMaterial3d(loot.material(rarity)),
                                 Transform::from_translation(at + Vec3::Y * (size * 0.5 + 0.03)).with_scale(Vec3::splat(size)),

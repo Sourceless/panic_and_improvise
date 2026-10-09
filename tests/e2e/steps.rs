@@ -267,6 +267,9 @@ fn key_named(name: &str) -> KeyCode {
         "X" => KeyCode::KeyX,
         "Y" => KeyCode::KeyY,
         "Z" => KeyCode::KeyZ,
+        "1" => KeyCode::Digit1,
+        "2" => KeyCode::Digit2,
+        "Tab" => KeyCode::Tab,
         "Space" => KeyCode::Space,
         "Shift" => KeyCode::ShiftLeft,
         "Ctrl" => KeyCode::ControlLeft,
@@ -275,8 +278,8 @@ fn key_named(name: &str) -> KeyCode {
     }
 }
 
-#[given(regex = r"^I press ([A-Za-z]+)$")]
-#[when(regex = r"^I press ([A-Za-z]+)$")]
+#[given(regex = r"^I press ([A-Za-z0-9]+)$")]
+#[when(regex = r"^I press ([A-Za-z0-9]+)$")]
 fn press_key(_world: &mut GameWorld, name: String) {
     step_pause();
     send(Command::TapKey(key_named(&name)));
@@ -851,4 +854,61 @@ fn have_not_moved(_world: &mut GameWorld) {
     std::thread::sleep(Duration::from_secs(1));
     let (x, z) = snapshot().player;
     assert!(x.abs() < 0.05 && z.abs() < 0.05, "moved to ({x}, {z})");
+}
+
+#[then(regex = r"^the gun in hand is the (.+)$")]
+fn gun_in_hand(_world: &mut GameWorld, name: String) {
+    let ok = wait_for(Duration::from_secs(3), || snapshot().gun_name == name);
+    assert!(ok, "the gun in hand is {:?}, not {name}", snapshot().gun_name);
+}
+
+#[then("my hands are empty")]
+fn hands_empty(_world: &mut GameWorld) {
+    let ok = wait_for(Duration::from_secs(3), || snapshot().gun_name.is_empty());
+    assert!(ok, "something is in hand: {}", snapshot().gun_name);
+}
+
+#[given(regex = r"^I have (\d+) spare rounds$")]
+#[then(regex = r"^I have (\d+) spare rounds$")]
+fn spare_rounds(_world: &mut GameWorld, rounds: u32) {
+    let ok = wait_for(Duration::from_secs(3), || snapshot().reserve == rounds);
+    assert!(ok, "there are {} spare rounds, not {rounds}", snapshot().reserve);
+}
+
+#[given("I have no spare rounds")]
+fn no_spare_rounds(_world: &mut GameWorld) {
+    send(Command::EmptyPockets);
+    let ok = wait_for(Duration::from_secs(3), || snapshot().reserve == 0);
+    assert!(ok, "still {} spare rounds", snapshot().reserve);
+}
+
+#[then(regex = r"^the next reload puts in (.+)$")]
+fn next_load_is(_world: &mut GameWorld, name: String) {
+    let ok = wait_for(Duration::from_secs(3), || snapshot().next_load == name);
+    assert!(ok, "the next load is {:?}, not {name}", snapshot().next_load);
+}
+
+#[then(regex = r"^the gun is loaded with (.+)$")]
+fn gun_loaded_with(_world: &mut GameWorld, name: String) {
+    let ok = wait_for(Duration::from_secs(3), || snapshot().loaded_with == name);
+    assert!(ok, "loaded with {:?}, not {name}", snapshot().loaded_with);
+}
+
+#[then(regex = r"^the trigger is set to (semi|auto)$")]
+fn trigger_set(_world: &mut GameWorld, mode: String) {
+    let ok = wait_for(Duration::from_secs(3), || snapshot().fire_mode == mode);
+    assert!(ok, "the trigger is set to {}, not {mode}", snapshot().fire_mode);
+}
+
+#[then("the inventory is open and the mouse is free")]
+fn inventory_open(_world: &mut GameWorld) {
+    let ok = wait_for(Duration::from_secs(3), || snapshot().inventory_open && !snapshot().cursor_captured);
+    let s = snapshot();
+    assert!(ok, "inventory open: {}, cursor captured: {}", s.inventory_open, s.cursor_captured);
+}
+
+#[then("the inventory is closed")]
+fn inventory_closed(_world: &mut GameWorld) {
+    let ok = wait_for(Duration::from_secs(3), || !snapshot().inventory_open);
+    assert!(ok, "the inventory is still open");
 }
