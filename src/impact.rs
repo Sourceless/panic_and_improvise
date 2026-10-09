@@ -239,6 +239,7 @@ pub enum ThumpKind {
     Target,
     Stone,
     Metal,
+    Splash,
 }
 
 /// Everything about what a bullet does on one kind of surface.
@@ -278,12 +279,12 @@ pub fn look(surface: Surface, y: f32) -> Look {
             hole: None,
             hole_size: (0.0, 0.0),
             chip: ChipKind::Droplet,
-            chips: (8.0, 13.0),
-            puffs: 3,
-            dust: Color::srgba(0.85, 0.9, 0.95, 0.35),
-            thump: ThumpKind::Dirt,
-            pitch: (0.6, 0.72),
-            volume: 0.55,
+            chips: (28.0, 40.0),
+            puffs: 5,
+            dust: Color::srgba(0.9, 0.94, 0.98, 0.5),
+            thump: ThumpKind::Splash,
+            pitch: (0.92, 1.1),
+            volume: 0.9,
         },
         Surface::Target => Look {
             hole: Some(HoleStyle::Wood),
@@ -369,13 +370,15 @@ pub struct ImpactAssets {
     pub target_sounds: Vec<Handle<AudioSource>>,
     pub stone_sounds: Vec<Handle<AudioSource>>,
     pub metal_sounds: Vec<Handle<AudioSource>>,
+    pub splash_sounds: Vec<Handle<AudioSource>>,
+    ring_mesh: Handle<Mesh>,
     rng: Rng,
     holes: VecDeque<Entity>,
 }
 
 impl ImpactAssets {
     pub fn sounds(&self) -> impl Iterator<Item = &Handle<AudioSource>> {
-        self.dirt_sounds.iter().chain(&self.target_sounds).chain(&self.stone_sounds).chain(&self.metal_sounds)
+        self.dirt_sounds.iter().chain(&self.target_sounds).chain(&self.stone_sounds).chain(&self.metal_sounds).chain(&self.splash_sounds)
     }
 
     fn thumps(&self, kind: ThumpKind) -> &[Handle<AudioSource>] {
@@ -384,6 +387,7 @@ impl ImpactAssets {
             ThumpKind::Target => &self.target_sounds,
             ThumpKind::Stone => &self.stone_sounds,
             ThumpKind::Metal => &self.metal_sounds,
+            ThumpKind::Splash => &self.splash_sounds,
         }
     }
 }
@@ -523,6 +527,8 @@ fn load_assets(
         target_sounds: sounds("target", 2),
         stone_sounds: sounds("stone", 2),
         metal_sounds: sounds("metal", 2),
+        splash_sounds: sounds("splash", 3),
+        ring_mesh: meshes.add(Annulus::new(0.82, 1.0)),
         rng: Rng(0x2545_F491),
         holes: VecDeque::new(),
     });
@@ -605,7 +611,7 @@ fn spawn_impacts(
             kind => assets.chip_materials[&kind].clone(),
         };
         // A faster bullet throws things harder (a bullet from far off lands slowly).
-        let energy = (impact.speed / 350.0).clamp(0.4, 1.2);
+        let energy = (impact.speed / 350.0).clamp(0.4, 1.2) * if impact.surface == Surface::Water { 1.35 } else { 1.0 };
         // Sparks fly fast and are gone almost at once.
         let (pace, span) = if look.chip == ChipKind::Spark { (1.5, 0.3) } else { (1.0, 1.0) };
         for chip in chips(impact.normal, energy * pace, count, &mut rng) {
@@ -615,15 +621,31 @@ fn spawn_impacts(
             chip_count += 1;
             stats.chips += 1;
             let life = chip.life * span;
+            // Drops of water are bigger than grains of dirt.
+            let size = if look.chip == ChipKind::Droplet { chip.size * 2.2 } else { chip.size };
             commands.spawn((
-                Chipping { velocity: chip.velocity, life, total: life, size: chip.size },
+                Chipping { velocity: chip.velocity, life, total: life, size },
                 Mesh3d(assets.chip_mesh.clone()),
                 MeshMaterial3d(material.clone()),
                 Transform::from_translation(impact.position + impact.normal * 0.02)
-                    .with_scale(Vec3::splat(chip.size))
+                    .with_scale(Vec3::splat(size))
                     .with_rotation(Quat::from_euler(EulerRot::XYZ, rng.next() * 6.0, rng.next() * 6.0, rng.next() * 6.0)),
                 NotShadowCaster,
             ));
+        }
+
+        // Rings spreading out across the water.
+        if impact.surface == Surface::Water {
+            for (delay, reach) in [(0.0, 1.6), (0.14, 1.1), (0.3, 0.7)] {
+                let material = materials.add(StandardMaterial { base_color: Color::srgba(0.92, 0.96, 1.0, 0.0), alpha_mode: AlphaMode::Blend, unlit: true, ..default() });
+                commands.spawn((
+                    Ripple { age: -delay, total: 1.1, reach: reach * rng.range(0.85, 1.15), material: material.clone() },
+                    Mesh3d(assets.ring_mesh.clone()),
+                    MeshMaterial3d(material),
+                    Transform::from_translation(impact.position + Vec3::Y * 0.03).with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)).with_scale(Vec3::ZERO),
+                    NotShadowCaster,
+                ));
+            }
         }
 
         // Puffs of dust (or mist off the water) that swell, drift with the wind and thin out.
@@ -666,6 +688,37 @@ fn spawn_impacts(
     }
 }
 
+/// A ring on the water, spreading out and fading.
+#[derive(Component)]
+pub struct Ripple {
+    /// Seconds old; negative while it waits its turn.
+    age: f32,
+    total: f32,
+    /// How wide it spreads (radius, metres).
+    reach: f32,
+    material: Handle<StandardMaterial>,
+}
+
+fn update_ripples(mut commands: Commands, time: Res<Time>, mut materials: ResMut<Assets<StandardMaterial>>, mut rings: Query<(Entity, &mut Transform, &mut Ripple)>) {
+    for (entity, mut transform, mut ring) in &mut rings {
+        ring.age += time.delta_secs();
+        if ring.age >= ring.total {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        if ring.age < 0.0 {
+            continue;
+        }
+        let t = ring.age / ring.total;
+        // Quick at first, slowing as it goes.
+        let radius = ring.reach * (1.0 - (1.0 - t).powi(2)).max(0.02);
+        transform.scale = Vec3::new(radius, radius, 1.0);
+        if let Some(mut material) = materials.get_mut(&ring.material) {
+            material.base_color = material.base_color.with_alpha(0.75 * (1.0 - t).powf(1.5));
+        }
+    }
+}
+
 const CHIP_GRAVITY: f32 = 9.8;
 const CHIP_DRAG: f32 = 1.6;
 
@@ -687,11 +740,20 @@ fn update_chips(
         transform.translation += chip.velocity * dt;
         // It tumbles as it flies.
         transform.rotate_local(Quat::from_euler(EulerRot::XYZ, 7.0 * dt, 5.0 * dt, 3.0 * dt));
-        let ground = map.surface_height_at(Vec2::new(transform.translation.x, transform.translation.z));
-        if transform.translation.y < ground + 0.01 && chip.velocity.y < 0.0 {
-            // It lands and stops where it fell, to shrink away with the rest.
-            transform.translation.y = ground + 0.01;
+        let at = Vec2::new(transform.translation.x, transform.translation.z);
+        let ground = map.surface_height_at(at);
+        // Over water, what it falls onto is the water.
+        let (floor, in_water) = match map.water_surface_at(at) {
+            Some(level) => (level, true),
+            None => (ground, false),
+        };
+        if transform.translation.y < floor + 0.01 && chip.velocity.y < 0.0 {
+            // It lands and stops where it fell, to shrink away with the rest (a drop rejoins the water at once).
+            transform.translation.y = floor + 0.01;
             chip.velocity = Vec3::ZERO;
+            if in_water {
+                chip.life = chip.life.min(0.08);
+            }
         }
         // The last third of its life it shrinks to nothing.
         let shrink = (chip.life / (chip.total * 0.35)).clamp(0.0, 1.0);
@@ -730,7 +792,7 @@ impl Plugin for ImpactPlugin {
             .init_resource::<ImpactStats>()
             .init_resource::<Wind>()
             .add_systems(Startup, load_assets)
-            .add_systems(Update, (spawn_impacts, update_chips, update_dust).chain());
+            .add_systems(Update, (spawn_impacts, update_chips, update_dust, update_ripples).chain());
     }
 }
 
