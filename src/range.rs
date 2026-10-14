@@ -6,7 +6,7 @@ use bevy::prelude::*;
 
 use crate::ammo::AMMO;
 use crate::inventory::{Inventory, ItemKind, PackKind, Supply};
-use crate::loot::{Found, LootAssets, Pickup, Rarity};
+use crate::loot::{spawn_drop, Dropped, Found, LootAssets, Lying, Rarity};
 use crate::map::TerrainMap;
 use crate::target::spawn_dummy_at;
 use crate::weapons::WeaponKind;
@@ -57,14 +57,8 @@ fn build_range(
     for (n, (kind, count, loaded)) in things.into_iter().enumerate() {
         let (row, column) = (n / PER_ROW, n % PER_ROW);
         let position = at((column as f32 - (PER_ROW as f32 - 1.0) * 0.5) * 1.5, -4.0 - row as f32 * 1.5);
-        let rarity = Rarity::Common;
-        let size = 0.3;
-        commands.spawn((
-            Pickup { rarity, found: Found { kind, count, loaded }, spot: (usize::MAX, n), slot: 0 },
-            Mesh3d(loot.mesh.clone()),
-            MeshMaterial3d(loot.material(rarity)),
-            Transform::from_translation(position + Vec3::Y * (size * 0.5 + 0.03)).with_scale(Vec3::splat(size)),
-        ));
+        let lying = Lying { drop: Dropped { rarity: Rarity::Common, found: Found { kind, count, loaded } }, at: position, yaw: 0.0 };
+        spawn_drop(&mut commands, &loot, None, &lying, (usize::MAX, n), 0);
     }
     // The targets, down the range, a little apart so that none hides another.
     for (i, distance) in DUMMY_DISTANCES.into_iter().enumerate() {

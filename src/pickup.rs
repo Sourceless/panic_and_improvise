@@ -7,7 +7,7 @@ use bevy::prelude::*;
 use crate::controls::{Action, Controls, Keyboard};
 use crate::inventory::{Inventory, Item, ItemKind};
 use crate::inventory_ui::InventoryScreen;
-use crate::loot::{drop_bundle, roll_contents, spot_numbers, Found, LootAssets, LootBox, OpenedLoot, Pickup};
+use crate::loot::{lay_contents, roll_contents, spawn_drop, spot_numbers, Found, LootAssets, LootBox, OpenedLoot, Pickup};
 use crate::menu::Menu;
 use crate::player::FpsCamera;
 
@@ -101,16 +101,14 @@ fn pick_up(
         let spot = lootbox.spot;
         let contents = roll_contents(lootbox.rarity, spot_numbers(spot.0, spot.1));
         // The box's floor: its middle sits half its height and a skin above it.
-        let floor = local.translation - Vec3::Y * (local.scale.x * 0.5 + 0.03);
-        for (slot, drop) in contents.iter().enumerate() {
-            let mut thing = commands.spawn(drop_bundle(&assets, floor, spot, slot, contents.len(), *drop));
-            if let Some(parent) = parent {
-                thing.insert(ChildOf(parent.parent()));
-            }
+        let floor = local.translation.y - (local.scale.x * 0.5 + 0.03);
+        let lying = lay_contents(&assets, &lootbox.room, floor, &contents);
+        for (slot, thing) in lying.iter().enumerate() {
+            spawn_drop(&mut commands, &assets, parent.map(|p| p.parent()), thing, spot, slot);
         }
         prompt.message = format!("Opened the box: {} things fall out.", contents.len());
         prompt.message_time = 3.0;
-        opened.0.insert(spot, contents.into_iter().map(Some).collect());
+        opened.0.insert(spot, lying.into_iter().map(Some).collect());
         commands.entity(entity).despawn();
         return;
     }
@@ -132,8 +130,8 @@ fn pick_up(
             // Some of the rounds fitted: the rest stay where they are.
             prompt.message = format!("Took some; no room for the other {} rounds.", left.count);
             pickup.found.count = left.count;
-            if let Some(Some(drop)) = opened.0.get_mut(&pickup.spot).and_then(|d| d.get_mut(pickup.slot)) {
-                drop.found.count = left.count;
+            if let Some(Some(lying)) = opened.0.get_mut(&pickup.spot).and_then(|d| d.get_mut(pickup.slot)) {
+                lying.drop.found.count = left.count;
             }
         }
         Err(_) => prompt.message = format!("No room for {}.", describe(&pickup.found)),

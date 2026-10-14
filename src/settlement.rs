@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use crate::building::geom::{Layer, Model};
 use crate::building::{self, Site};
 use crate::collision::Colliders;
-use crate::loot::{drop_bundle, LootAssets, LootBox, OpenedLoot};
+use crate::loot::{spawn_drop, LootAssets, LootBox, OpenedLoot, Spin};
 use crate::map::TerrainMap;
 use crate::settlement_plan::{footprint_points, Building, Rng, SettlementPlan};
 
@@ -170,26 +170,26 @@ fn stream_interiors(
                     .id();
                 // The loot lying about inside, in the building's own frame.
                 if let Some(loot) = &loot {
-                    commands.entity(id).with_children(|parent| {
-                        for (spot, &(at, rarity)) in entry.model.loot.iter().enumerate() {
-                            // A box that was opened stays open, with what has not been taken still lying round it.
-                            if let Some(drops) = opened.0.get(&(index, spot)) {
-                                for (slot, drop) in drops.iter().enumerate() {
-                                    if let Some(drop) = drop {
-                                        parent.spawn(drop_bundle(loot, at, (index, spot), slot, drops.len(), *drop));
-                                    }
+                    for (spot, lootspot) in entry.model.loot.iter().enumerate() {
+                        // A box that was opened stays open, with what has not been taken still lying where it fell.
+                        if let Some(lying) = opened.0.get(&(index, spot)) {
+                            for (slot, thing) in lying.iter().enumerate() {
+                                if let Some(thing) = thing {
+                                    spawn_drop(&mut commands, loot, Some(id), thing, (index, spot), slot);
                                 }
-                                continue;
                             }
-                            let size = rarity.size();
-                            parent.spawn((
-                                LootBox { rarity, spot: (index, spot) },
-                                Mesh3d(loot.mesh.clone()),
-                                MeshMaterial3d(loot.material(rarity)),
-                                Transform::from_translation(at + Vec3::Y * (size * 0.5 + 0.03)).with_scale(Vec3::splat(size)),
-                            ));
+                            continue;
                         }
-                    });
+                        let size = lootspot.rarity.size();
+                        commands.spawn((
+                            LootBox { rarity: lootspot.rarity, spot: (index, spot), room: lootspot.room },
+                            Spin,
+                            Mesh3d(loot.mesh.clone()),
+                            MeshMaterial3d(loot.material(lootspot.rarity)),
+                            Transform::from_translation(lootspot.at + Vec3::Y * (size * 0.5 + 0.03)).with_scale(Vec3::splat(size)),
+                            ChildOf(id),
+                        ));
+                    }
                 }
                 entry.interior = Some(id);
             }

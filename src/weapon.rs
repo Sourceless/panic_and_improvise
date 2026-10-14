@@ -450,6 +450,19 @@ pub struct BulletAssets {
 #[derive(Component)]
 pub struct GunMesh;
 
+/// What a finish looks like: blued steel, black plastic, the dark of holes, wood, olive paint, glass.
+pub fn finish_material(finish: Finish) -> StandardMaterial {
+    let plain = |color: Color, roughness: f32, metallic: f32| StandardMaterial { base_color: color, perceptual_roughness: roughness, metallic, ..default() };
+    match finish {
+        Finish::Metal => plain(Color::srgb(0.13, 0.135, 0.145), 0.45, 0.75),
+        Finish::Black => plain(Color::srgb(0.035, 0.035, 0.04), 0.35, 0.0),
+        Finish::Dark => plain(Color::srgb(0.008, 0.008, 0.01), 0.9, 0.0),
+        Finish::Wood => plain(Color::srgb(0.2, 0.1, 0.05), 0.6, 0.0),
+        Finish::Olive => plain(Color::srgb(0.14, 0.17, 0.08), 0.6, 0.3),
+        Finish::Glass => StandardMaterial { base_color: Color::srgb(0.05, 0.08, 0.12), perceptual_roughness: 0.08, metallic: 0.3, reflectance: 0.9, ..default() },
+    }
+}
+
 pub fn spawn_gun(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -462,23 +475,7 @@ pub fn spawn_gun(
     };
 
     // Every gun's model, merged into a mesh for each finish, built once.
-    let finish = |color: Color, roughness: f32, metallic: f32| StandardMaterial {
-        base_color: color,
-        perceptual_roughness: roughness,
-        metallic,
-        ..default()
-    };
-    let finishes: HashMap<Finish, Handle<StandardMaterial>> = [
-        (Finish::Metal, finish(Color::srgb(0.13, 0.135, 0.145), 0.45, 0.75)),
-        (Finish::Black, finish(Color::srgb(0.035, 0.035, 0.04), 0.35, 0.0)),
-        (Finish::Dark, finish(Color::srgb(0.008, 0.008, 0.01), 0.9, 0.0)),
-        (Finish::Wood, finish(Color::srgb(0.2, 0.1, 0.05), 0.6, 0.0)),
-        (Finish::Olive, finish(Color::srgb(0.14, 0.17, 0.08), 0.6, 0.3)),
-        (Finish::Glass, StandardMaterial { base_color: Color::srgb(0.05, 0.08, 0.12), perceptual_roughness: 0.08, metallic: 0.3, reflectance: 0.9, ..default() }),
-    ]
-    .into_iter()
-    .map(|(f, m)| (f, materials.add(m)))
-    .collect();
+    let finishes: HashMap<Finish, Handle<StandardMaterial>> = Finish::ALL.into_iter().map(|f| (f, materials.add(finish_material(f)))).collect();
     let models: HashMap<WeaponKind, LoadedModel> = WeaponKind::ALL
         .iter()
         .map(|&kind| {

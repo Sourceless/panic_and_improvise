@@ -103,8 +103,18 @@ pub struct Model {
     pub items: Vec<Item>,
     /// Where lights hang inside, and how far each reaches: (position, range).
     pub lights: Vec<(Vec3, f32)>,
-    /// Where loot lies, in the building's frame: the middle of the underside of each box.
-    pub loot: Vec<(Vec3, crate::loot::Rarity)>,
+    /// Where loot lies, in the building's frame.
+    pub loot: Vec<LootSpot>,
+}
+
+/// A box of loot: where it is, how rare, and the clear space it opens onto.
+#[derive(Clone, Copy, Debug)]
+pub struct LootSpot {
+    /// The middle of the underside of the box.
+    pub at: Vec3,
+    pub rarity: crate::loot::Rarity,
+    /// The part of the surface it stands on that is clear for what falls out of it to lie on.
+    pub room: Rect,
 }
 
 impl Model {

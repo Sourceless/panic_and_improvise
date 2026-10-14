@@ -3,7 +3,7 @@
 
 use bevy::prelude::*;
 
-use super::geom::{Layer, Model, Rect};
+use super::geom::{Layer, LootSpot, Model, Rect};
 use super::plan::{Room, RoomKind, Side, Style};
 use crate::collision::Material;
 use crate::meshbake::Rgb;
@@ -182,38 +182,48 @@ fn loot_count(kind: RoomKind, area: f32) -> usize {
     (base * (0.6 + area / 30.0)).round() as usize
 }
 
+/// How much clear floor a box on the floor keeps round it, for what falls out to lie on: a square this
+/// far from the middle to each side.
+const FLOOR_ROOM: f32 = 0.8;
+/// The least a table top may measure, each way, to hold a box and what comes out of it.
+const TOP_ROOM: f32 = 0.45;
+
 /// Puts boxes of loot on tables and counters and shelves, or on the floor where there's nothing to
-/// put them on.
+/// put them on. Each has a clear space of its own, so that no two lie on top of each other and
+/// what falls out of a box lands on something, not in a wall or a chair.
 fn scatter_loot(c: &mut Ctx, kind: RoomKind, richness: f32) {
     let wanted = loot_count(kind, c.clear.area());
     for _ in 0..wanted {
         let rarity = crate::loot::Rarity::roll(c.rng.unit(), richness);
-        let size = rarity.size();
-        let on_furniture = !c.tops.is_empty() && c.rng.unit() < 0.75;
-        let at = if on_furniture {
-            let (r, top) = c.tops[(c.rng.unit() * c.tops.len() as f32) as usize % c.tops.len()];
+        let on_furniture = c.rng.unit() < 0.75;
+        let suitable: Vec<usize> = (0..c.tops.len()).filter(|&i| c.tops[i].0.width() >= TOP_ROOM && c.tops[i].0.depth() >= TOP_ROOM).collect();
+        let spot = if on_furniture && !suitable.is_empty() {
+            let i = suitable[(c.rng.unit() * suitable.len() as f32) as usize % suitable.len()];
+            let (r, top) = c.tops[i];
+            // This top is used; so is anything that overlaps it (a counter made of several pieces).
+            c.tops.retain(|(other, _)| !other.overlaps(&r.grown(0.05)));
             let m = r.centre();
-            Vec3::new(m.x + c.rng.range(-0.1, 0.1) * r.width().min(1.0), c.floor + top, m.y + c.rng.range(-0.1, 0.1) * r.depth().min(1.0))
+            let room = Rect::new(r.x0 + 0.04, r.z0 + 0.04, r.x1 - 0.04, r.z1 - 0.04);
+            Some(LootSpot { at: Vec3::new(m.x, c.floor + top, m.y), rarity, room })
         } else {
-            // On the floor, in a free spot.
-            let r = c.clear;
+            // On the floor, in a free spot, with the room it needs round it.
             let mut found = None;
-            for _ in 0..12 {
-                let x = c.rng.range(r.x0 + 0.4, (r.x1 - 0.4).max(r.x0 + 0.41));
-                let z = c.rng.range(r.z0 + 0.4, (r.z1 - 0.4).max(r.z0 + 0.41));
-                let spot = Rect::new(x - size, z - size, x + size, z + size);
-                if c.free(&spot) {
-                    c.taken.push(spot);
-                    found = Some(Vec3::new(x, c.floor, z));
+            for _ in 0..16 {
+                let r = c.clear;
+                let x = c.rng.range(r.x0 + FLOOR_ROOM, (r.x1 - FLOOR_ROOM).max(r.x0 + FLOOR_ROOM + 0.01));
+                let z = c.rng.range(r.z0 + FLOOR_ROOM, (r.z1 - FLOOR_ROOM).max(r.z0 + FLOOR_ROOM + 0.01));
+                let room = Rect::new(x - FLOOR_ROOM, z - FLOOR_ROOM, x + FLOOR_ROOM, z + FLOOR_ROOM);
+                if c.free(&room) {
+                    c.taken.push(room);
+                    found = Some(LootSpot { at: Vec3::new(x, c.floor, z), rarity, room });
                     break;
                 }
             }
-            match found {
-                Some(p) => p,
-                None => continue,
-            }
+            found
         };
-        c.model.loot.push((at, rarity));
+        if let Some(spot) = spot {
+            c.model.loot.push(spot);
+        }
     }
 }
 

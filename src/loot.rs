@@ -3,7 +3,11 @@
 
 use bevy::prelude::*;
 
+use std::collections::HashMap;
+
 use crate::ammo::AmmoKind;
+use crate::building::geom::Rect;
+use crate::gun_models::{self, Finish};
 use crate::inventory::{ItemKind, PackKind, Supply};
 use crate::settlement_plan::Rng;
 use crate::weapons::WeaponKind;
@@ -201,13 +205,46 @@ pub fn roll_contents(rarity: Rarity, mut next: impl FnMut() -> f32) -> Vec<Dropp
         .collect()
 }
 
-/// Where the `slot`th of `count` things from the box at `spot` lies, as an offset from the box's floor:
-/// spread round it, and the same every time.
-pub fn drop_offset(spot: (usize, usize), slot: usize, count: usize) -> Vec3 {
-    let turn = ((spot.0.wrapping_mul(31).wrapping_add(spot.1.wrapping_mul(17))) % 360) as f32 * std::f32::consts::TAU / 360.0;
-    let angle = turn + slot as f32 / count.max(1) as f32 * std::f32::consts::TAU;
-    let radius = 0.55 + 0.2 * (slot % 2) as f32;
-    Vec3::new(angle.cos() * radius, 0.0, angle.sin() * radius)
+/// The most that can fall out of one box.
+pub const MAX_DROPS: usize = 6;
+
+/// Where things of these `radii` (how far each reaches from its middle, metres) lie in `area`, a rectangle
+/// on a floor or a table top: clear of one another where there is room, the biggest nearest the middle, and
+/// the same every time. Anything bigger than the area is centred on it.
+pub fn lay_out(area: Rect, radii: &[f32]) -> Vec<Vec2> {
+    const GRID: f32 = 0.06;
+    const GAP: f32 = 0.02;
+    let centre = area.centre();
+    let mut order: Vec<usize> = (0..radii.len()).collect();
+    order.sort_by(|&a, &b| radii[b].total_cmp(&radii[a]).then(a.cmp(&b)));
+    let mut placed: Vec<(Vec2, f32)> = Vec::new();
+    let mut out = vec![centre; radii.len()];
+    for i in order {
+        let r = radii[i];
+        // Where its middle may be: the area less its own reach, or the middle if it will not fit.
+        let range = |lo: f32, hi: f32, mid: f32| if hi - lo >= 2.0 * r { (lo + r, hi - r) } else { (mid, mid) };
+        let (x0, x1) = range(area.x0, area.x1, centre.x);
+        let (z0, z1) = range(area.z0, area.z1, centre.y);
+        let (nx, nz) = (((x1 - x0) / GRID) as usize + 1, ((z1 - z0) / GRID) as usize + 1);
+        let mut best: Option<(f32, f32, Vec2)> = None;
+        for ix in 0..nx {
+            for iz in 0..nz {
+                let p = Vec2::new(if nx == 1 { x0 } else { x0 + (x1 - x0) * ix as f32 / (nx - 1) as f32 }, if nz == 1 { z0 } else { z0 + (z1 - z0) * iz as f32 / (nz - 1) as f32 });
+                let clearance = placed.iter().map(|&(q, qr)| p.distance(q) - r - qr - GAP).fold(f32::MAX, f32::min);
+                let from_middle = p.distance(centre);
+                // Clear places beat crowded ones; among clear places the nearest the middle; among
+                // crowded ones the least crowded.
+                let key = if clearance >= 0.0 { from_middle } else { 1000.0 - clearance };
+                if best.is_none_or(|(k, ..)| key < k) {
+                    best = Some((key, clearance, p));
+                }
+            }
+        }
+        let p = best.map_or(centre, |b| b.2);
+        out[i] = p;
+        placed.push((p, r));
+    }
+    out
 }
 
 /// A repeatable source of numbers for one spot of loot: the same spot is the same thing every time.
@@ -230,39 +267,132 @@ pub struct Pickup {
     pub slot: usize,
 }
 
+/// A thing lying where a box was opened: what it is, where (the point on the surface under it, in the
+/// frame of the building) and which way it points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lying {
+    pub drop: Dropped,
+    pub at: Vec3,
+    pub yaw: f32,
+}
+
 /// Boxes that have been opened, and what of their contents is still lying there (`None` once taken).
 #[derive(Resource, Default)]
-pub struct OpenedLoot(pub std::collections::HashMap<(usize, usize), Vec<Option<Dropped>>>);
+pub struct OpenedLoot(pub HashMap<(usize, usize), Vec<Option<Lying>>>);
 
 /// A closed box of loot lying where it was put: open it to see what is in it.
 #[derive(Component)]
 pub struct LootBox {
     pub rarity: Rarity,
     pub spot: (usize, usize),
+    /// The clear space round it for what falls out, in the frame of the building.
+    pub room: Rect,
 }
 
-/// The one box mesh and a glowing material for each rarity.
+/// Turns slowly, so as to catch the eye.
+#[derive(Component)]
+pub struct Spin;
+
+/// The one box mesh and a glowing material for each rarity, and the looks of the things that have a
+/// model (the guns), which are shown as themselves.
 #[derive(Resource)]
 pub struct LootAssets {
     pub mesh: Handle<Mesh>,
     pub materials: Vec<Handle<StandardMaterial>>,
+    pub guns: HashMap<WeaponKind, GunLook>,
+}
+
+/// A gun's model for lying about: its parts, and where the middle of its footprint is.
+pub struct GunLook {
+    pub parts: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
+    /// The middle of its footprint, in model space (x, z), and the lowest point.
+    pub middle: Vec2,
+    pub bottom: f32,
+    /// How far it reaches from that middle.
+    pub radius: f32,
+    /// Whether it is longer along z than along x.
+    pub long_in_z: bool,
 }
 
 impl LootAssets {
     pub fn material(&self, rarity: Rarity) -> Handle<StandardMaterial> {
         self.materials[rarity as usize].clone()
     }
+
+    /// How far a thing reaches from its middle as it lies.
+    pub fn radius(&self, drop: &Dropped) -> f32 {
+        match drop.found.kind {
+            ItemKind::Weapon(w) => self.guns[&w].radius,
+            _ => drop.rarity.size() * 0.7 * 0.71,
+        }
+    }
+
+    /// Which way a thing lies, in an area: a long thing along the long way of it.
+    pub fn yaw(&self, drop: &Dropped, area: &Rect) -> f32 {
+        match drop.found.kind {
+            ItemKind::Weapon(w) => {
+                let along_z = area.depth() >= area.width();
+                if along_z == self.guns[&w].long_in_z {
+                    0.0
+                } else {
+                    std::f32::consts::FRAC_PI_2
+                }
+            }
+            _ => 0.0,
+        }
+    }
 }
 
-/// A thing from an opened box, lying `floor` (the box's floor) and offset round it.
-pub fn drop_bundle(assets: &LootAssets, floor: Vec3, spot: (usize, usize), slot: usize, count: usize, drop: Dropped) -> impl Bundle {
-    let size = drop.rarity.size() * 0.7;
-    (
-        Pickup { rarity: drop.rarity, found: drop.found, spot, slot },
-        Mesh3d(assets.mesh.clone()),
-        MeshMaterial3d(assets.material(drop.rarity)),
-        Transform::from_translation(floor + drop_offset(spot, slot, count) + Vec3::Y * (size * 0.5 + 0.03)).with_scale(Vec3::splat(size)),
-    )
+/// Where the things in `contents` lie when a box is opened onto `room`, with its floor at `y`.
+pub fn lay_contents(assets: &LootAssets, room: &Rect, y: f32, contents: &[Dropped]) -> Vec<Lying> {
+    let radii: Vec<f32> = contents.iter().map(|d| assets.radius(d)).collect();
+    lay_out(*room, &radii)
+        .into_iter()
+        .zip(contents)
+        .map(|(p, d)| Lying { drop: *d, at: Vec3::new(p.x, y, p.y), yaw: assets.yaw(d, room) })
+        .collect()
+}
+
+/// Puts a thing on the ground. A gun is its own model, lying where it was put with a flat tag of its
+/// rarity's colour under it; anything else is a coloured box. `parent` is what it lies in.
+pub fn spawn_drop(commands: &mut Commands, assets: &LootAssets, parent: Option<Entity>, lying: &Lying, spot: (usize, usize), slot: usize) {
+    let drop = lying.drop;
+    let pickup = Pickup { rarity: drop.rarity, found: drop.found, spot, slot };
+    let id = match drop.found.kind {
+        ItemKind::Weapon(w) => {
+            let look = &assets.guns[&w];
+            // The root is a little above the floor so that it is easy to look at; the parts hang from it.
+            const LIFT: f32 = 0.12;
+            let id = commands.spawn((pickup, Transform::from_translation(lying.at + Vec3::Y * LIFT).with_rotation(Quat::from_rotation_y(lying.yaw)), Visibility::default())).id();
+            for (mesh, material) in &look.parts {
+                let at = Vec3::new(-look.middle.x, 0.03 - LIFT - look.bottom, -look.middle.y);
+                commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone()), Transform::from_translation(at), ChildOf(id)));
+            }
+            let tag = (look.radius * 1.1).max(0.15);
+            commands.spawn((
+                Mesh3d(assets.mesh.clone()),
+                MeshMaterial3d(assets.material(drop.rarity)),
+                Transform::from_translation(Vec3::new(0.0, 0.012 - LIFT, 0.0)).with_scale(Vec3::new(tag, 0.01, tag)),
+                ChildOf(id),
+            ));
+            id
+        }
+        _ => {
+            let size = drop.rarity.size() * 0.7;
+            commands
+                .spawn((
+                    pickup,
+                    Spin,
+                    Mesh3d(assets.mesh.clone()),
+                    MeshMaterial3d(assets.material(drop.rarity)),
+                    Transform::from_translation(lying.at + Vec3::Y * (size * 0.5 + 0.03)).with_scale(Vec3::splat(size)),
+                ))
+                .id()
+        }
+    };
+    if let Some(parent) = parent {
+        commands.entity(id).insert(ChildOf(parent));
+    }
 }
 
 pub struct LootPlugin;
@@ -276,12 +406,25 @@ impl Plugin for LootPlugin {
 fn make_assets(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>) {
     let mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
     // Lit by nothing, so that they show up in a dark cellar as well as in the sun.
-    let materials = Rarity::ALL.iter().map(|r| materials.add(StandardMaterial { base_color: r.colour(), unlit: true, ..default() })).collect();
-    commands.insert_resource(LootAssets { mesh, materials });
+    let rarity_materials = Rarity::ALL.iter().map(|r| materials.add(StandardMaterial { base_color: r.colour(), unlit: true, ..default() })).collect();
+    // The guns as they look in hand, in the same finishes.
+    let finishes: HashMap<Finish, Handle<StandardMaterial>> = Finish::ALL.into_iter().map(|f| (f, materials.add(crate::weapon::finish_material(f)))).collect();
+    let guns = WeaponKind::ALL
+        .iter()
+        .map(|&kind| {
+            let model = gun_models::build(kind);
+            let (lo, hi) = model.parts.iter().map(|(_, p)| p.bounds()).fold((Vec3::MAX, Vec3::MIN), |(lo, hi), (a, b)| (lo.min(a), hi.max(b)));
+            let middle = Vec2::new((lo.x + hi.x) * 0.5, (lo.z + hi.z) * 0.5);
+            let (width, length) = (hi.x - lo.x, hi.z - lo.z);
+            let parts = model.parts.into_iter().map(|(finish, parts)| (meshes.add(parts.into_mesh()), finishes[&finish].clone())).collect();
+            (kind, GunLook { parts, middle, bottom: lo.y, radius: 0.5 * width.hypot(length), long_in_z: length >= width })
+        })
+        .collect();
+    commands.insert_resource(LootAssets { mesh, materials: rarity_materials, guns });
 }
 
 /// Boxes turn slowly, so that they catch the eye.
-fn spin(time: Res<Time>, mut boxes: Query<&mut Transform, Or<(With<LootBox>, With<Pickup>)>>) {
+fn spin(time: Res<Time>, mut boxes: Query<&mut Transform, With<Spin>>) {
     for mut t in &mut boxes {
         t.rotate_y(time.delta_secs() * 0.9);
     }
@@ -374,14 +517,35 @@ mod tests {
     }
 
     #[test]
-    fn what_falls_out_lies_apart_round_the_box() {
-        let spots: Vec<Vec3> = (0..5).map(|slot| drop_offset((3, 1), slot, 5)).collect();
-        for (i, a) in spots.iter().enumerate() {
-            assert!(a.length() > 0.4 && a.length() < 1.0 && a.y == 0.0);
-            for b in &spots[i + 1..] {
-                assert!(a.distance(*b) > 0.35, "{a} {b}");
+    fn a_handful_never_exceeds_what_a_box_can_lay_out() {
+        assert!(Rarity::ALL.iter().all(|r| r.handful().1 as usize <= MAX_DROPS));
+    }
+
+    #[test]
+    fn things_lie_apart_inside_the_area_when_it_has_room() {
+        let area = Rect::new(0.0, 0.0, 1.6, 1.6);
+        let radii = [0.1, 0.1, 0.15, 0.1, 0.12, 0.1];
+        let spots = lay_out(area, &radii);
+        for (i, (a, ra)) in spots.iter().zip(radii).enumerate() {
+            assert!(a.x - ra >= area.x0 && a.x + ra <= area.x1 && a.y - ra >= area.z0 && a.y + ra <= area.z1, "{a} reaches out");
+            for (b, rb) in spots[i + 1..].iter().zip(&radii[i + 1..]) {
+                assert!(a.distance(*b) >= ra + rb, "{a} and {b} overlap");
             }
         }
-        assert_eq!(drop_offset((3, 1), 2, 5), drop_offset((3, 1), 2, 5));
+        assert_eq!(spots, lay_out(area, &radii));
+    }
+
+    #[test]
+    fn a_thing_too_big_for_the_area_is_centred_on_it() {
+        let area = Rect::new(0.0, 0.0, 0.5, 0.5);
+        assert_eq!(lay_out(area, &[0.55]), vec![Vec2::new(0.25, 0.25)]);
+    }
+
+    #[test]
+    fn several_things_on_a_small_top_still_sit_inside_it_as_far_as_they_can() {
+        let area = Rect::new(0.0, 0.0, 0.6, 0.45);
+        for p in lay_out(area, &[0.1, 0.1, 0.1, 0.1, 0.1]) {
+            assert!(p.x >= 0.1 - 1e-4 && p.x <= 0.5 + 1e-4 && p.y >= 0.1 - 1e-4 && p.y <= 0.35 + 1e-4, "{p}");
+        }
     }
 }

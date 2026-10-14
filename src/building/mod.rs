@@ -600,9 +600,15 @@ mod tests {
             if !model.loot.is_empty() {
                 kinds_with_loot.insert(b.kind);
             }
-            for (at, rarity) in &model.loot {
-                counts[*rarity as usize] += 1;
-                assert!(at.y >= -0.01 && at.y < 12.0, "{at:?} floats or sinks");
+            for (n, a) in model.loot.iter().enumerate() {
+                counts[a.rarity as usize] += 1;
+                assert!(a.at.y >= -0.01 && a.at.y < 12.0, "{:?} floats or sinks", a.at);
+                // Every box has its own clear space, none within another's.
+                assert!(a.room.contains(Vec2::new(a.at.x, a.at.z)));
+                for other in &model.loot[n + 1..] {
+                    let same_level = (a.at.y - other.at.y).abs() < 0.2;
+                    assert!(!(same_level && a.room.overlaps(&other.room)), "boxes at {:?} and {:?} share room", a.at, other.at);
+                }
             }
         }
         eprintln!("loot: {} common, {} uncommon, {} rare, {} very rare, {} legendary", counts[0], counts[1], counts[2], counts[3], counts[4]);
