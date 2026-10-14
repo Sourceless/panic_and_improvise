@@ -146,6 +146,14 @@ impl Parts {
         }
     }
 
+    /// The same geometry made `k` times as big about the origin.
+    pub fn scaled(mut self, k: f32) -> Parts {
+        for p in &mut self.pos {
+            *p = [p[0] * k, p[1] * k, p[2] * k];
+        }
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
         self.pos.is_empty()
     }

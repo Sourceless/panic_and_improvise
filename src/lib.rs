@@ -14,6 +14,7 @@ pub mod grass;
 pub mod impact;
 pub mod inventory;
 pub mod inventory_ui;
+pub mod item_models;
 pub mod gun_state;
 pub mod ground_textures;
 pub mod gun_model;

@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use crate::building::geom::{Layer, Model};
 use crate::building::{self, Site};
 use crate::collision::Colliders;
-use crate::loot::{spawn_drop, LootAssets, LootBox, OpenedLoot, Spin};
+use crate::loot::{spawn_crate, spawn_drop, LootAssets, OpenedLoot};
 use crate::map::TerrainMap;
 use crate::settlement_plan::{footprint_points, Building, Rng, SettlementPlan};
 
@@ -180,15 +180,7 @@ fn stream_interiors(
                             }
                             continue;
                         }
-                        let size = lootspot.rarity.size();
-                        commands.spawn((
-                            LootBox { rarity: lootspot.rarity, spot: (index, spot), room: lootspot.room },
-                            Spin,
-                            Mesh3d(loot.mesh.clone()),
-                            MeshMaterial3d(loot.material(lootspot.rarity)),
-                            Transform::from_translation(lootspot.at + Vec3::Y * (size * 0.5 + 0.03)).with_scale(Vec3::splat(size)),
-                            ChildOf(id),
-                        ));
+                        spawn_crate(&mut commands, loot, Some(id), lootspot.at, lootspot.rarity, (index, spot), lootspot.room);
                     }
                 }
                 entry.interior = Some(id);

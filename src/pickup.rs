@@ -7,7 +7,7 @@ use bevy::prelude::*;
 use crate::controls::{Action, Controls, Keyboard};
 use crate::inventory::{Inventory, Item, ItemKind};
 use crate::inventory_ui::InventoryScreen;
-use crate::loot::{lay_contents, roll_contents, spawn_drop, spot_numbers, Found, LootAssets, LootBox, OpenedLoot, Pickup};
+use crate::loot::{lay_contents, LIFT, roll_contents, spawn_drop, spot_numbers, Found, LootAssets, LootBox, OpenedLoot, Pickup};
 use crate::menu::Menu;
 use crate::player::FpsCamera;
 
@@ -47,15 +47,18 @@ pub fn make_item(inventory: &mut Inventory, found: &Found) -> Item {
     }
 }
 
-/// The nearest of some things that is in front of the player and near enough.
-fn nearest<'a, T>(items: impl Iterator<Item = (Entity, &'a GlobalTransform, T)>, position: Vec3, forward: Vec3) -> Option<(f32, Entity, T)> {
+/// Of some things, the one most nearly in the middle of the view, so long as it is near enough: whatever
+/// is being looked at, and not merely whatever is nearest. How far from the middle counts (as cosine, so
+/// larger is nearer the middle) comes back with it.
+fn most_looked_at<'a, T>(items: impl Iterator<Item = (Entity, &'a GlobalTransform, T)>, position: Vec3, forward: Vec3) -> Option<(f32, Entity, T)> {
     items
         .filter_map(|(entity, at, rest)| {
             let to = at.translation() - position;
             let distance = to.length();
-            (distance < REACH && distance > 0.01 && forward.dot(to / distance) > 1.0 - VIEW_CONE).then_some((distance, entity, rest))
+            let aim = forward.dot(to / distance.max(1e-4));
+            (distance < REACH && distance > 0.01 && aim > 1.0 - VIEW_CONE).then_some((aim, entity, rest))
         })
-        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .max_by(|a, b| a.0.total_cmp(&b.0))
 }
 
 fn pick_up(
@@ -83,30 +86,30 @@ fn pick_up(
         return;
     }
     let (position, forward) = (eye.translation(), eye.forward().as_vec3());
-    let thing = nearest(pickups.iter_mut(), position, forward);
-    let closed = nearest(boxes.iter().map(|(e, at, local, b, parent)| (e, at, (local, b, parent))), position, forward);
-    // Whichever of the two is nearer gets the key.
+    let thing = most_looked_at(pickups.iter_mut(), position, forward);
+    let closed = most_looked_at(boxes.iter().map(|(e, at, local, b, parent)| (e, at, (local, b, parent))), position, forward);
+    // Whichever of the two is more nearly in the middle of the view gets the key.
     let box_first = match (&thing, &closed) {
-        (Some((a, ..)), Some((b, ..))) => b < a,
+        (Some((a, ..)), Some((b, ..))) => b > a,
         (None, Some(_)) => true,
         _ => false,
     };
     if box_first {
         let Some((_, entity, (local, lootbox, parent))) = closed else { return };
-        prompt.looking_at = Some(format!("Loot box  [{}]  open", lootbox.rarity.name()));
+        prompt.looking_at = Some(format!("Military crate  [{}]  open", lootbox.rarity.name()));
         if !controls.just_pressed(Action::Interact, &keys) {
             return;
         }
         let Some(assets) = assets else { return };
         let spot = lootbox.spot;
         let contents = roll_contents(lootbox.rarity, spot_numbers(spot.0, spot.1));
-        // The box's floor: its middle sits half its height and a skin above it.
-        let floor = local.translation.y - (local.scale.x * 0.5 + 0.03);
+        // The crate's floor: it hangs from a point `LIFT` above it.
+        let floor = local.translation.y - LIFT;
         let lying = lay_contents(&assets, &lootbox.room, floor, &contents);
         for (slot, thing) in lying.iter().enumerate() {
             spawn_drop(&mut commands, &assets, parent.map(|p| p.parent()), thing, spot, slot);
         }
-        prompt.message = format!("Opened the box: {} things fall out.", contents.len());
+        prompt.message = format!("Opened the crate: {} things fall out.", contents.len());
         prompt.message_time = 3.0;
         opened.0.insert(spot, lying.into_iter().map(Some).collect());
         commands.entity(entity).despawn();
@@ -154,5 +157,19 @@ mod tests {
         assert_eq!(rounds.count, 32);
         assert_ne!(gun.id, rounds.id);
         assert_eq!(describe(&Found { kind: ItemKind::Ammo(AmmoKind::NineFmj), count: 32, loaded: 0 }), "9mm x32");
+    }
+
+    #[test]
+    fn what_is_looked_at_wins_over_what_is_merely_nearest() {
+        let at = |x: f32, z: f32| GlobalTransform::from_translation(Vec3::new(x, 0.0, z));
+        let near_aside = at(0.6, -0.9);
+        let far_ahead = at(0.0, -2.2);
+        let items = [(Entity::PLACEHOLDER, &near_aside, "aside"), (Entity::PLACEHOLDER, &far_ahead, "ahead")];
+        let chosen = most_looked_at(items.into_iter(), Vec3::ZERO, Vec3::NEG_Z).map(|(_, _, name)| name);
+        assert_eq!(chosen, Some("ahead"));
+        // Out of reach or out of the view is not chosen at all.
+        let too_far = at(0.0, -5.0);
+        let behind = at(0.0, 1.0);
+        assert!(most_looked_at([(Entity::PLACEHOLDER, &too_far, ()), (Entity::PLACEHOLDER, &behind, ())].into_iter(), Vec3::ZERO, Vec3::NEG_Z).is_none());
     }
 }

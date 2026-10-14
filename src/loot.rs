@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use crate::ammo::AmmoKind;
 use crate::building::geom::Rect;
 use crate::gun_models::{self, Finish};
+use crate::item_models::{self, Paint};
 use crate::inventory::{ItemKind, PackKind, Supply};
 use crate::settlement_plan::Rng;
 use crate::weapons::WeaponKind;
@@ -297,17 +298,23 @@ pub struct LootBox {
 #[derive(Component)]
 pub struct Spin;
 
-/// The one box mesh and a glowing material for each rarity, and the looks of the things that have a
-/// model (the guns), which are shown as themselves.
+/// How high a thing's middle is lifted above the floor, so that it is easy to look at: its parts hang
+/// from a point this far above where it lies.
+pub const LIFT: f32 = 0.12;
+
+/// The flat tag of its rarity's colour, and a glowing material for each rarity; the looks of every kind of
+/// thing (guns from their models, the rest from `item_models`); and the military crates that loot comes in.
 #[derive(Resource)]
 pub struct LootAssets {
     pub mesh: Handle<Mesh>,
     pub materials: Vec<Handle<StandardMaterial>>,
-    pub guns: HashMap<WeaponKind, GunLook>,
+    pub looks: HashMap<ItemKind, ModelLook>,
+    /// The parts of the crate of each rarity, by rarity: body, then its markings in the rarity's colour.
+    pub crates: Vec<Vec<(Handle<Mesh>, Handle<StandardMaterial>)>>,
 }
 
-/// A gun's model for lying about: its parts, and where the middle of its footprint is.
-pub struct GunLook {
+/// A thing's model for lying about: its parts, and where the middle of its footprint is.
+pub struct ModelLook {
     pub parts: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
     /// The middle of its footprint, in model space (x, z), and the lowest point.
     pub middle: Vec2,
@@ -325,24 +332,16 @@ impl LootAssets {
 
     /// How far a thing reaches from its middle as it lies.
     pub fn radius(&self, drop: &Dropped) -> f32 {
-        match drop.found.kind {
-            ItemKind::Weapon(w) => self.guns[&w].radius,
-            _ => drop.rarity.size() * 0.7 * 0.71,
-        }
+        self.looks[&drop.found.kind].radius
     }
 
     /// Which way a thing lies, in an area: a long thing along the long way of it.
     pub fn yaw(&self, drop: &Dropped, area: &Rect) -> f32 {
-        match drop.found.kind {
-            ItemKind::Weapon(w) => {
-                let along_z = area.depth() >= area.width();
-                if along_z == self.guns[&w].long_in_z {
-                    0.0
-                } else {
-                    std::f32::consts::FRAC_PI_2
-                }
-            }
-            _ => 0.0,
+        let along_z = area.depth() >= area.width();
+        if along_z == self.looks[&drop.found.kind].long_in_z {
+            0.0
+        } else {
+            std::f32::consts::FRAC_PI_2
         }
     }
 }
@@ -357,46 +356,47 @@ pub fn lay_contents(assets: &LootAssets, room: &Rect, y: f32, contents: &[Droppe
         .collect()
 }
 
-/// Puts a thing on the ground. A gun is its own model, lying where it was put with a flat tag of its
-/// rarity's colour under it; anything else is a coloured box. `parent` is what it lies in.
+/// Puts a thing on the ground as its model, with a flat tag of its rarity's colour under it. `parent` is
+/// what it lies in.
 pub fn spawn_drop(commands: &mut Commands, assets: &LootAssets, parent: Option<Entity>, lying: &Lying, spot: (usize, usize), slot: usize) {
     let drop = lying.drop;
-    let pickup = Pickup { rarity: drop.rarity, found: drop.found, spot, slot };
-    let id = match drop.found.kind {
-        ItemKind::Weapon(w) => {
-            let look = &assets.guns[&w];
-            // The root is a little above the floor so that it is easy to look at; the parts hang from it.
-            const LIFT: f32 = 0.12;
-            let id = commands.spawn((pickup, Transform::from_translation(lying.at + Vec3::Y * LIFT).with_rotation(Quat::from_rotation_y(lying.yaw)), Visibility::default())).id();
-            for (mesh, material) in &look.parts {
-                let at = Vec3::new(-look.middle.x, 0.03 - LIFT - look.bottom, -look.middle.y);
-                commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone()), Transform::from_translation(at), ChildOf(id)));
-            }
-            let tag = (look.radius * 1.1).max(0.15);
-            commands.spawn((
-                Mesh3d(assets.mesh.clone()),
-                MeshMaterial3d(assets.material(drop.rarity)),
-                Transform::from_translation(Vec3::new(0.0, 0.012 - LIFT, 0.0)).with_scale(Vec3::new(tag, 0.01, tag)),
-                ChildOf(id),
-            ));
-            id
-        }
-        _ => {
-            let size = drop.rarity.size() * 0.7;
-            commands
-                .spawn((
-                    pickup,
-                    Spin,
-                    Mesh3d(assets.mesh.clone()),
-                    MeshMaterial3d(assets.material(drop.rarity)),
-                    Transform::from_translation(lying.at + Vec3::Y * (size * 0.5 + 0.03)).with_scale(Vec3::splat(size)),
-                ))
-                .id()
-        }
-    };
+    let look = &assets.looks[&drop.found.kind];
+    let root = (
+        Pickup { rarity: drop.rarity, found: drop.found, spot, slot },
+        Transform::from_translation(lying.at + Vec3::Y * LIFT).with_rotation(Quat::from_rotation_y(lying.yaw)),
+        Visibility::default(),
+    );
+    let id = commands.spawn(root).id();
+    for (mesh, material) in &look.parts {
+        let at = Vec3::new(-look.middle.x, 0.03 - LIFT - look.bottom, -look.middle.y);
+        commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone()), Transform::from_translation(at), ChildOf(id)));
+    }
+    let tag = (look.radius * 1.1).max(0.15);
+    commands.spawn((
+        Mesh3d(assets.mesh.clone()),
+        MeshMaterial3d(assets.material(drop.rarity)),
+        Transform::from_translation(Vec3::new(0.0, 0.012 - LIFT, 0.0)).with_scale(Vec3::new(tag, 0.01, tag)),
+        ChildOf(id),
+    ));
     if let Some(parent) = parent {
         commands.entity(id).insert(ChildOf(parent));
     }
+}
+
+/// Puts a closed crate of loot down with its floor at `at`.
+pub fn spawn_crate(commands: &mut Commands, assets: &LootAssets, parent: Option<Entity>, at: Vec3, rarity: Rarity, spot: (usize, usize), room: Rect) {
+    let id = commands.spawn((LootBox { rarity, spot, room }, Spin, Transform::from_translation(at + Vec3::Y * LIFT), Visibility::default())).id();
+    for (mesh, material) in &assets.crates[rarity as usize] {
+        commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone()), Transform::from_translation(Vec3::new(0.0, -LIFT + 0.01, 0.0)), ChildOf(id)));
+    }
+    if let Some(parent) = parent {
+        commands.entity(id).insert(ChildOf(parent));
+    }
+}
+
+/// How long the crate of this rarity is: the rarer, the bigger.
+pub fn crate_length(rarity: Rarity) -> f32 {
+    0.28 + 0.04 * rarity as usize as f32
 }
 
 pub struct LootPlugin;
@@ -410,21 +410,42 @@ impl Plugin for LootPlugin {
 fn make_assets(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>) {
     let mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
     // Lit by nothing, so that they show up in a dark cellar as well as in the sun.
-    let rarity_materials = Rarity::ALL.iter().map(|r| materials.add(StandardMaterial { base_color: r.colour(), unlit: true, ..default() })).collect();
-    // The guns as they look in hand, in the same finishes.
+    let rarity_materials: Vec<Handle<StandardMaterial>> = Rarity::ALL.iter().map(|r| materials.add(StandardMaterial { base_color: r.colour(), unlit: true, ..default() })).collect();
     let finishes: HashMap<Finish, Handle<StandardMaterial>> = Finish::ALL.into_iter().map(|f| (f, materials.add(crate::weapon::finish_material(f)))).collect();
-    let guns = WeaponKind::ALL
+    let paints: HashMap<Paint, Handle<StandardMaterial>> = Paint::ALL.into_iter().map(|p| (p, materials.add(p.material()))).collect();
+    // How a model lies: its footprint, from the bounds of all its parts.
+    let look = |parts: Vec<(Handle<StandardMaterial>, crate::gun_model::Parts)>, meshes: &mut Assets<Mesh>| {
+        let (lo, hi) = parts.iter().map(|(_, p)| p.bounds()).fold((Vec3::MAX, Vec3::MIN), |(lo, hi), (a, b)| (lo.min(a), hi.max(b)));
+        let (width, length) = (hi.x - lo.x, hi.z - lo.z);
+        ModelLook {
+            middle: Vec2::new((lo.x + hi.x) * 0.5, (lo.z + hi.z) * 0.5),
+            bottom: lo.y,
+            radius: 0.5 * width.hypot(length),
+            long_in_z: length >= width,
+            parts: parts.into_iter().map(|(m, p)| (meshes.add(p.into_mesh()), m)).collect(),
+        }
+    };
+    let mut looks = HashMap::new();
+    for &kind in WeaponKind::ALL.iter() {
+        let model = gun_models::build(kind);
+        looks.insert(ItemKind::Weapon(kind), look(model.parts.into_iter().map(|(f, p)| (finishes[&f].clone(), p)).collect(), &mut meshes));
+    }
+    for kind in item_models::kinds() {
+        if let Some(model) = item_models::build(kind) {
+            looks.insert(kind, look(model.parts.into_iter().map(|(p, parts)| (paints[&p].clone(), parts)).collect(), &mut meshes));
+        }
+    }
+    // The crates: olive, with the markings in the colour of the rarity.
+    let crates = Rarity::ALL
         .iter()
-        .map(|&kind| {
-            let model = gun_models::build(kind);
-            let (lo, hi) = model.parts.iter().map(|(_, p)| p.bounds()).fold((Vec3::MAX, Vec3::MIN), |(lo, hi), (a, b)| (lo.min(a), hi.max(b)));
-            let middle = Vec2::new((lo.x + hi.x) * 0.5, (lo.z + hi.z) * 0.5);
-            let (width, length) = (hi.x - lo.x, hi.z - lo.z);
-            let parts = model.parts.into_iter().map(|(finish, parts)| (meshes.add(parts.into_mesh()), finishes[&finish].clone())).collect();
-            (kind, GunLook { parts, middle, bottom: lo.y, radius: 0.5 * width.hypot(length), long_in_z: length >= width })
+        .map(|&rarity| {
+            let (model, marks) = item_models::crate_model(crate_length(rarity));
+            let mut parts: Vec<(Handle<Mesh>, Handle<StandardMaterial>)> = model.parts.into_iter().map(|(p, parts)| (meshes.add(parts.into_mesh()), paints[&p].clone())).collect();
+            parts.push((meshes.add(marks.into_mesh()), rarity_materials[rarity as usize].clone()));
+            parts
         })
         .collect();
-    commands.insert_resource(LootAssets { mesh, materials: rarity_materials, guns });
+    commands.insert_resource(LootAssets { mesh, materials: rarity_materials, looks, crates });
 }
 
 /// Boxes turn slowly, so that they catch the eye.
