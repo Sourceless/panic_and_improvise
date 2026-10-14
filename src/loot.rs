@@ -102,8 +102,9 @@ const fn thing(weight: f32, kind: ItemKind) -> Entry {
     Entry { weight, kind, rounds: (1, 1) }
 }
 
-/// What turns up at each rarity: a few rounds and bits and pieces are common; bigger piles of rounds,
-/// bags and first aid less so; pistols, rifles, shotguns and bigger packs are rarer; machine guns and the
+/// What turns up at each rarity: a few rounds and bits and pieces are common, with the odd pistol; bigger
+/// piles of rounds, bags, first aid and the old bolt-action and shotgun are uncommon; the submachine gun
+/// and bigger packs are rare; self-loading and light machine guns are very rare; the machine gun and the
 /// sniper rifle are legendary.
 fn table(rarity: Rarity) -> Vec<Entry> {
     use AmmoKind::*;
@@ -118,6 +119,7 @@ fn table(rarity: Rarity) -> Vec<Entry> {
             thing(1.5, Sup(Supply::TinnedFood)),
             thing(1.0, Sup(Supply::Canteen)),
             thing(0.5, Sup(Supply::Compass)),
+            thing(0.8, Weapon(WeaponKind::HiPower)),
         ],
         Rarity::Uncommon => vec![
             ammo(1.5, NineFmj, 20, 50),
@@ -127,11 +129,14 @@ fn table(rarity: Rarity) -> Vec<Entry> {
             thing(1.5, Sup(Supply::FirstAid)),
             thing(1.0, Sup(Supply::Torch)),
             thing(1.5, Pack(PackKind::Satchel)),
+            thing(1.5, Weapon(WeaponKind::HiPower)),
+            thing(1.0, Weapon(WeaponKind::LeeEnfield)),
+            thing(0.8, Weapon(WeaponKind::Auto5)),
         ],
         Rarity::Rare => vec![
-            thing(2.0, Weapon(WeaponKind::HiPower)),
-            thing(2.0, Weapon(WeaponKind::LeeEnfield)),
-            thing(1.5, Weapon(WeaponKind::Auto5)),
+            thing(1.5, Weapon(WeaponKind::Sterling)),
+            thing(1.5, Weapon(WeaponKind::LeeEnfield)),
+            thing(1.2, Weapon(WeaponKind::Auto5)),
             thing(1.5, Pack(PackKind::Daypack)),
             ammo(1.0, NatoBall, 15, 20),
             ammo(0.5, BritishBall, 15, 20),
@@ -139,7 +144,6 @@ fn table(rarity: Rarity) -> Vec<Entry> {
         ],
         Rarity::VeryRare => vec![
             thing(2.0, Weapon(WeaponKind::Slr)),
-            thing(1.5, Weapon(WeaponKind::Sterling)),
             thing(1.5, Weapon(WeaponKind::Bren)),
             thing(1.5, Pack(PackKind::Bergen)),
             ammo(1.0, NatoBall, 15, 20),
@@ -471,21 +475,29 @@ mod tests {
     }
 
     #[test]
-    fn the_rarer_the_spot_the_better_what_is_in_it() {
-        // Count the guns that turn up at each rarity.
-        let guns = |rarity| (0..400).filter(|&i| matches!(roll_item(rarity, spot_numbers(i, 1)).kind, ItemKind::Weapon(_))).count();
-        assert_eq!(guns(Rarity::Common), 0);
-        assert_eq!(guns(Rarity::Uncommon), 0);
-        assert!(guns(Rarity::Rare) > 100 && guns(Rarity::VeryRare) > 200 && guns(Rarity::Legendary) > 150);
+    fn the_rarer_the_spot_the_stronger_the_guns_in_it() {
+        let found = |rarity: Rarity| -> std::collections::HashSet<WeaponKind> {
+            (0..600)
+                .filter_map(|i| match roll_item(rarity, spot_numbers(i, 1)).kind {
+                    ItemKind::Weapon(w) => Some(w),
+                    _ => None,
+                })
+                .collect()
+        };
+        // A pistol turns up in the commonest boxes; the strong guns only in the rarest.
+        assert_eq!(found(Rarity::Common), [WeaponKind::HiPower].into());
+        assert!(found(Rarity::Uncommon).contains(&WeaponKind::LeeEnfield) && found(Rarity::Uncommon).contains(&WeaponKind::Auto5));
+        let strong = [WeaponKind::Slr, WeaponKind::Bren, WeaponKind::Mag, WeaponKind::L42];
+        for rarity in [Rarity::Common, Rarity::Uncommon, Rarity::Rare] {
+            assert!(strong.iter().all(|w| !found(rarity).contains(w)), "{rarity:?}: {:?}", found(rarity));
+        }
         // The machine gun and the sniper rifle are only found at the top.
         for rarity in [Rarity::Common, Rarity::Uncommon, Rarity::Rare, Rarity::VeryRare] {
-            for i in 0..300 {
-                let kind = roll_item(rarity, spot_numbers(i, 2)).kind;
-                assert!(!matches!(kind, ItemKind::Weapon(WeaponKind::Mag | WeaponKind::L42)), "{rarity:?} gave {kind:?}");
-            }
+            assert!(!found(rarity).contains(&WeaponKind::Mag) && !found(rarity).contains(&WeaponKind::L42), "{rarity:?}");
         }
-        assert!((0..300).any(|i| matches!(roll_item(Rarity::Legendary, spot_numbers(i, 2)).kind, ItemKind::Weapon(WeaponKind::Mag))));
-        assert!((0..300).any(|i| matches!(roll_item(Rarity::Legendary, spot_numbers(i, 2)).kind, ItemKind::Weapon(WeaponKind::L42))));
+        assert!(found(Rarity::Rare).contains(&WeaponKind::Sterling));
+        assert!(found(Rarity::VeryRare).contains(&WeaponKind::Slr) && found(Rarity::VeryRare).contains(&WeaponKind::Bren));
+        assert!(found(Rarity::Legendary).contains(&WeaponKind::Mag) && found(Rarity::Legendary).contains(&WeaponKind::L42));
     }
 
     #[test]
