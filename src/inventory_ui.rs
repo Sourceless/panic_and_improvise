@@ -21,6 +21,10 @@ pub struct InventoryScreen {
     pub message: String,
 }
 
+/// Things thrown out of the inventory, waiting to be put on the ground in front of the player.
+#[derive(Resource, Default, Debug)]
+pub struct DropQueue(pub Vec<Item>);
+
 #[derive(Clone, Copy, Debug)]
 struct Drag {
     id: u32,
@@ -157,7 +161,7 @@ fn drop_origin(cell: (u32, u32), grab: (u32, u32)) -> Option<(u32, u32)> {
     Some((cell.0.checked_sub(grab.0)?, cell.1.checked_sub(grab.1)?))
 }
 
-pub fn draw_inventory(mut contexts: EguiContexts, mut screen: ResMut<InventoryScreen>, mut inventory: ResMut<Inventory>) -> Result {
+pub fn draw_inventory(mut contexts: EguiContexts, mut screen: ResMut<InventoryScreen>, mut inventory: ResMut<Inventory>, mut thrown: ResMut<DropQueue>) -> Result {
     if !screen.open {
         return Ok(());
     }
@@ -168,6 +172,9 @@ pub fn draw_inventory(mut contexts: EguiContexts, mut screen: ResMut<InventorySc
     });
     let mut drop_message: Option<String> = None;
     let mut closed = false;
+    // Let go anywhere outside the window and it is thrown on the ground.
+    let window_rect = ctx.memory(|m| m.area_rect(egui::Id::new("Inventory")));
+    let outside = matches!((pointer, window_rect), (Some(p), Some(r)) if !r.contains(p));
     egui::Window::new("Inventory").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).collapsible(false).resizable(false).show(ctx, |ui| {
         let probe = Layout { origin: egui::Pos2::ZERO, pack };
         let (area, _) = ui.allocate_exact_size(probe.size(), egui::Sense::hover());
@@ -319,7 +326,21 @@ pub fn draw_inventory(mut contexts: EguiContexts, mut screen: ResMut<InventorySc
                         Some(Hover::Back) => done = inventory.wear_pack(drag.id),
                         None => {}
                     }
-                    drop_message = Some(if done || over.is_none() { String::new() } else { "It doesn't fit there.".to_string() });
+                    let mut message = if done { String::new() } else { "It doesn't fit there.".to_string() };
+                    if !done && over.is_none() {
+                        message = String::new();
+                        if outside {
+                            // A pack with things in it can't be thrown: they would be lost with it.
+                            let loaded_pack = matches!(inventory.find(drag.id), Some((Place::Back, _))) && inventory.pack.as_ref().is_some_and(|c| !c.items.is_empty());
+                            if loaded_pack {
+                                message = "Take things out of the pack first.".to_string();
+                            } else if let Some(thing) = inventory.take(drag.id) {
+                                message = format!("Dropped the {}.", thing.kind.name());
+                                thrown.0.push(thing);
+                            }
+                        }
+                    }
+                    drop_message = Some(message);
                     screen.drag = None;
                 }
             } else {
@@ -328,7 +349,7 @@ pub fn draw_inventory(mut contexts: EguiContexts, mut screen: ResMut<InventorySc
         }
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Drag to move. R turns what you're holding. Right click equips a weapon or a pack.").small().weak());
+            ui.label(egui::RichText::new("Drag to move; drop outside the window to throw away. R turns what you're holding. Right click equips a weapon or a pack.").small().weak());
             if !screen.message.is_empty() {
                 ui.label(egui::RichText::new(&screen.message).color(egui::Color32::from_rgb(230, 160, 90)));
             }

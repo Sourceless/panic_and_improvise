@@ -177,6 +177,11 @@ pub fn roll_item(rarity: Rarity, mut next: impl FnMut() -> f32) -> Found {
     Found { kind: entry.kind, count: count.max(1), loaded }
 }
 
+/// How rare a kind of thing is: the commonest tier it turns up in (common for what is not in any table).
+pub fn rarity_of(kind: ItemKind) -> Rarity {
+    Rarity::ALL.into_iter().find(|&r| table(r).iter().any(|e| e.kind == kind)).unwrap_or(Rarity::Common)
+}
+
 /// One thing that fell out of a box, and how rare it is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Dropped {
@@ -547,6 +552,14 @@ mod tests {
             }
         }
         assert!(Rarity::ALL.windows(2).all(|w| w[0].handful().1 <= w[1].handful().1 && w[0].handful().0 <= w[1].handful().0));
+    }
+
+    #[test]
+    fn a_thrown_away_thing_is_tagged_with_the_lowest_tier_it_turns_up_in() {
+        assert_eq!(rarity_of(ItemKind::Weapon(WeaponKind::HiPower)), Rarity::Common);
+        assert_eq!(rarity_of(ItemKind::Weapon(WeaponKind::Mag)), Rarity::Legendary);
+        assert_eq!(rarity_of(ItemKind::Pack(PackKind::Bergen)), Rarity::VeryRare);
+        assert_eq!(rarity_of(ItemKind::Supply(Supply::Bandage)), Rarity::Common);
     }
 
     #[test]

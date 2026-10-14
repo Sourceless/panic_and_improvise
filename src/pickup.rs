@@ -6,8 +6,8 @@ use bevy::prelude::*;
 
 use crate::controls::{Action, Controls, Keyboard};
 use crate::inventory::{Inventory, Item, ItemKind};
-use crate::inventory_ui::InventoryScreen;
-use crate::loot::{lay_contents, LIFT, roll_contents, spawn_drop, spot_numbers, Found, LootAssets, LootBox, OpenedLoot, Pickup};
+use crate::inventory_ui::{DropQueue, InventoryScreen};
+use crate::loot::{lay_contents, rarity_of, Dropped, Lying, LIFT, roll_contents, spawn_drop, spot_numbers, Found, LootAssets, LootBox, OpenedLoot, Pickup};
 use crate::menu::Menu;
 use crate::player::FpsCamera;
 
@@ -27,7 +27,24 @@ pub struct PickupPlugin;
 
 impl Plugin for PickupPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PickupPrompt>().add_systems(Update, pick_up);
+        app.init_resource::<PickupPrompt>().add_systems(Update, (pick_up, put_down_thrown));
+    }
+}
+
+/// Puts what was thrown out of the inventory on the ground just in front of the player, side by side.
+fn put_down_thrown(mut commands: Commands, mut queue: ResMut<DropQueue>, assets: Option<Res<LootAssets>>, camera: Query<(&GlobalTransform, &FpsCamera)>, mut thrown: Local<usize>) {
+    let (Some(assets), Ok((eye, cam))) = (assets, camera.single()) else { return };
+    for item in queue.0.drain(..) {
+        let mut ahead = eye.forward().as_vec3();
+        ahead.y = 0.0;
+        let ahead = ahead.try_normalize().unwrap_or(Vec3::NEG_Z);
+        let across = ahead.cross(Vec3::Y);
+        let side = (*thrown % 5) as f32 - 2.0;
+        let at = Vec3::new(eye.translation().x, cam.floor, eye.translation().z) + ahead * 0.9 + across * side * 0.2;
+        let found = Found { kind: item.kind, count: item.count, loaded: item.loaded };
+        let lying = Lying { drop: Dropped { rarity: rarity_of(item.kind), found }, at, yaw: 0.0 };
+        spawn_drop(&mut commands, &assets, None, &lying, (usize::MAX - 1, *thrown), 0);
+        *thrown += 1;
     }
 }
 
@@ -171,5 +188,31 @@ mod tests {
         let too_far = at(0.0, -5.0);
         let behind = at(0.0, 1.0);
         assert!(most_looked_at([(Entity::PLACEHOLDER, &too_far, ()), (Entity::PLACEHOLDER, &behind, ())].into_iter(), Vec3::ZERO, Vec3::NEG_Z).is_none());
+    }
+
+    #[test]
+    fn a_thrown_item_lands_on_the_ground_in_front_of_the_player() {
+        use crate::inventory::{Inventory, Supply};
+        use crate::loot::ModelLook;
+        use std::collections::HashMap;
+        let mut app = App::new();
+        let kind = ItemKind::Supply(Supply::Torch);
+        let look = ModelLook { parts: Vec::new(), middle: Vec2::ZERO, bottom: 0.0, radius: 0.1, long_in_z: true };
+        app.insert_resource(LootAssets { mesh: Handle::default(), materials: vec![Handle::default(); 5], looks: HashMap::from([(kind, look)]), crates: Vec::new() });
+        let mut inv = Inventory::default();
+        let item = inv.make(kind, 1);
+        app.insert_resource(DropQueue(vec![item]));
+        let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: crate::player::Stance::Stand, eye_height: 1.7, jump_spent_standing: false, floor: 3.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 3.0 };
+        app.world_mut().spawn((camera, GlobalTransform::from(Transform::from_xyz(10.0, 4.7, 20.0).looking_to(Vec3::NEG_Z, Vec3::Y))));
+        app.add_systems(Update, put_down_thrown);
+        app.update();
+        let mut things = app.world_mut().query::<(&Pickup, &Transform)>();
+        let found: Vec<_> = things.iter(app.world()).collect();
+        assert_eq!(found.len(), 1);
+        let (pickup, at) = found[0];
+        assert_eq!(pickup.found.kind, kind);
+        assert!((at.translation.z - 19.1).abs() < 0.01 && (at.translation.x - 10.0).abs() < 0.5, "{:?}", at.translation);
+        assert!(at.translation.y > 3.0 && at.translation.y < 3.5, "{:?}", at.translation);
+        assert!(app.world().resource::<DropQueue>().0.is_empty());
     }
 }

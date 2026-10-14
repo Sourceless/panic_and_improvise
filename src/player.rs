@@ -109,6 +109,7 @@ impl Plugin for PlayerPlugin {
         app.init_resource::<CursorIntent>()
             .init_resource::<Menu>()
             .init_resource::<crate::inventory_ui::InventoryScreen>()
+            .init_resource::<crate::inventory_ui::DropQueue>()
             .init_resource::<AimBlend>()
             .add_systems(Startup, (spawn_player, grab_cursor))
             .add_systems(
