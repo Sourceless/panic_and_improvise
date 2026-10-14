@@ -239,7 +239,7 @@ pub const WEAPONS: [WeaponDef; 8] = [
         shot_volume: 1.5,
         shot_pitch: 0.64,
         size: (6, 3),
-        default_ammo: AmmoKind::NatoTracer,
+        default_ammo: AmmoKind::NatoBall,
     },
     // The L42A1 sniper rifle: a Lee-Enfield action in 7.62 NATO, ten rounds, bolt action, with a
     // telescopic sight.
@@ -257,7 +257,7 @@ pub const WEAPONS: [WeaponDef; 8] = [
         shot_volume: 1.4,
         shot_pitch: 0.72,
         size: (6, 2),
-        default_ammo: AmmoKind::NatoMatch,
+        default_ammo: AmmoKind::NatoBall,
     },
     // The Browning Auto-5: a long-recoil semi-automatic shotgun, four in the tube and one up the spout.
     WeaponDef {
@@ -312,7 +312,7 @@ mod tests {
     fn every_gun_can_fire_what_it_starts_with_and_has_a_choice_of_loads() {
         for def in &WEAPONS {
             assert_eq!(def.default_ammo.def().caliber, def.caliber, "{}", def.name);
-            assert!(def.ammo().count() >= 2, "{} has a choice of rounds", def.name);
+            assert!(def.ammo().count() >= 1, "{} has rounds", def.name);
         }
     }
 

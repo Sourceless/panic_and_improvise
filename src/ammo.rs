@@ -37,18 +37,9 @@ impl Caliber {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub enum AmmoKind {
     NineFmj,
-    NineHollowPoint,
-    NinePlusP,
     NatoBall,
-    NatoTracer,
-    NatoArmourPiercing,
-    NatoMatch,
     BritishBall,
-    BritishTracer,
-    BritishArmourPiercing,
     Buckshot,
-    Slug,
-    Birdshot,
 }
 
 /// How a round is made, which decides how it hits.
@@ -132,26 +123,19 @@ const fn cartridge(grains: f32, diameter_inches: f32, bc: f32, velocity: f32) ->
 }
 
 /// Every load there is.
-pub const AMMO: [AmmoDef; 13] = [
+pub const AMMO: [AmmoDef; 4] = [
+    // One load for each calibre, for now; the Build variants (expanding, piercing, slug, shot) are there
+    // for when there are more.
     // 9 x 19: the Sterling and the Hi-Power. The Sterling's barrel is longer, so it gets a little more
     // out of each round than a pistol does; the figures are for the pistol, and the submachine gun's
     // velocity is made up by the weapon.
-    AmmoDef { kind: AmmoKind::NineFmj, caliber: Caliber::Nine, name: "9mm full metal jacket", short: "FMJ", cartridge: cartridge(124.0, 0.355, 0.145, 368.0), pellets: 1, pellet_spread: 0.0, build: Build::Full, tracer: false, per_stack: 50, colour: [0.72, 0.62, 0.3] },
-    AmmoDef { kind: AmmoKind::NineHollowPoint, caliber: Caliber::Nine, name: "9mm hollow point", short: "HP", cartridge: cartridge(115.0, 0.355, 0.125, 380.0), pellets: 1, pellet_spread: 0.0, build: Build::Expanding, tracer: false, per_stack: 50, colour: [0.8, 0.5, 0.2] },
-    AmmoDef { kind: AmmoKind::NinePlusP, caliber: Caliber::Nine, name: "9mm +P overpressure", short: "+P", cartridge: cartridge(124.0, 0.355, 0.145, 405.0), pellets: 1, pellet_spread: 0.0, build: Build::Full, tracer: false, per_stack: 50, colour: [0.85, 0.35, 0.2] },
+    AmmoDef { kind: AmmoKind::NineFmj, caliber: Caliber::Nine, name: "9mm", short: "9mm", cartridge: cartridge(124.0, 0.355, 0.145, 368.0), pellets: 1, pellet_spread: 0.0, build: Build::Full, tracer: false, per_stack: 50, colour: [0.72, 0.62, 0.3] },
     // 7.62 x 51: the SLR, the Bren, the MAG and the L42A1 sniper rifle.
-    AmmoDef { kind: AmmoKind::NatoBall, caliber: Caliber::Nato, name: "7.62mm NATO ball", short: "Ball", cartridge: cartridge(147.0, 0.308, 0.40, 838.0), pellets: 1, pellet_spread: 0.0, build: Build::Full, tracer: false, per_stack: 20, colour: [0.55, 0.62, 0.35] },
-    AmmoDef { kind: AmmoKind::NatoTracer, caliber: Caliber::Nato, name: "7.62mm NATO tracer", short: "Tracer", cartridge: cartridge(142.0, 0.308, 0.36, 830.0), pellets: 1, pellet_spread: 0.0, build: Build::Full, tracer: true, per_stack: 20, colour: [0.85, 0.25, 0.2] },
-    AmmoDef { kind: AmmoKind::NatoArmourPiercing, caliber: Caliber::Nato, name: "7.62mm NATO armour piercing", short: "AP", cartridge: cartridge(139.0, 0.308, 0.39, 850.0), pellets: 1, pellet_spread: 0.0, build: Build::Piercing, tracer: false, per_stack: 20, colour: [0.2, 0.2, 0.22] },
-    AmmoDef { kind: AmmoKind::NatoMatch, caliber: Caliber::Nato, name: "7.62mm NATO match", short: "Match", cartridge: cartridge(168.0, 0.308, 0.46, 790.0), pellets: 1, pellet_spread: 0.0, build: Build::Expanding, tracer: false, per_stack: 20, colour: [0.9, 0.9, 0.85] },
+    AmmoDef { kind: AmmoKind::NatoBall, caliber: Caliber::Nato, name: "7.62mm NATO", short: "7.62", cartridge: cartridge(147.0, 0.308, 0.40, 838.0), pellets: 1, pellet_spread: 0.0, build: Build::Full, tracer: false, per_stack: 20, colour: [0.55, 0.62, 0.35] },
     // .303 British: the Lee-Enfield.
-    AmmoDef { kind: AmmoKind::BritishBall, caliber: Caliber::Britain, name: ".303 Mk VII ball", short: "Ball", cartridge: cartridge(174.0, 0.311, 0.42, 744.0), pellets: 1, pellet_spread: 0.0, build: Build::Full, tracer: false, per_stack: 20, colour: [0.6, 0.45, 0.25] },
-    AmmoDef { kind: AmmoKind::BritishTracer, caliber: Caliber::Britain, name: ".303 Mk VII tracer", short: "Tracer", cartridge: cartridge(166.0, 0.311, 0.38, 730.0), pellets: 1, pellet_spread: 0.0, build: Build::Full, tracer: true, per_stack: 20, colour: [0.8, 0.3, 0.25] },
-    AmmoDef { kind: AmmoKind::BritishArmourPiercing, caliber: Caliber::Britain, name: ".303 armour piercing", short: "AP", cartridge: cartridge(174.0, 0.311, 0.44, 740.0), pellets: 1, pellet_spread: 0.0, build: Build::Piercing, tracer: false, per_stack: 20, colour: [0.25, 0.25, 0.28] },
-    // 12 gauge: the Auto-5. Nine pellets of 00 buck, a one-ounce slug, or a load of fine shot.
-    AmmoDef { kind: AmmoKind::Buckshot, caliber: Caliber::Gauge12, name: "12 gauge 00 buckshot", short: "Buck", cartridge: cartridge(54.0, 0.33, 0.035, 400.0), pellets: 9, pellet_spread: 0.032, build: Build::Shot, tracer: false, per_stack: 10, colour: [0.7, 0.15, 0.15] },
-    AmmoDef { kind: AmmoKind::Slug, caliber: Caliber::Gauge12, name: "12 gauge slug", short: "Slug", cartridge: cartridge(438.0, 0.72, 0.12, 440.0), pellets: 1, pellet_spread: 0.0, build: Build::Slug, tracer: false, per_stack: 10, colour: [0.15, 0.3, 0.65] },
-    AmmoDef { kind: AmmoKind::Birdshot, caliber: Caliber::Gauge12, name: "12 gauge birdshot", short: "Bird", cartridge: cartridge(1.8, 0.11, 0.012, 380.0), pellets: 90, pellet_spread: 0.05, build: Build::Shot, tracer: false, per_stack: 10, colour: [0.75, 0.7, 0.2] },
+    AmmoDef { kind: AmmoKind::BritishBall, caliber: Caliber::Britain, name: ".303 British", short: ".303", cartridge: cartridge(174.0, 0.311, 0.42, 744.0), pellets: 1, pellet_spread: 0.0, build: Build::Full, tracer: false, per_stack: 20, colour: [0.6, 0.45, 0.25] },
+    // 12 gauge: the Auto-5. Nine pellets of 00 buck.
+    AmmoDef { kind: AmmoKind::Buckshot, caliber: Caliber::Gauge12, name: "12 gauge buckshot", short: "Buck", cartridge: cartridge(54.0, 0.33, 0.035, 400.0), pellets: 9, pellet_spread: 0.032, build: Build::Shot, tracer: false, per_stack: 10, colour: [0.7, 0.15, 0.15] },
 ];
 
 impl AmmoKind {
@@ -176,7 +160,7 @@ mod tests {
             assert_eq!(def.kind.def().name, def.name);
         }
         for caliber in Caliber::ALL {
-            assert!(AmmoKind::of(caliber).count() >= 2, "{caliber:?} has a choice of loads");
+            assert!(AmmoKind::of(caliber).count() >= 1, "{caliber:?} has a load");
         }
     }
 
@@ -187,12 +171,9 @@ mod tests {
     }
 
     #[test]
-    fn rifle_rounds_hit_far_harder_than_pistol_rounds_and_a_hollow_point_beats_a_jacket() {
+    fn rifle_rounds_hit_far_harder_than_pistol_rounds() {
         let pistol = AmmoKind::NineFmj.def().damage_at_muzzle();
         assert!(AmmoKind::NatoBall.def().damage_at_muzzle() > pistol * 4.0);
-        assert!(AmmoKind::NineHollowPoint.def().damage_at_muzzle() > pistol);
-        // An armour-piercing round gives up less than ball of the same size.
-        assert!(AmmoKind::NatoArmourPiercing.def().damage_at_muzzle() < AmmoKind::NatoBall.def().damage_at_muzzle() * 1.05);
     }
 
     #[test]
@@ -200,9 +181,6 @@ mod tests {
         let buck = AmmoKind::Buckshot.def();
         assert!(buck.damage_at_muzzle() > 100.0, "nine pellets together: {}", buck.damage_at_muzzle());
         assert!(buck.damage_at(buck.cartridge.muzzle_velocity) < 25.0, "one pellet alone is not much");
-        // Bird shot is a lot of small pellets: weak up close compared with buck.
-        assert!(AmmoKind::Birdshot.def().damage_at_muzzle() < buck.damage_at_muzzle());
-        assert!(AmmoKind::Slug.def().damage_at_muzzle() > 100.0);
     }
 
     #[test]
@@ -216,10 +194,5 @@ mod tests {
         for def in &AMMO {
             assert!(def.cartridge.form_factor() > 0.5 && def.cartridge.form_factor() < 4.0, "{:?} form factor {}", def.kind, def.cartridge.form_factor());
         }
-    }
-
-    #[test]
-    fn a_match_bullet_holds_its_speed_better_than_ball() {
-        assert!(AmmoKind::NatoMatch.def().cartridge.bc > AmmoKind::NatoBall.def().cartridge.bc);
     }
 }

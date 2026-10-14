@@ -40,14 +40,12 @@ Feature: Weapon slots, ammunition and the inventory
     When I hold fire for 1 seconds
     Then the gun fired between 1 and 1 shots
 
-  Scenario: A different load is chosen with B and goes in at the next reload
-    Given I fire 3 single shots
-    When I press B
-    Then the next reload puts in 9mm hollow point
-    When I press R
-    And the gun is back up
-    Then the magazine has 30 rounds
-    And the gun is loaded with 9mm hollow point
+  Scenario: A gun keeps its trigger setting while it is put away
+    When I press V
+    Then the trigger is set to semi
+    When I press 2
+    And I press 1
+    Then the trigger is set to semi
 
   Scenario: Tab opens the inventory, with the mouse free, and Tab closes it
     When I press Tab

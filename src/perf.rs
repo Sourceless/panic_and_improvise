@@ -124,7 +124,7 @@ struct Bench {
 
 // Named places to stand: the summit, the densest forest and the biggest village.
 fn camera_spots(map: &TerrainMap, plan: &VegetationPlan, cover: Option<&GroundCover>) -> Vec<(&'static str, Vec2, f32)> {
-    let mut spots = vec![("summit", map.spawn_point(), 0.0)];
+    let mut spots = vec![("summit", map.summit(), 0.0)];
     if let Some(at) = cover.and_then(|c| c.find(Cover::Meadow).or_else(|| c.find(Cover::Pasture))) {
         spots.push(("meadow", at, 0.3));
     }
@@ -248,7 +248,7 @@ fn auto_screenshot(
     mut exit: MessageWriter<AppExit>,
 ) {
     *frame += 1;
-    // FPS_SPOT=forest|town|summit picks where to stand (default: the summit spawn).
+    // FPS_SPOT=forest|town|summit picks where to stand (default: where the player spawns, the middle of the town).
     if *frame == 300 {
         if let (Ok(spot), Some(plan), Ok((mut transform, mut cam))) = (std::env::var("FPS_SPOT"), plan, camera.single_mut()) {
             if let Some(&(_, at, yaw)) = camera_spots(&map, &plan, cover.as_deref()).iter().find(|s| s.0 == spot) {

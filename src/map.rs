@@ -243,8 +243,18 @@ impl TerrainMap {
             .fold((f32::MAX, f32::MIN), |(lo, hi), &h| (lo.min(h), hi.max(h)))
     }
 
-    /// Where the player starts: the top of the tallest peak, or the origin on a flat map.
+    /// Where the player starts: the middle of the largest town (where its roads meet, so nothing is built
+    /// there), or the top of the tallest peak where the map has no settlement.
     pub fn spawn_point(&self) -> Vec2 {
+        self.pois
+            .iter()
+            .filter(|p| p.kind == PoiKind::Village)
+            .max_by(|a, b| a.radius.total_cmp(&b.radius))
+            .map_or_else(|| self.summit(), |p| p.position)
+    }
+
+    /// The top of the tallest peak, or the origin on a flat map.
+    pub fn summit(&self) -> Vec2 {
         let (lo, hi) = self.height_range();
         if hi - lo < 1e-3 {
             return Vec2::ZERO;

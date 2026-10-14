@@ -6,7 +6,7 @@ use bevy::prelude::*;
 
 use crate::ammo::AMMO;
 use crate::inventory::{Inventory, ItemKind, PackKind, Supply};
-use crate::loot::{Found, LootAssets, LootBox, Pickup, Rarity};
+use crate::loot::{Found, LootAssets, Pickup, Rarity};
 use crate::map::TerrainMap;
 use crate::target::spawn_dummy_at;
 use crate::weapons::WeaponKind;
@@ -60,8 +60,7 @@ fn build_range(
         let rarity = Rarity::Common;
         let size = 0.3;
         commands.spawn((
-            LootBox { rarity },
-            Pickup { rarity, found: Found { kind, count, loaded }, spot: (usize::MAX, n) },
+            Pickup { rarity, found: Found { kind, count, loaded }, spot: (usize::MAX, n), slot: 0 },
             Mesh3d(loot.mesh.clone()),
             MeshMaterial3d(loot.material(rarity)),
             Transform::from_translation(position + Vec3::Y * (size * 0.5 + 0.03)).with_scale(Vec3::splat(size)),

@@ -127,3 +127,13 @@ fn land_below_sea_level_is_lake_water() {
         }
     }
 }
+
+#[test]
+fn the_player_starts_in_the_middle_of_the_largest_town_on_dry_land() {
+    let map = map();
+    let town = map.pois.iter().filter(|p| p.kind == PoiKind::Village).max_by(|a, b| a.radius.total_cmp(&b.radius)).expect("there is a town");
+    assert_eq!(map.spawn_point(), town.position);
+    assert!(town.radius > 90.0, "the biggest place is a real town: {}", town.radius);
+    assert!(map.water_surface_at(map.spawn_point()).is_none(), "not in the water");
+    assert_ne!(map.spawn_point(), map.summit());
+}

@@ -597,23 +597,9 @@ fn sync_with_inventory(
                 inventory.active = slot;
             }
         }
-        if controls.just_pressed(Action::FireMode, &keys) && !gun.holstered {
-            let modes = gun.def().modes;
-            if let Some(i) = modes.iter().position(|&m| m == gun.mode) {
-                gun.mode = modes[(i + 1) % modes.len()];
-            }
-        }
-        if controls.just_pressed(Action::CycleAmmo, &keys) && !gun.holstered {
-            // The next load the gun takes that there are rounds of (or the one in it).
-            let loads: Vec<AmmoKind> = gun.def().ammo().filter(|&k| inventory.rounds(k) > 0 || k == gun.loaded).collect();
-            if let Some(i) = loads.iter().position(|&k| k == gun.selected) {
-                gun.selected = loads[(i + 1) % loads.len()];
-            } else if let Some(&first) = loads.first() {
-                gun.selected = first;
-            }
-        }
     }
-    // Take up what is in the slot that is in hand.
+    // Take up what is in the slot that is in hand, before any key is read for the gun in hand: a press
+    // on the frame a gun comes up is for that gun.
     let wanted = inventory.slots[inventory.active];
     match wanted {
         None => {
@@ -628,10 +614,37 @@ fn sync_with_inventory(
                     let load = item.loaded_with.unwrap_or(kind.def().default_ammo);
                     gun.equip(kind, load, item.loaded);
                     gun.selected = load;
+                    // It comes up as its trigger was left.
+                    if let Some(mode) = item.fire_mode.filter(|m| kind.def().modes.contains(m)) {
+                        gun.mode = mode;
+                    }
                     gun.item = Some(item.id);
                 }
             }
             gun.holstered = false;
+        }
+    }
+    if free && !gun.holstered {
+        if controls.just_pressed(Action::FireMode, &keys) {
+            let modes = gun.def().modes;
+            if let Some(i) = modes.iter().position(|&m| m == gun.mode) {
+                gun.mode = modes[(i + 1) % modes.len()];
+            }
+        }
+        if controls.just_pressed(Action::CycleAmmo, &keys) {
+            // The next load the gun takes that there are rounds of (or the one in it).
+            let loads: Vec<AmmoKind> = gun.def().ammo().filter(|&k| inventory.rounds(k) > 0 || k == gun.loaded).collect();
+            if let Some(i) = loads.iter().position(|&k| k == gun.selected) {
+                gun.selected = loads[(i + 1) % loads.len()];
+            } else if let Some(&first) = loads.first() {
+                gun.selected = first;
+            }
+        }
+    }
+    // What the gun has in it, and how its trigger is set, are the item's.
+    if let Some(id) = gun.item {
+        for slot in inventory.slots.iter_mut().flatten().filter(|i| i.id == id) {
+            slot.fire_mode = Some(gun.mode);
         }
     }
     // With a telescope up to the eye the gun itself is out of sight.

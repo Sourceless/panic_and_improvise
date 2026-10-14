@@ -151,6 +151,8 @@ pub struct Item {
     /// For a weapon: the rounds in it and what they are.
     pub loaded: u32,
     pub loaded_with: Option<AmmoKind>,
+    /// For a weapon: how its trigger was left set, once it has been in hand.
+    pub fire_mode: Option<crate::weapons::FireMode>,
 }
 
 impl Item {
@@ -294,7 +296,7 @@ impl Inventory {
             ItemKind::Weapon(w) => (w.def().magazine, Some(w.def().default_ammo)),
             _ => (0, None),
         };
-        Item { id, kind, count, loaded, loaded_with }
+        Item { id, kind, count, loaded, loaded_with, fire_mode: None }
     }
 
     /// A gun with `loaded` rounds of `with` in it.
@@ -311,7 +313,7 @@ impl Inventory {
         let sterling = inv.make_gun(WeaponKind::Sterling, AmmoKind::NineFmj, 30);
         let pistol = inv.make_gun(WeaponKind::HiPower, AmmoKind::NineFmj, 13);
         inv.slots = [Some(sterling), Some(pistol)];
-        for (kind, count) in [(AmmoKind::NineFmj, 150), (AmmoKind::NineHollowPoint, 50)] {
+        for (kind, count) in [(AmmoKind::NineFmj, 150)] {
             let item = inv.make(ItemKind::Ammo(kind), count);
             inv.add(item).expect("the pockets hold the starting rounds");
         }
@@ -660,7 +662,7 @@ mod tests {
         counts.sort();
         assert_eq!(counts, vec![20, 50]);
         assert_eq!(inv.rounds(AmmoKind::NineFmj), 70);
-        assert_eq!(inv.rounds(AmmoKind::NineHollowPoint), 0);
+        assert_eq!(inv.rounds(AmmoKind::NatoBall), 0);
     }
 
     #[test]
