@@ -21,10 +21,12 @@ use crate::health::PlayerHealth;
 use crate::impact::surface_hit;
 use crate::loot::{lay_contents, lean_toward_ammo, roll_item, Dropped, LootAssets, Rarity};
 use crate::map::TerrainMap;
-use crate::navigation::{clear_between, find_route, SEARCH_LIMIT};
+use crate::net_host::Host;
+use crate::navigation::Pursuit;
 use crate::player::FpsCamera;
 use crate::settlement_plan::Rng;
 use crate::sound::{arrival_delay, play_after};
+use crate::walking::{stand, walk, MIN_FLATNESS};
 use crate::zones::ZoneMap;
 use crate::MAP_HALF_SIZE;
 
@@ -39,8 +41,6 @@ const SPAWN_RING: (f32, f32) = (30.0, 60.0);
 const TRIES: usize = 16;
 /// One this far from the player, and out of sight, is let go.
 const RETIRE_DISTANCE: f32 = 110.0;
-/// The ground steeper than this (the up part of its normal) is too steep to stand a zombie on.
-const MIN_FLATNESS: f32 = 0.8;
 /// The view counts as this much wider than it is, so that a place just outside the edge of the screen
 /// (or in view when the sprint widens it) is still taken as seen.
 const VIEW_MARGIN: f32 = 1.35;
@@ -70,18 +70,14 @@ const LOOK_EVERY: f32 = 0.3;
 /// How far off the player, metres, a zombie works out a way round what is in its path; further than that it
 /// just heads for them.
 const ROUTE_RANGE: f32 = 45.0;
-/// How often, seconds, a following zombie checks that its way is still the best one, and how many may work
-/// out a new one in a single frame (the rest wait their turn).
-const REROUTE_EVERY: f32 = 0.6;
+/// How many may work out a new route in a single frame (the rest wait their turn).
 const ROUTES_PER_FRAME: usize = 2;
-/// How near, metres, a point of its route has to be to count as reached.
-const REACHED: f32 = 0.7;
 /// The size of the body, metres, that the routes are worked out for: a little under the real one, so that a
 /// doorway is found where a zombie fits through it.
 const ROUTE_RADIUS: f32 = 0.28;
 /// The widest the body of any kind is taken to be, metres across a half: the big one is built broad, but goes
 /// through a door like the rest.
-const MOST_RADIUS: f32 = 0.42;
+const MOST_RADIUS: f32 = 0.29;
 /// How long a fall takes, and how long the body lies there, seconds.
 const FALL_TIME: f32 = 0.6;
 const LIE_TIME: f32 = 8.0;
@@ -159,6 +155,9 @@ impl ZombieKind {
     }
 }
 
+/// What `Zombie::chasing` is when it is after the player at the keyboard.
+const THE_PLAYER: u8 = u8::MAX;
+
 #[derive(Component)]
 pub struct Zombie {
     pub kind: ZombieKind,
@@ -181,10 +180,14 @@ pub struct Zombie {
     alert: bool,
     /// How long until its next blow, once it is close enough to strike.
     strike_in: f32,
-    /// The way it is going round whatever is in its way to the player: the points still to go through, and
-    /// how long until it looks again whether the way is still the right one. Empty is straight on.
-    route: Vec<Vec2>,
-    replan_in: f32,
+    /// Its way round whatever is between it and who it is after.
+    pursuit: Pursuit,
+    /// Who it is after: `THE_PLAYER`, or the id of a player who has joined.
+    chasing: u8,
+    /// How fast it is falling, if it has stepped off an edge.
+    fall: f32,
+    /// The name the network knows it by.
+    pub net_id: u32,
     /// How long it has been dead.
     dead_for: f32,
     looted: bool,
@@ -193,7 +196,12 @@ pub struct Zombie {
 impl Zombie {
     pub fn new(kind: ZombieKind, yaw: f32) -> Self {
         let t = kind.traits();
-        Zombie { kind, health: t.health, yaw, following: false, sees_player: false, look_in: 0.0, stroll: Vec2::ZERO, stroll_left: 0.0, stride: 0.0, walked: 0.0, step_due: false, groan_in: 2.0, alert: false, strike_in: t.wind_up, route: Vec::new(), replan_in: 0.0, dead_for: 0.0, looted: false }
+        Zombie { kind, health: t.health, yaw, following: false, sees_player: false, look_in: 0.0, stroll: Vec2::ZERO, stroll_left: 0.0, stride: 0.0, walked: 0.0, step_due: false, groan_in: 2.0, alert: false, strike_in: t.wind_up, pursuit: Pursuit::default(), chasing: THE_PLAYER, fall: 0.0, net_id: 0, dead_for: 0.0, looted: false }
+    }
+
+    /// A zombie that the network knows as number `id`.
+    pub fn numbered(kind: ZombieKind, yaw: f32, id: u32) -> Self {
+        Zombie { net_id: id, ..Zombie::new(kind, yaw) }
     }
 
     pub fn alive(&self) -> bool {
@@ -286,7 +294,7 @@ impl<'a> Sight<'a> {
 
 /// Whether the ground at `p` can have a zombie of `radius` put on it: dry land, not too steep, nothing solid
 /// there, and inside the map.
-fn standable(map: &TerrainMap, colliders: &Colliders, p: Vec2, radius: f32) -> bool {
+pub fn standable(map: &TerrainMap, colliders: &Colliders, p: Vec2, radius: f32) -> bool {
     if p.abs().max_element() > MAP_HALF_SIZE - 10.0 || map.water_surface_at(p).is_some() || map.normal_at(p).y < MIN_FLATNESS {
         return false;
     }
@@ -328,8 +336,10 @@ fn velocity(zombie: &mut Zombie, at: Vec2, player: Vec2, aim: Vec2, dt: f32, mut
         zombie.following = false;
     }
     if zombie.following {
+        // It stops an arm's length off, unless it is going round something (up a stair, say) to get there.
         let toward = aim - at;
-        return if distance > CLOSEST && toward.length() > 1e-3 { toward.normalize() * t.chase_speed } else { Vec2::ZERO };
+        let going_straight = aim == player;
+        return if (distance > CLOSEST || !going_straight) && toward.length() > 1e-3 { toward.normalize() * t.chase_speed } else { Vec2::ZERO };
     }
     zombie.stroll_left -= dt;
     if zombie.stroll_left <= 0.0 {
@@ -396,7 +406,7 @@ pub fn zombie_loot(kind: ZombieKind, mut next: impl FnMut() -> f32) -> Vec<Dropp
 
 /// The source of chance for everything zombies do.
 #[derive(Resource)]
-pub struct ZombieDice(Rng);
+pub struct ZombieDice(Rng, u32);
 
 impl Default for ZombieDice {
     fn default() -> Self {
@@ -406,13 +416,19 @@ impl Default for ZombieDice {
         for _ in 0..4 {
             rng.unit();
         }
-        ZombieDice(rng)
+        ZombieDice(rng, 0)
     }
 }
 
 impl ZombieDice {
     fn unit(&mut self) -> f32 {
         self.0.unit()
+    }
+
+    /// A number no other zombie has had.
+    fn next_id(&mut self) -> u32 {
+        self.1 = self.1.wrapping_add(1);
+        self.1
     }
 }
 
@@ -471,12 +487,12 @@ fn load_voices(mut commands: Commands, assets: Option<Res<AssetServer>>) {
 }
 
 /// Puts a zombie down with its feet at `base`, facing `yaw`: a stooped figure with its arms out in front.
-fn spawn_zombie(commands: &mut Commands, assets: &ZombieAssets, kind: ZombieKind, base: Vec3, yaw: f32) {
+fn spawn_zombie(commands: &mut Commands, assets: &ZombieAssets, kind: ZombieKind, base: Vec3, yaw: f32, id: u32) {
     let t = kind.traits();
     let (skin, rags) = &assets.looks[kind.index()];
     let part = |centre: Vec3, size: Vec3, material: &Handle<StandardMaterial>| (Mesh3d(assets.cuboid.clone()), MeshMaterial3d(material.clone()), Transform::from_translation(centre).with_scale(size));
     commands
-        .spawn((Zombie::new(kind, yaw), Transform::from_translation(base).with_rotation(Quat::from_rotation_y(yaw)).with_scale(Vec3::new(t.girth, t.scale, t.girth)), Visibility::default()))
+        .spawn((Zombie::numbered(kind, yaw, id), Transform::from_translation(base).with_rotation(Quat::from_rotation_y(yaw)).with_scale(Vec3::new(t.girth, t.scale, t.girth)), Visibility::default()))
         .with_children(|z| {
             z.spawn(part(Vec3::new(0.0, 1.1, 0.0), Vec3::new(0.5, 0.65, 0.28), rags));
             z.spawn(part(Vec3::new(0.0, 1.6, -0.08), Vec3::new(0.24, 0.26, 0.24), skin));
@@ -515,7 +531,8 @@ fn spawn_zombies(
     if let Some(base) = pick_spawn(&sight, &map, &colliders, player, kind, || dice.unit()) {
         // Facing the player, as if they had been drawn there.
         let toward = player - Vec2::new(base.x, base.z);
-        spawn_zombie(&mut commands, &assets, kind, base, facing(toward));
+        let id = dice.next_id();
+        spawn_zombie(&mut commands, &assets, kind, base, facing(toward), id);
     }
 }
 
@@ -540,78 +557,108 @@ fn body_radius(kind: ZombieKind) -> f32 {
     (0.35 * kind.traits().girth).min(MOST_RADIUS)
 }
 
-/// Where a following zombie at `at` should head this moment: the player, or, when something is in the way,
-/// the next point of a route round it. It looks again how the way lies every so often, and only a few at a
-/// time (`routes_left` is how many more may this frame).
-#[allow(clippy::too_many_arguments)]
-fn steer(zombie: &mut Zombie, at: Vec2, player: Vec2, dt: f32, routes_left: &mut usize, map: &TerrainMap, colliders: &Colliders, dice: &mut ZombieDice) -> Vec2 {
-    if !zombie.following || at.distance(player) > ROUTE_RANGE {
-        zombie.route.clear();
-        return player;
-    }
-    zombie.replan_in -= dt;
-    if zombie.replan_in <= 0.0 {
-        let open = |p: Vec2| standable(map, colliders, p, ROUTE_RADIUS);
-        if clear_between(at, player, open) {
-            zombie.route.clear();
-            zombie.replan_in = REROUTE_EVERY * (0.7 + 0.6 * dice.unit());
-        } else if *routes_left > 0 {
-            *routes_left -= 1;
-            zombie.route = find_route(at, player, SEARCH_LIMIT, open).points;
-            zombie.replan_in = REROUTE_EVERY * (0.7 + 0.6 * dice.unit());
-        }
-    }
-    while zombie.route.first().is_some_and(|&p| at.distance(p) < REACHED) {
-        zombie.route.remove(0);
-    }
-    zombie.route.first().copied().unwrap_or(player)
+/// Somebody a zombie might go after.
+#[derive(Clone, Copy)]
+struct Target {
+    /// `THE_PLAYER`, or the id of a player who has joined.
+    who: u8,
+    /// Where their feet are, and their eyes.
+    feet: Vec3,
+    eye: Vec3,
 }
 
-fn move_zombies(
+/// How much nearer than another a target has to be for a zombie to give up the one it is after for it.
+const STICKINESS: f32 = 0.75;
+
+/// Who `zombie`, with its feet at `at`, goes after: whoever is nearest, though it keeps on after the one it
+/// has unless another is quite a bit nearer.
+fn choose(zombie: &Zombie, at: Vec3, targets: &[Target]) -> Option<Target> {
+    let cost = |t: &Target| {
+        let d = Vec2::new(t.feet.x - at.x, t.feet.z - at.z).length() + 2.0 * (t.feet.y - at.y).abs();
+        if t.who == zombie.chasing { d * STICKINESS } else { d }
+    };
+    targets.iter().copied().min_by(|a, b| cost(a).total_cmp(&cost(b)))
+}
+
+/// Where a following zombie at `at` (x, feet, z) should head this moment: `target`, or, when something is in
+/// the way (or they are on another floor), the next point of a route round it (see `Pursuit`). `routes_left`
+/// is how many more may be worked out this frame.
+#[allow(clippy::too_many_arguments)]
+fn steer(zombie: &mut Zombie, at: Vec3, target: Vec3, dt: f32, routes_left: &mut usize, map: &TerrainMap, colliders: &Colliders, dice: &mut ZombieDice) -> Vec2 {
+    let goal = Vec2::new(target.x, target.z);
+    if !zombie.following || Vec2::new(at.x, at.z).distance(goal) > ROUTE_RANGE {
+        zombie.pursuit.clear();
+        return goal;
+    }
+    zombie.pursuit.aim(at, target, dt, routes_left, || dice.unit(), |p, feet| stand(map, colliders, p, feet, ROUTE_RADIUS))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn move_zombies(
     time: Res<Time>,
     mut dice: ResMut<ZombieDice>,
     mut health: ResMut<PlayerHealth>,
     map: Res<TerrainMap>,
     colliders: Res<Colliders>,
-    camera: Query<&GlobalTransform, With<FpsCamera>>,
+    camera: Query<(&GlobalTransform, &FpsCamera)>,
+    mut host: Option<ResMut<Host>>,
     mut zombies: Query<(&mut Transform, &mut Zombie)>,
 ) {
-    let Ok(eye) = camera.single() else { return };
+    let Ok((eye, cam)) = camera.single() else { return };
     let dt = time.delta_secs();
-    let player = Vec2::new(eye.translation().x, eye.translation().z);
+    // The player at the keyboard, and any who have joined and are on their feet.
+    let eye = eye.translation();
+    let mut targets = vec![Target { who: THE_PLAYER, feet: Vec3::new(eye.x, cam.floor + cam.air_height, eye.z), eye }];
+    if let Some(host) = &host {
+        targets.extend(host.lobby.clients.iter().filter(|c| c.alive()).map(|c| {
+            let feet = Vec3::new(c.state.x, c.state.y, c.state.z);
+            Target { who: c.id, feet, eye: feet + Vec3::Y * crate::net::EYE_HEIGHT }
+        }));
+    }
     let mut routes_left = ROUTES_PER_FRAME;
+    let mut blows: Vec<(u8, f32)> = Vec::new();
     for (mut transform, mut zombie) in &mut zombies {
         if !zombie.alive() {
             continue;
         }
         let t = zombie.kind.traits();
-        let at = Vec2::new(transform.translation.x, transform.translation.z);
+        let feet = transform.translation;
+        let at = Vec2::new(feet.x, feet.z);
+        let Some(target) = choose(&zombie, feet, &targets) else { continue };
+        zombie.chasing = target.who;
+        let goal = Vec2::new(target.feet.x, target.feet.z);
         zombie.look_in -= dt;
         if zombie.look_in <= 0.0 {
             zombie.look_in = LOOK_EVERY;
-            let head = transform.translation + Vec3::Y * 1.6 * t.scale;
-            zombie.sees_player = head.distance(eye.translation()) < NOTICE_SIGHT && surface_hit(&map, head, eye.translation()).is_none() && colliders.segment_hit(head, eye.translation()).is_none();
+            let head = feet + Vec3::Y * 1.6 * t.scale;
+            zombie.sees_player = head.distance(target.eye) < NOTICE_SIGHT && surface_hit(&map, head, target.eye).is_none() && colliders.segment_hit(head, target.eye).is_none();
         }
-        let aim = steer(&mut zombie, at, player, dt, &mut routes_left, &map, &colliders, &mut dice);
-        let velocity = velocity(&mut zombie, at, player, aim, dt, || dice.unit());
-        // Close enough to the player, and not far above or below them, it hits them.
-        let below_eye = eye.translation().y - transform.translation.y;
-        let within_reach = zombie.following && at.distance(player) <= STRIKE_REACH * t.girth.max(1.0) && (STRIKE_BELOW_EYE.0..=STRIKE_BELOW_EYE.1 + t.scale - 1.0).contains(&below_eye);
+        let aim = steer(&mut zombie, feet, target.feet, dt, &mut routes_left, &map, &colliders, &mut dice);
+        let velocity = velocity(&mut zombie, at, goal, aim, dt, || dice.unit());
+        // Close enough, and not far above or below them, it hits them.
+        let below_eye = target.eye.y - feet.y;
+        let within_reach = zombie.following && at.distance(goal) <= STRIKE_REACH * t.girth.max(1.0) && (STRIKE_BELOW_EYE.0..=STRIKE_BELOW_EYE.1 + t.scale - 1.0).contains(&below_eye);
         if strikes(&mut zombie, within_reach, dt) {
-            health.hurt(t.strike_damage);
+            if target.who == THE_PLAYER {
+                health.hurt(t.strike_damage);
+            } else {
+                blows.push((target.who, t.strike_damage));
+            }
         }
-        let wanted = at + velocity * dt;
-        let ground = map.surface_height_at(at);
-        let moved = colliders.resolve(wanted, body_radius(zombie.kind), ground, STEP_UP);
-        // The water and the steep are not for walking into: it turns about instead.
-        if velocity != Vec2::ZERO && (map.water_surface_at(moved).is_some() || map.normal_at(moved).y < MIN_FLATNESS) {
+        let mut falling = zombie.fall;
+        let (moved, new_feet) = walk(&map, &colliders, at, feet.y, &mut falling, velocity, dt, body_radius(zombie.kind));
+        zombie.fall = falling;
+        // The water and the steep are not for walking into: it turns about instead. (A floor or a stair over
+        // them is another matter.)
+        let on_the_ground = new_feet <= map.surface_height_at(moved) + 0.05;
+        if velocity != Vec2::ZERO && on_the_ground && (map.water_surface_at(moved).is_some() || map.normal_at(moved).y < MIN_FLATNESS) {
             zombie.stroll = -zombie.stroll;
             zombie.following = false;
             continue;
         }
         if velocity != Vec2::ZERO {
-            let target = facing(velocity);
-            let turn = (target - zombie.yaw + PI).rem_euclid(TAU) - PI;
+            let heading = facing(velocity);
+            let turn = (heading - zombie.yaw + PI).rem_euclid(TAU) - PI;
             zombie.yaw += turn * (1.0 - (-6.0 * dt).exp());
             zombie.stride += dt * velocity.length() * 4.0 / t.scale;
             zombie.walked += at.distance(moved);
@@ -620,9 +667,14 @@ fn move_zombies(
                 zombie.step_due = true;
             }
         }
-        transform.translation = Vec3::new(moved.x, map.surface_height_at(moved), moved.y);
+        transform.translation = Vec3::new(moved.x, new_feet, moved.y);
         // A lurch from side to side as it goes.
         transform.rotation = Quat::from_rotation_y(zombie.yaw) * Quat::from_rotation_z(zombie.stride.sin() * 0.07);
+    }
+    if let Some(host) = &mut host {
+        for (id, damage) in blows {
+            host.hurt(id, damage);
+        }
     }
 }
 
@@ -1027,6 +1079,54 @@ mod tests {
         }
         assert!(nearest < STRIKE_REACH, "it got no nearer than {nearest} m");
         assert!(through_the_door, "it came in by the doorway");
+    }
+
+    #[test]
+    fn zombies_go_up_the_stair_of_a_house_to_get_at_a_player_on_the_floor_above() {
+        use std::time::Duration;
+        let params = crate::params::GenParams::default();
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
+        let roads = crate::roads::RoadNetwork::generate(&map, &params);
+        let settlements = crate::settlement_plan::SettlementPlan::generate(&map, &roads);
+        let mut tried = 0;
+        for b in settlements.layouts.iter().flat_map(|l| &l.buildings) {
+            let ground = crate::settlement::ground_under(&map, b);
+            let mut rng = Rng::from_position(b.centre);
+            let (layouts, model) = crate::building::planned(b, &ground.site, &mut rng);
+            let Some(layout) = layouts.first().filter(|l| l.storeys.len() >= 2) else { continue };
+            let Some(door) = layout.storeys[0].doors_outside.iter().find(|d| d.side == crate::building::plan::Side::Front) else { continue };
+            let mut colliders = Colliders::default();
+            for solid in model.solids(Vec3::ZERO, 0.0) {
+                colliders.add(solid);
+            }
+            let room = layout.storeys[1].rooms.iter().max_by(|a, b| a.rect.area().total_cmp(&b.rect.area())).unwrap().rect.centre();
+            let floor = layout.floor_of(1);
+            let mut app = App::new();
+            app.init_resource::<Time>().init_resource::<ZombieDice>().init_resource::<PlayerHealth>().insert_resource(TerrainMap::flat(0.0)).insert_resource(colliders).add_systems(Update, move_zombies);
+            let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: crate::player::Stance::Stand, eye_height: 1.8, jump_spent_standing: false, floor, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: floor };
+            app.world_mut().spawn((camera, GlobalTransform::from(Transform::from_xyz(room.x, floor + 1.8, room.y))));
+            let mut zombie = Zombie::new(Walker, 0.0);
+            zombie.following = true;
+            let id = app.world_mut().spawn((zombie, Transform::from_xyz(door.along, 0.0, layout.inside.z0 - 3.0))).id();
+            let mut best = f32::MAX;
+            for _ in 0..(150.0 / 0.05) as usize {
+                app.world_mut().resource_mut::<Time>().advance_by(Duration::from_millis(50));
+                app.update();
+                let at = app.world().get::<Transform>(id).unwrap().translation;
+                if (at.y - floor).abs() < 0.5 {
+                    best = best.min(Vec2::new(at.x - room.x, at.z - room.y).length());
+                }
+                if best < STRIKE_REACH {
+                    break;
+                }
+            }
+            assert!(best < STRIKE_REACH, "{:?} at {:?}: the nearest it got upstairs was {best} m", b.kind, b.centre);
+            tried += 1;
+            if tried >= 6 {
+                break;
+            }
+        }
+        assert!(tried >= 3, "only {tried} houses with a floor above");
     }
 
     #[test]

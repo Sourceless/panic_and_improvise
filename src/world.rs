@@ -49,8 +49,56 @@ pub fn build_world(
     commands.insert_resource(roads);
 }
 
+/// Everything solid in the world for `map`, built without a window, a renderer or any textures: the walls,
+/// fences, trees and the rest that the player bumps into, exactly as `build_world` places them. For
+/// something that has to move through the world without being shown it, such as a bot.
+///
+/// The world is built into a throwaway `World` with plain asset stores, and everything but the colliders is
+/// thrown away.
+pub fn headless_colliders(map: &TerrainMap, params: &GenParams) -> Colliders {
+    use bevy::ecs::world::CommandQueue;
+    use crate::terrain::TerrainTextures;
+    let mut world = World::new();
+    let mut queue = CommandQueue::default();
+    {
+        let mut commands = Commands::new(&mut queue, &world);
+        let textures = TerrainTextures { ground: crate::ground_textures::GroundArrays { diffuse: Handle::default(), normal: Handle::default() }, hedge: Handle::default(), wood: Handle::default(), wall_stone: Handle::default(), asphalt: Handle::default(), track: Handle::default() };
+        build_world(
+            &mut commands,
+            &mut Assets::default(),
+            &mut Assets::default(),
+            &mut Assets::default(),
+            &mut Assets::default(),
+            &mut Assets::default(),
+            &mut Assets::default(),
+            &mut Assets::default(),
+            &textures,
+            map,
+            params,
+        );
+    }
+    queue.apply(&mut world);
+    world.remove_resource::<Colliders>().unwrap_or_default()
+}
+
 /// WORLD_SKIP=trees,fields,boundaries,settlements leaves those categories out, to measure what
 /// each costs. Development only.
 pub fn skip(category: &str) -> bool {
     std::env::var("WORLD_SKIP").is_ok_and(|v| v.split(',').any(|c| c == category))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_solids_of_a_world_can_be_built_with_no_window_and_are_the_same_every_time() {
+        let params = GenParams::default();
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
+        let started = std::time::Instant::now();
+        let first = headless_colliders(&map, &params);
+        eprintln!("built {} solids in {:?}", first.len(), started.elapsed());
+        assert!(first.len() > 1000, "{} solids", first.len());
+        assert_eq!(first.len(), headless_colliders(&map, &params).len(), "the same map gives the same world");
+    }
 }

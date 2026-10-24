@@ -17,7 +17,7 @@ fn main() {
             ..default()
         }))
         .add_plugins((GamePlugin, TerrainPlugin, EguiPlugin::default()))
-        .add_plugins((fps_prototype::crosshair::CrosshairPlugin, fps_prototype::health::HealthPlugin, fps_prototype::zombie::ZombiePlugin))
+        .add_plugins((fps_prototype::crosshair::CrosshairPlugin, fps_prototype::health::HealthPlugin, fps_prototype::zombie::ZombiePlugin, fps_prototype::net_host::HostPlugin::from_env()))
         // The menu Escape opens.
         .add_systems(EguiPrimaryContextPass, (fps_prototype::menu::draw_menu, fps_prototype::inventory_ui::draw_inventory, fps_prototype::hud::draw_hud))
         .run();
@@ -52,9 +52,16 @@ fn command_line() -> Option<i32> {
             unsafe { std::env::set_var("FPS_RANGE", "1") };
             None
         }
+        Some("--host") => {
+            // Hosting is switched on by the environment too, for the plugin to see.
+            let address = args.get(1).cloned().unwrap_or_else(|| "0.0.0.0".to_string());
+            unsafe { std::env::set_var("FPS_HOST", address) };
+            None
+        }
         Some("--help") | Some("-h") => {
             println!("fps_prototype                        play");
             println!("fps_prototype --range                  play on a shooting range: every gun and load lying out, dummies to 300 m");
+            println!("fps_prototype --host [address[:port]]  play, and let others join over UDP (default 0.0.0.0:7777); `cargo run --bin bot` joins one");
             println!("fps_prototype --set-preset <name>    save a keyboard layout (qwerty, colemak_mod_dh) as your controls, and quit");
             println!("In the game, Escape opens the menu, where the layout can be chosen, keys changed and saved.");
             println!("Saved controls live in {}", controls_path().display());

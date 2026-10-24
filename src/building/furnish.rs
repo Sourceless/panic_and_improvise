@@ -125,9 +125,27 @@ impl Ctx<'_> {
         None
     }
 
+    /// Takes from the tops that things can be put on the part that a box over `r`, reaching from `y0` to
+    /// `y1`, is in the way of: a backrest on a sofa, a television on its stand, a mattress on a bed. What
+    /// is left of a top, if it is still big enough to use, is the largest piece.
+    fn clear_tops_under(&mut self, r: &Rect, y0: f32, y1: f32) {
+        let mut kept = Vec::new();
+        for (top, height) in std::mem::take(&mut self.tops) {
+            // In the way if it overlaps the top and stands up into the space above it that a box of loot takes.
+            let in_the_way = top.overlaps(r) && y1 > height + 0.01 && y0 < height + LOOT_HEADROOM;
+            if !in_the_way {
+                kept.push((top, height));
+            } else if let Some(piece) = top.minus(r).into_iter().filter(|p| usable_top(p)).max_by(|a, b| a.area().total_cmp(&b.area())) {
+                kept.push((piece, height));
+            }
+        }
+        self.tops = kept;
+    }
+
     /// Adds a box standing on the floor.
     pub fn solid_box(&mut self, r: &Rect, y0: f32, h: f32, colour: Rgb, material: Option<Material>) {
-        if material.is_some() && y0 + h >= 0.3 && y0 + h <= 1.3 && r.area() >= 0.15 && r.width().min(r.depth()) >= 0.35 {
+        self.clear_tops_under(r, y0, y0 + h);
+        if material.is_some() && y0 + h >= 0.3 && y0 + h <= 1.3 && usable_top(r) {
             self.tops.push((*r, y0 + h));
         }
         self.model.span(Vec3::new(r.x0, self.floor + y0, r.z0), Vec3::new(r.x1, self.floor + y0 + h, r.z1), colour, Layer::Interior, material);
@@ -138,6 +156,14 @@ impl Ctx<'_> {
         self.solid_box(r, y0, h, colour, None);
     }
 }
+
+/// Whether a top is big enough to put a box of loot on.
+fn usable_top(r: &Rect) -> bool {
+    r.area() >= 0.15 && r.width().min(r.depth()) >= 0.35
+}
+
+/// How high above a top, metres, anything standing on it is in the way of a box of loot.
+const LOOT_HEADROOM: f32 = 0.5;
 
 pub fn furnish(model: &mut Model, room: &Room, avoid: &[Rect], floor: f32, height: f32, style: &Style, rng: &mut Rng) {
     let mut ctx = Ctx { model, clear: room.rect.grown(-0.22), avoid, taken: Vec::new(), tops: Vec::new(), floor, height, rng };
@@ -272,6 +298,13 @@ fn bedroom(c: &mut Ctx) {
         _ => Rect::new(strip.x0 + 0.1, strip.z0 + 0.1, strip.x1 - 0.1, strip.z1 - 0.1),
     };
     c.flat(&pillows, 0.52, 0.1, LINEN);
+    // Things lie on the mattress at the foot of the bed, not in the pillows or the headboard, nor down in the
+    // frame under the mattress.
+    c.tops.retain(|(r, _)| !r.overlaps(&bed));
+    let foot = bed_foot(&mattress, side);
+    if usable_top(&foot) {
+        c.tops.push((foot, MATTRESS_TOP));
+    }
 
     if let Some((r, _)) = c.against_a_wall(1.2, 0.6, &WALLS) {
         c.solid_box(&r, 0.0, 1.9, WOOD, Some(Material::Wood));
@@ -287,6 +320,24 @@ fn bedroom(c: &mut Ctx) {
         }
     }
     rug(c, 0.5);
+}
+
+/// How high the top of a mattress is.
+const MATTRESS_TOP: f32 = 0.52;
+
+/// How far from the head of a bed the pillows reach, and the headboard, with a hand's breadth to spare.
+const PILLOWS_REACH: f32 = 0.5;
+
+/// The part of a bed's `mattress` that things can lie on: all but the head end, against the wall `head`, where
+/// the pillows are.
+fn bed_foot(mattress: &Rect, head: Side) -> Rect {
+    let m = mattress;
+    match head {
+        Side::Front => Rect::new(m.x0, m.z0 + PILLOWS_REACH, m.x1, m.z1),
+        Side::Back => Rect::new(m.x0, m.z0, m.x1, m.z1 - PILLOWS_REACH),
+        Side::Left => Rect::new(m.x0 + PILLOWS_REACH, m.z0, m.x1, m.z1),
+        Side::Right => Rect::new(m.x0, m.z0, m.x1 - PILLOWS_REACH, m.z1),
+    }
 }
 
 fn rug(c: &mut Ctx, chance: f32) {
@@ -834,8 +885,15 @@ fn workshop(c: &mut Ctx) {
 }
 
 #[cfg(test)]
-mod loot_count_tests {
+mod tests {
     use super::*;
+
+    fn with_ctx<R>(room: Rect, seed: f32, f: impl FnOnce(&mut Ctx) -> R) -> R {
+        let mut model = Model { items: Vec::new(), lights: Vec::new(), loot: Vec::new() };
+        let mut rng = Rng::from_position(Vec2::new(seed, 3.5));
+        let mut ctx = Ctx { model: &mut model, clear: room, avoid: &[], taken: Vec::new(), tops: Vec::new(), floor: 0.0, height: 2.6, rng: &mut rng };
+        f(&mut ctx)
+    }
 
     #[test]
     fn a_fraction_of_a_box_is_a_box_that_often() {
@@ -855,5 +913,80 @@ mod loot_count_tests {
             assert!(loot_count(kind, 40.0) > loot_count(kind, 10.0));
         }
         assert_eq!(loot_count(RoomKind::Tower, 6.0), 0.0);
+    }
+
+    #[test]
+    fn what_stands_up_from_a_top_takes_that_part_of_it_away_and_a_rug_does_not() {
+        with_ctx(Rect::new(0.0, 0.0, 6.0, 6.0), 1.0, |c| {
+            let sofa = Rect::new(1.0, 1.0, 3.0, 1.9);
+            c.solid_box(&sofa, 0.0, 0.45, FABRICS[0], Some(Material::Wood));
+            assert_eq!(c.tops.len(), 1);
+            // A rug does not touch it; a backrest takes its strip.
+            c.flat(&sofa, 0.0, 0.02, LINEN);
+            assert_eq!(c.tops[0].0, sofa);
+            let back = Rect::new(1.0, 1.68, 3.0, 1.9);
+            c.solid_box(&back, 0.45, 0.4, FABRICS[0], None);
+            assert_eq!(c.tops.len(), 1);
+            let (seat, height) = c.tops[0];
+            assert!(!seat.overlaps(&back) && seat.area() > 1.2 && height == 0.45, "{seat:?}");
+            // A box that fills what is left leaves nothing to put things on.
+            c.solid_box(&seat, 0.45, 0.4, FABRICS[0], None);
+            assert!(c.tops.is_empty());
+            // One high above, or well below, is not in the way.
+            let table = Rect::new(4.0, 4.0, 5.0, 5.0);
+            c.solid_box(&table, 0.0, 0.75, WOOD, Some(Material::Wood));
+            c.solid_box(&table, 1.5, 0.2, WOOD, None);
+            c.solid_box(&table, 0.0, 0.7, WOOD, None);
+            assert_eq!(c.tops.len(), 1, "one hung well above, and one inside the table, are not in the way");
+        });
+    }
+
+    #[test]
+    fn the_part_of_a_bed_to_lie_things_on_is_the_foot_of_the_mattress_clear_of_the_pillows() {
+        for (w, d) in [(0.95, 1.95), (1.55, 2.05)] {
+            for side in [Side::Front, Side::Back, Side::Left, Side::Right] {
+                let bed = match side {
+                    Side::Front | Side::Back => Rect::new(0.0, 0.0, w, d),
+                    _ => Rect::new(0.0, 0.0, d, w),
+                };
+                let mattress = Rect::new(bed.x0 + 0.04, bed.z0 + 0.04, bed.x1 - 0.04, bed.z1 - 0.04);
+                let foot = bed_foot(&mattress, side);
+                assert!(usable_top(&foot), "{side:?}: {foot:?}");
+                // Inside the mattress, and not in the head's strip.
+                assert!(foot.x0 >= mattress.x0 && foot.x1 <= mattress.x1 && foot.z0 >= mattress.z0 && foot.z1 <= mattress.z1);
+                let head = match side {
+                    Side::Front => Rect::new(mattress.x0, mattress.z0, mattress.x1, mattress.z0 + 0.45),
+                    Side::Back => Rect::new(mattress.x0, mattress.z1 - 0.45, mattress.x1, mattress.z1),
+                    Side::Left => Rect::new(mattress.x0, mattress.z0, mattress.x0 + 0.45, mattress.z1),
+                    Side::Right => Rect::new(mattress.x1 - 0.45, mattress.z0, mattress.x1, mattress.z1),
+                };
+                assert!(!foot.overlaps(&head), "{side:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn loot_in_a_bedroom_lies_on_the_mattress_and_never_in_the_bed_frame_or_the_pillows() {
+        let mut on_a_bed = 0;
+        for seed in 0..200 {
+            let (w, d) = (3.0 + (seed % 7) as f32 * 0.5, 3.2 + (seed % 5) as f32 * 0.6);
+            with_ctx(Rect::new(0.0, 0.0, w, d), seed as f32, |c| {
+                bedroom(c);
+                // The bed is the biggest thing taken.
+                let bed = c.taken.iter().copied().max_by(|a, b| a.area().total_cmp(&b.area())).unwrap();
+                for &(top, height) in &c.tops {
+                    if top.overlaps(&bed) {
+                        on_a_bed += 1;
+                        assert_eq!(height, MATTRESS_TOP, "seed {seed}: something to be put on a bed is at {height}");
+                        assert!(top.x0 >= bed.x0 && top.x1 <= bed.x1 && top.z0 >= bed.z0 && top.z1 <= bed.z1, "seed {seed}");
+                        // The strip by the head, wherever that is, is not in it: one of the four walls of the
+                        // bed has the pillows, and the top stops short of that one.
+                        let short = [(bed.x0 - top.x0).abs(), (bed.x1 - top.x1).abs(), (bed.z0 - top.z0).abs(), (bed.z1 - top.z1).abs()];
+                        assert!(short.iter().any(|&gap| gap >= PILLOWS_REACH - 1e-3), "seed {seed}: {top:?} in {bed:?}");
+                    }
+                }
+            });
+        }
+        assert!(on_a_bed > 100, "a bed was the place for loot only {on_a_bed} times of 200");
     }
 }
