@@ -63,6 +63,16 @@ of the thumps; the reload is slowed slightly in the game):
 
 All of these are listed on OpenGameArt as CC0; the Thwack Sounds archive includes a CC0 licence file.
 
+The zombies' groans, the player's hurt cries and the rifle bolt are real recordings, all CC0, cut by
+`tools/make_zombie_sounds.py` (trimmed, faded, a high-pass and levelled; nothing is synthesised):
+
+| Files | Source |
+| --- | --- |
+| `sounds/zombie/groan_1,2,3.wav` | [Zombie moans](https://opengameart.org/content/zombie-moans) (Darsycho) |
+| `sounds/zombie/groan_4,5.wav`, `growl.wav` | [Zombie noises and moans](https://opengameart.org/content/zombie-noises-and-moans) (ianzazz) |
+| `sounds/player/hurt_*.wav` | [Hurt Sound Effects](https://opengameart.org/content/hurt-sound-effects) (EZduzziteh) |
+| `sounds/gun/bolt_cycle_*.wav` | [Mosin Nagant Bolt Action Cycle](https://freesound.org/people/Zott820/sounds/370345/) (Zott820, Freesound; CC0) |
+
 ## Reference photographs
 
 The gun model was drawn from public-domain US Navy museum photographs of a Sterling L2A3

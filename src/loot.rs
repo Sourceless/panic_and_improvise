@@ -112,10 +112,10 @@ fn table(rarity: Rarity) -> Vec<Entry> {
     use ItemKind::{Pack, Supply as Sup, Weapon};
     match rarity {
         Rarity::Common => vec![
-            ammo(3.0, NineFmj, 15, 50),
-            ammo(2.0, BritishBall, 5, 20),
-            ammo(1.5, NatoBall, 5, 20),
-            ammo(1.5, Buckshot, 2, 6),
+            ammo(2.0, NineFmj, 10, 30),
+            ammo(1.5, BritishBall, 5, 15),
+            ammo(1.5, NatoBall, 5, 15),
+            ammo(1.5, Buckshot, 3, 6),
             thing(2.0, Sup(Supply::Bandage)),
             thing(1.5, Sup(Supply::TinnedFood)),
             thing(1.0, Sup(Supply::Canteen)),
@@ -123,10 +123,10 @@ fn table(rarity: Rarity) -> Vec<Entry> {
             thing(0.8, Weapon(WeaponKind::HiPower)),
         ],
         Rarity::Uncommon => vec![
-            ammo(1.5, NineFmj, 20, 50),
+            ammo(1.0, NineFmj, 15, 40),
             ammo(1.0, BritishBall, 10, 20),
             ammo(1.0, NatoBall, 10, 20),
-            ammo(1.2, Buckshot, 3, 10),
+            ammo(1.2, Buckshot, 4, 10),
             thing(1.5, Sup(Supply::FirstAid)),
             thing(1.0, Sup(Supply::Torch)),
             thing(1.5, Pack(PackKind::Satchel)),
@@ -140,19 +140,20 @@ fn table(rarity: Rarity) -> Vec<Entry> {
             thing(1.2, Weapon(WeaponKind::Auto5)),
             thing(1.5, Pack(PackKind::Daypack)),
             ammo(1.0, NatoBall, 15, 20),
-            ammo(0.5, BritishBall, 15, 20),
-            ammo(0.5, Buckshot, 5, 10),
+            ammo(0.8, BritishBall, 15, 20),
+            ammo(0.8, Buckshot, 6, 10),
+            ammo(0.8, NineFmj, 30, 50),
         ],
         Rarity::VeryRare => vec![
             thing(2.0, Weapon(WeaponKind::Slr)),
             thing(1.5, Weapon(WeaponKind::Bren)),
             thing(1.5, Pack(PackKind::Bergen)),
-            ammo(1.0, NatoBall, 15, 20),
+            ammo(2.0, NatoBall, 15, 20),
         ],
         Rarity::Legendary => vec![
             thing(2.0, Weapon(WeaponKind::Mag)),
             thing(2.0, Weapon(WeaponKind::L42)),
-            ammo(1.5, NatoBall, 20, 20),
+            ammo(2.5, NatoBall, 20, 20),
             thing(1.0, Pack(PackKind::Bergen)),
         ],
     }
@@ -193,26 +194,62 @@ impl Rarity {
     /// How many things fall out of a box of this rarity: (least, most).
     pub fn handful(self) -> (u32, u32) {
         match self {
-            Rarity::Common => (2, 3),
-            Rarity::Uncommon => (3, 4),
-            Rarity::Rare => (3, 5),
-            Rarity::VeryRare => (4, 5),
-            Rarity::Legendary => (4, 6),
+            Rarity::Common => (1, 2),
+            Rarity::Uncommon => (2, 3),
+            Rarity::Rare => (2, 3),
+            Rarity::VeryRare => (2, 4),
+            Rarity::Legendary => (3, 4),
         }
     }
 }
 
 /// What falls out of a box of `rarity`: a handful, the first of the box's own rarity and the rest
-/// whatever might be lying about, no better than the box.
+/// whatever might be lying about, no better than the box. Where there is a gun among them, the rest lean
+/// toward rounds for it (see `lean_toward_ammo`).
 pub fn roll_contents(rarity: Rarity, mut next: impl FnMut() -> f32) -> Vec<Dropped> {
     let (least, most) = rarity.handful();
     let count = least + (next() * (most - least + 1) as f32) as u32;
-    (0..count.min(most))
+    let mut contents: Vec<Dropped> = (0..count.min(most))
         .map(|i| {
             let this = if i == 0 { rarity } else { Rarity::roll(next(), 0.0).min(rarity) };
             Dropped { rarity: this, found: roll_item(this, &mut next) }
         })
-        .collect()
+        .collect();
+    lean_toward_ammo(&mut contents, &mut next);
+    contents
+}
+
+/// Where there is a gun among `contents`, makes the rest lean toward rounds for it: each other thing is that,
+/// more often than not, and at least one is.
+pub fn lean_toward_ammo(contents: &mut [Dropped], next: &mut impl FnMut() -> f32) {
+    let guns: Vec<WeaponKind> = contents.iter().filter_map(|d| if let ItemKind::Weapon(w) = d.found.kind { Some(w) } else { None }).collect();
+    let others: Vec<usize> = (0..contents.len()).filter(|&i| !matches!(contents[i].found.kind, ItemKind::Weapon(_))).collect();
+    if guns.is_empty() || others.is_empty() {
+        return;
+    }
+    let mut swapped = false;
+    for (n, &i) in others.iter().enumerate() {
+        // The last of them is the one that makes sure, if none of the others were.
+        if next() < AMMO_FOR_THE_GUN || (n + 1 == others.len() && !swapped) {
+            let gun = guns[(next() * guns.len() as f32) as usize % guns.len()];
+            let rarity = contents[i].rarity;
+            contents[i].found = rounds_for(gun, rarity, &mut *next);
+            swapped = true;
+        }
+    }
+}
+
+/// How likely each other thing in a box with a gun in it is to be rounds for the gun.
+const AMMO_FOR_THE_GUN: f32 = 0.6;
+
+/// Some rounds of the load `gun` is found with, as many as the tables give in a box of `rarity` (or, for a
+/// load they do not list there, up to what a square holds).
+fn rounds_for(gun: WeaponKind, rarity: Rarity, mut next: impl FnMut() -> f32) -> Found {
+    let load = gun.def().default_ammo;
+    let listed = Rarity::ALL.into_iter().filter(|&r| r <= rarity).rev().chain(Rarity::ALL).find_map(|r| table(r).into_iter().find(|e| e.kind == ItemKind::Ammo(load)).map(|e| e.rounds));
+    let (least, most) = listed.unwrap_or((1, load.def().per_stack));
+    let count = least + (next() * (most - least + 1) as f32) as u32;
+    Found { kind: ItemKind::Ammo(load), count: count.clamp(1, load.def().per_stack), loaded: 0 }
 }
 
 /// The most that can fall out of one box.
@@ -408,7 +445,61 @@ pub struct LootPlugin;
 
 impl Plugin for LootPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<OpenedLoot>().add_systems(Startup, make_assets).add_systems(Update, spin);
+        app.init_resource::<OpenedLoot>().init_gizmo_group::<CrateGlow>().add_systems(Startup, (make_assets, set_up_glow)).add_systems(Update, (spin, outline_crates));
+    }
+}
+
+/// The outlines of the crates. They are hidden by what is in front of them, as the crates are: a crate
+/// behind a wall is not to be seen through it.
+#[derive(Default, Reflect, GizmoConfigGroup)]
+pub struct CrateGlow;
+
+/// How near, metres, a crate has to be to be outlined.
+const GLOW_RANGE: f32 = 20.0;
+
+fn set_up_glow(mut store: ResMut<GizmoConfigStore>) {
+    let (config, _) = store.config_mut::<CrateGlow>();
+    // Only enough of a nudge forward that the lines do not flicker against the faces of the crate.
+    config.depth_bias = -0.002;
+    config.line.width = 2.5;
+}
+
+/// The twelve edges of a box with its floor at `base` (a crate's local frame), as pairs of points.
+fn box_edges(half_x: f32, half_z: f32, height: f32) -> [(Vec3, Vec3); 12] {
+    let c = |x: f32, y: f32, z: f32| Vec3::new(x * half_x, y * height, z * half_z);
+    let mut edges = [(Vec3::ZERO, Vec3::ZERO); 12];
+    let mut n = 0;
+    for y in [0.0, 1.0] {
+        for (a, b) in [((-1.0, -1.0), (1.0, -1.0)), ((1.0, -1.0), (1.0, 1.0)), ((1.0, 1.0), (-1.0, 1.0)), ((-1.0, 1.0), (-1.0, -1.0))] {
+            edges[n] = (c(a.0, y, a.1), c(b.0, y, b.1));
+            n += 1;
+        }
+    }
+    for (x, z) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        edges[n] = (c(x, 0.0, z), c(x, 1.0, z));
+        n += 1;
+    }
+    edges
+}
+
+/// Draws each near crate's outline in its rarity's colour, and a short beam up from it.
+fn outline_crates(mut gizmos: Gizmos<CrateGlow>, time: Res<Time>, camera: Query<&GlobalTransform, With<Camera3d>>, crates: Query<(&GlobalTransform, &LootBox)>) {
+    let Ok(eye) = camera.single() else { return };
+    // A slow pulse, so that it reads as a light and not a part of the scene.
+    let pulse = 0.75 + 0.25 * (time.elapsed_secs() * 3.0).sin();
+    for (at, lootbox) in &crates {
+        let origin = at.translation() - Vec3::Y * (LIFT - 0.01);
+        if origin.distance(eye.translation()) > GLOW_RANGE {
+            continue;
+        }
+        let length = crate_length(lootbox.rarity);
+        let colour = lootbox.rarity.colour().with_alpha(pulse);
+        let (_, turn, _) = at.to_scale_rotation_translation();
+        for (a, b) in box_edges(length * 0.54, length * 0.34, length * 0.6) {
+            gizmos.line(origin + turn * a, origin + turn * b, colour);
+        }
+        let top = origin + Vec3::Y * length * 0.6;
+        gizmos.line(top, top + Vec3::Y * 0.9, colour);
     }
 }
 
@@ -592,6 +683,107 @@ mod tests {
         let area = Rect::new(0.0, 0.0, 0.6, 0.45);
         for p in lay_out(area, &[0.1, 0.1, 0.1, 0.1, 0.1]) {
             assert!(p.x >= 0.1 - 1e-4 && p.x <= 0.5 + 1e-4 && p.y >= 0.1 - 1e-4 && p.y <= 0.35 + 1e-4, "{p}");
+        }
+    }
+
+    #[test]
+    fn a_box_with_a_gun_in_it_leans_toward_rounds_for_that_gun() {
+        let mut with_gun = 0;
+        let mut with_its_rounds = 0;
+        let mut others = 0;
+        let mut its_rounds = 0;
+        for rarity in [Rarity::Common, Rarity::Uncommon, Rarity::Rare, Rarity::VeryRare, Rarity::Legendary] {
+            for i in 0..400 {
+                let contents = roll_contents(rarity, spot_numbers(i, 21));
+                let Some(gun) = contents.iter().find_map(|d| if let ItemKind::Weapon(w) = d.found.kind { Some(w) } else { None }) else { continue };
+                let guns = contents.iter().filter(|d| matches!(d.found.kind, ItemKind::Weapon(_))).count();
+                let rest: Vec<&Dropped> = contents.iter().filter(|d| !matches!(d.found.kind, ItemKind::Weapon(_))).collect();
+                if rest.is_empty() {
+                    continue;
+                }
+                with_gun += 1;
+                let load = ItemKind::Ammo(gun.def().default_ammo);
+                let loads: Vec<ItemKind> = contents.iter().filter_map(|d| if let ItemKind::Weapon(w) = d.found.kind { Some(ItemKind::Ammo(w.def().default_ammo)) } else { None }).collect();
+                with_its_rounds += contents.iter().any(|d| loads.contains(&d.found.kind)) as usize;
+                if guns == 1 {
+                    others += rest.len();
+                    its_rounds += rest.iter().filter(|d| d.found.kind == load).count();
+                    for d in rest.iter().filter(|d| d.found.kind == load) {
+                        let ItemKind::Ammo(a) = d.found.kind else { unreachable!() };
+                        assert!(d.found.count >= 1 && d.found.count <= a.def().per_stack);
+                    }
+                }
+            }
+        }
+        assert!(with_gun > 100, "{with_gun} boxes had a gun");
+        assert_eq!(with_its_rounds, with_gun, "every box with a gun in it has rounds for one of its guns");
+        assert!(its_rounds * 10 >= others * 5, "{its_rounds} of {others} others are its rounds");
+    }
+
+    #[test]
+    fn a_box_without_a_gun_is_as_it_was() {
+        // Rounds are not made up for a gun that is not there: a box with none has whatever it rolled.
+        let mut guns_seen = 0;
+        for i in 0..300 {
+            let contents = roll_contents(Rarity::Common, spot_numbers(i, 33));
+            if contents.iter().any(|d| matches!(d.found.kind, ItemKind::Weapon(_))) {
+                guns_seen += 1;
+                continue;
+            }
+            assert!(contents.iter().all(|d| d.rarity <= Rarity::Common));
+        }
+        assert!(guns_seen > 0 && guns_seen < 300);
+    }
+
+    #[test]
+    fn a_crates_outline_is_a_box_of_twelve_edges_standing_on_its_floor() {
+        let edges = box_edges(0.5, 0.3, 0.6);
+        assert_eq!(edges.len(), 12);
+        for (a, b) in edges {
+            assert!(a.y >= 0.0 && b.y <= 0.6 + 1e-6, "{a} {b}");
+            assert!(a.x.abs() <= 0.5 + 1e-6 && a.z.abs() <= 0.3 + 1e-6);
+            // Every edge runs along one axis only.
+            let d = (b - a).abs();
+            assert_eq!([d.x, d.y, d.z].iter().filter(|&&v| v > 1e-6).count(), 1, "{a} {b}");
+        }
+        let mut ends: Vec<_> = edges.iter().flat_map(|(a, b)| [*a, *b]).map(|p| (p.x.signum() as i32, (p.y > 0.3) as i32, p.z.signum() as i32)).collect();
+        ends.sort();
+        ends.dedup();
+        assert_eq!(ends.len(), 8, "eight corners");
+    }
+
+    #[test]
+    fn loot_is_scarce_and_every_calibre_has_a_fair_share_of_rounds_for_its_guns() {
+        for richness in [0.0, 0.6, 1.8] {
+            let (mut things, mut guns, mut stacks) = (0usize, 0usize, 0usize);
+            let mut rounds: HashMap<AmmoKind, u32> = HashMap::new();
+            let mut loads: HashMap<AmmoKind, u32> = HashMap::new();
+            let boxes = 6000;
+            for i in 0..boxes {
+                let mut next = spot_numbers(i, 3);
+                let rarity = Rarity::roll(next(), richness);
+                for d in roll_contents(rarity, &mut next) {
+                    things += 1;
+                    match d.found.kind {
+                        ItemKind::Weapon(w) => {
+                            guns += 1;
+                            *loads.entry(w.def().default_ammo).or_default() += 1;
+                        }
+                        ItemKind::Ammo(a) => {
+                            stacks += 1;
+                            *rounds.entry(a).or_default() += d.found.count;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let per_box = |n: usize| n as f32 / boxes as f32;
+            assert!(per_box(things) < 3.0, "{richness}: {} things a box", per_box(things));
+            assert!(per_box(guns) < 1.0 && per_box(stacks) > per_box(guns), "{richness}: guns {} and rounds {} a box", per_box(guns), per_box(stacks));
+            for (load, guns) in loads {
+                let each = rounds.get(&load).copied().unwrap_or(0) as f32 / guns as f32;
+                assert!((14.0..=100.0).contains(&each), "{richness}: {each} {load:?} rounds for each gun that takes them");
+            }
         }
     }
 }

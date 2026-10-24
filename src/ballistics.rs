@@ -65,6 +65,22 @@ impl Cartridge {
     }
 }
 
+/// What a body takes out of a bullet that goes through it: joules for each metre, a rough figure for flesh
+/// and bone together. A 9 mm round (about 540 J) has little left after one man, and a rifle round (over 3000 J)
+/// has plenty after several.
+pub const FLESH_RESISTANCE: f32 = 1100.0;
+
+/// The least energy, joules, a bullet must have left after going through something to go on at all.
+const LEAST_ENERGY_TO_GO_ON: f32 = 25.0;
+
+/// How fast a bullet going at `speed` is after it has gone through `depth` metres of something that takes
+/// `resistance` joules of its energy for each metre, or `None` if it stops in there (has not the energy
+/// to come out the far side with any left to speak of).
+pub fn speed_after_passing(cartridge: &Cartridge, speed: f32, depth: f32, resistance: f32) -> Option<f32> {
+    let left = cartridge.energy(speed) - resistance * depth;
+    (left > LEAST_ENERGY_TO_GO_ON).then(|| (2.0 * left / cartridge.mass).sqrt())
+}
+
 /// The standard G1 drag coefficient at a Mach number (the Ingalls/Mayevski table).
 pub fn g1_drag(mach: f32) -> f32 {
     const TABLE: [(f32, f32); 79] = [
@@ -404,5 +420,30 @@ mod tests {
         // A bullet from the Sterling at 200 m is down on 270 m/s or so: a little weaker.
         let d = damage_at_speed(25.0, 270.0);
         assert!(d < 25.0 && d > 18.0, "{d}");
+    }
+
+    #[test]
+    fn a_pistol_round_comes_out_of_one_body_slowed_and_does_not_get_through_a_second_while_a_rifle_round_goes_on() {
+        use crate::ammo::AmmoKind;
+        let body = 0.4;
+        let pistol = AmmoKind::NineFmj.def().cartridge;
+        let out = speed_after_passing(&pistol, pistol.muzzle_velocity, body, FLESH_RESISTANCE).expect("a pistol round goes through a man");
+        assert!(out < pistol.muzzle_velocity * 0.6 && out > 50.0, "{out} m/s");
+        assert!(speed_after_passing(&pistol, out, body, FLESH_RESISTANCE).is_none(), "but not through two");
+        let rifle = AmmoKind::NatoBall.def().cartridge;
+        let mut speed = rifle.muzzle_velocity;
+        let mut through = 0;
+        while let Some(next) = speed_after_passing(&rifle, speed, body, FLESH_RESISTANCE) {
+            assert!(next < speed, "each body takes something");
+            speed = next;
+            through += 1;
+        }
+        assert!(through >= 4, "a rifle round goes through {through}");
+        // A handful of shot stops in the first.
+        let pellet = AmmoKind::Buckshot.def().cartridge;
+        assert!(speed_after_passing(&pellet, pellet.muzzle_velocity, body, FLESH_RESISTANCE).is_none());
+        // Nothing to go through, nothing lost.
+        let same = speed_after_passing(&pistol, 300.0, 0.0, FLESH_RESISTANCE).unwrap();
+        assert!((same - 300.0).abs() < 0.01);
     }
 }

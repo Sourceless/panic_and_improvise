@@ -248,11 +248,20 @@ fn mill(b: &Building, site: &Site) -> Model {
     mill::build(b, site)
 }
 
-fn petrol_station(b: &Building, _site: &Site, rng: &mut Rng) -> (Vec<plan::Layout>, Model) {
+fn petrol_station(b: &Building, site: &Site, rng: &mut Rng) -> (Vec<plan::Layout>, Model) {
     let mut model = Model::default();
     let (w, d) = (b.width, b.depth);
     let cube = |model: &mut Model, c: Vec3, size: Vec3, colour: Rgb, solid: Option<Material>| model.block(c, size, colour, Layer::Shell, solid);
-    cube(&mut model, Vec3::new(0.0, 0.04, 0.0), Vec3::new(w * 0.95, 0.08, d * 0.95), colour::ASPHALT, None);
+    // The kiosk is a small shop.
+    let volume = public::kiosk(style_for(b, rng));
+    // The forecourt is a slab level with the kiosk's floor, solid and down to the ground however the land
+    // slopes (as the floors of other buildings are), so that it can be walked on and does not hang in the
+    // air. The kiosk has a floor of its own, so the forecourt leaves it out.
+    let forecourt = geom::Rect::new(-w * 0.475, -d * 0.475, w * 0.475, d * 0.475);
+    let kiosk = volume.layout.inside.grown(volume.layout.style.wall_thickness);
+    for piece in forecourt.minus(&kiosk) {
+        model.slab(&piece, 0.0, 0.5 + site.skirt, colour::ASPHALT, Layer::Shell, Some(Material::Stone));
+    }
     cube(&mut model, Vec3::new(0.0, 5.0, -5.0), Vec3::new(13.0, 0.4, 8.5), colour::WHITE, None);
     cube(&mut model, Vec3::new(0.0, 4.75, -5.0), Vec3::new(13.2, 0.3, 8.7), pick(rng, &colour::AWNINGS), None);
     for (x, z) in [(-5.8, -8.2), (5.8, -8.2), (-5.8, -1.8), (5.8, -1.8)] {
@@ -261,9 +270,7 @@ fn petrol_station(b: &Building, _site: &Site, rng: &mut Rng) -> (Vec<plan::Layou
     for (x, z) in [(-2.2, -6.2), (2.2, -6.2), (-2.2, -3.8), (2.2, -3.8)] {
         cube(&mut model, Vec3::new(x, 0.75, z), Vec3::new(0.75, 1.5, 0.45), colour::AWNINGS[0], Some(Material::Metal));
     }
-    // The kiosk is a small shop.
-    let volume = public::kiosk(style_for(b, rng));
-    model.extend(plan::assemble(&volume.layout, _site.skirt, rng));
+    model.extend(plan::assemble(&volume.layout, site.skirt, rng));
     roof(&mut model, &volume, &volume.layout.style);
     let layouts = vec![volume.layout.clone()];
     cube(&mut model, Vec3::new(9.0, 3.5, -9.0), Vec3::new(0.35, 7.0, 0.35), colour::METAL, Some(Material::Metal));
@@ -616,6 +623,36 @@ mod tests {
         assert!(counts[Rarity::Legendary as usize] >= 1, "{counts:?}");
         for kind in [BuildingKind::House, BuildingKind::Cottage, BuildingKind::Pub, BuildingKind::Shop, BuildingKind::Church, BuildingKind::Farmhouse] {
             assert!(kinds_with_loot.contains(&kind), "no loot in a {kind:?}");
+        }
+    }
+
+    /// A petrol station on ground that falls away (so its floor stands well above the low side), built with the
+    /// ground-level model's own origin 10 m up.
+    fn petrol_station_solids() -> Vec<crate::collision::Solid> {
+        let b = Building { kind: BuildingKind::PetrolStation, centre: Vec2::ZERO, yaw: 0.0, width: 20.0, depth: 20.0, wall_height: 3.2, front: Vec2::NEG_Y };
+        let site = Site { skirt: 2.0, door_rise: 0.0 };
+        let mut rng = Rng::from_position(Vec2::new(4.0, 9.0));
+        build(&b, &site, &mut rng).solids(Vec3::new(0.0, 10.0, 0.0), 0.0)
+    }
+
+    #[test]
+    fn the_forecourt_of_a_petrol_station_is_solid_level_with_the_floor_and_reaches_the_ground() {
+        let solids = petrol_station_solids();
+        // Somewhere open on the forecourt, away from the pumps, the posts and the kiosk.
+        for p in [Vec2::new(-8.0, 5.0), Vec2::new(8.0, 5.0), Vec2::new(-8.0, -8.0), Vec2::new(0.0, -9.0)] {
+            let under: Vec<_> = solids.iter().filter(|s| s.shape.separation(p).0 < 0.0).collect();
+            assert!(!under.is_empty(), "{p} has nothing under it");
+            let floor = under.iter().map(|s| s.top_at(p)).fold(f32::MIN, f32::max);
+            assert!((floor - 10.0).abs() < 1e-4, "{p}: stands at {floor}");
+            assert!(under.iter().any(|s| s.bottom == f32::NEG_INFINITY && (s.top_at(p) - 10.0).abs() < 1e-4), "{p}: it hangs in the air");
+        }
+        // The kiosk's own floor is the only floor inside the kiosk: the forecourt is not also there.
+        let kiosk = Vec2::new(0.0, 6.0);
+        let floors = solids.iter().filter(|s| s.shape.separation(kiosk).0 < 0.0 && (s.top_at(kiosk) - 10.0).abs() < 1e-4).count();
+        assert_eq!(floors, 1, "one floor in the kiosk");
+        // The pumps and the posts of the canopy stand on it.
+        for p in [Vec2::new(2.2, -6.2), Vec2::new(-5.8, -8.2)] {
+            assert!(solids.iter().any(|s| s.shape.separation(p).0 < 0.0 && s.top_at(p) > 11.0), "{p}: something stands there");
         }
     }
 }

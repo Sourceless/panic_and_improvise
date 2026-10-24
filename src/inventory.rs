@@ -73,6 +73,16 @@ impl Supply {
         }
     }
 
+    /// What using one heals: how much health, and over how many seconds. Not everything heals.
+    pub fn healing(self) -> Option<(f32, f32)> {
+        match self {
+            Supply::Bandage => Some((30.0, 12.0)),
+            Supply::FirstAid => Some((70.0, 10.0)),
+            Supply::TinnedFood => Some((15.0, 20.0)),
+            Supply::Canteen | Supply::Torch | Supply::Compass => None,
+        }
+    }
+
     pub fn size(self) -> (u32, u32) {
         match self {
             Supply::Bandage | Supply::TinnedFood | Supply::Compass => (1, 1),
@@ -467,6 +477,21 @@ impl Inventory {
         }
     }
 
+    /// Uses up one of an item: the item itself if it is the only one, else one off its count.
+    pub fn consume_one(&mut self, id: u32) -> bool {
+        let Some((_, item)) = self.find(id) else { return false };
+        if item.count <= 1 {
+            return self.take(id).is_some();
+        }
+        for container in [Some(&mut self.pockets), self.pack.as_mut()].into_iter().flatten() {
+            if let Some(p) = container.items.iter_mut().find(|p| p.item.id == id) {
+                p.item.count -= 1;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Moves an item to a square of a grid (turned or not), if it fits there. Whatever is there
     /// already is left alone: the move is refused.
     pub fn move_to_grid(&mut self, id: u32, to: Place, x: u32, y: u32, turned: bool) -> bool {
@@ -545,29 +570,54 @@ impl Inventory {
     /// Puts a pack from the grids on the player's back. The one already there goes back in the
     /// grids; if the grids can't take what its grid held, nothing happens.
     pub fn wear_pack(&mut self, id: u32) -> bool {
-        let Some((from, item)) = self.find(id) else { return false };
-        let ItemKind::Pack(kind) = item.kind else { return false };
+        let Some((from, _)) = self.find(id) else { return false };
         if from == Place::Back {
             return false;
         }
         let mut trial = self.clone();
-        trial.take(id);
-        // The pack that was on, with what was in it, goes to the pockets.
+        let Some(item) = trial.take(id) else { return false };
+        if trial.put_on(item).is_err() {
+            return false;
+        }
+        *self = trial;
+        true
+    }
+
+    /// Puts a pack that is not in the inventory yet (one just found) on the player's back, the one already
+    /// there going to the pockets with what was in it. Gives the pack back if that cannot be done.
+    pub fn put_on(&mut self, item: Item) -> Result<(), Item> {
+        let ItemKind::Pack(kind) = item.kind else { return Err(item) };
+        let mut trial = self.clone();
         if let Some(old) = trial.back {
             if !trial.unload_pack() {
-                return false;
+                return Err(item);
             }
             trial.back = None;
             trial.pack = None;
             if trial.add(old).is_err() {
-                return false;
+                return Err(item);
             }
         }
         let (w, h) = kind.capacity();
         trial.back = Some(item);
         trial.pack = Some(Container::new(w, h));
         *self = trial;
-        true
+        Ok(())
+    }
+
+    /// Takes up a weapon that is not in the inventory yet (one just found) and has it ready: in a free
+    /// slot, the one in hand if both are free. With both slots full it takes the place of the gun in hand,
+    /// which is given back to be put down.
+    pub fn take_up_weapon(&mut self, item: Item) -> Option<Item> {
+        let other = 1 - self.active;
+        let slot = if self.slots[self.active].is_none() {
+            self.active
+        } else if self.slots[other].is_none() {
+            other
+        } else {
+            self.active
+        };
+        self.slots[slot].replace(item)
     }
 
     /// Takes the pack off, putting what was in it, and then the pack, in the pockets. Refused if they don't fit.
@@ -826,5 +876,84 @@ mod tests {
         let stack = inv.pockets.items[0].item;
         assert_eq!(inv.find(stack.id).map(|(p, _)| p), Some(Place::Pockets));
         assert!(inv.take(stack.id).is_some());
+    }
+
+    #[test]
+    fn a_found_pack_goes_straight_on_even_when_the_pockets_could_not_hold_it_and_the_old_one_goes_to_the_pockets() {
+        let mut inv = Inventory::default();
+        // Fill the pockets so that a pack would have nowhere to be put.
+        while let Ok(()) = {
+            let sling = inv.make(ItemKind::Weapon(WeaponKind::Slr), 1);
+            inv.add(sling)
+        } {}
+        let satchel = inv.make(ItemKind::Pack(PackKind::Satchel), 1);
+        assert!(inv.put_on(satchel).is_ok());
+        assert_eq!(inv.back.map(|b| b.id), Some(satchel.id));
+        assert_eq!(inv.pack.as_ref().map(|c| (c.width, c.height)), Some(PackKind::Satchel.capacity()));
+        // A better one, found while the satchel is on, goes on; the satchel has nowhere to go but the full pockets: refused.
+        let bergen = inv.make(ItemKind::Pack(PackKind::Bergen), 1);
+        let refused = inv.put_on(bergen).expect_err("the satchel has no room");
+        assert_eq!(refused.id, bergen.id);
+        assert_eq!(inv.back.map(|b| b.id), Some(satchel.id), "nothing changed");
+        // With room it swaps.
+        let mut roomy = Inventory::default();
+        let satchel = roomy.make(ItemKind::Pack(PackKind::Satchel), 1);
+        roomy.put_on(satchel).unwrap();
+        let bergen = roomy.make(ItemKind::Pack(PackKind::Bergen), 1);
+        assert!(roomy.put_on(bergen).is_ok());
+        assert_eq!(roomy.back.map(|b| b.id), Some(bergen.id));
+        assert!(roomy.pockets.get(satchel.id).is_some(), "the old pack is in the pockets");
+        // Something that is not a pack is not put on.
+        let tin = roomy.make(ItemKind::Supply(Supply::TinnedFood), 1);
+        assert_eq!(roomy.put_on(tin).unwrap_err().id, tin.id);
+    }
+
+    #[test]
+    fn a_found_weapon_takes_a_free_slot_and_with_both_full_replaces_the_one_in_hand() {
+        let mut inv = Inventory::default();
+        let first = inv.make_gun(WeaponKind::HiPower, AmmoKind::NineFmj, 13);
+        let second = inv.make_gun(WeaponKind::Sterling, AmmoKind::NineFmj, 30);
+        let third = inv.make_gun(WeaponKind::Slr, AmmoKind::NatoBall, 20);
+        // Nothing in hand: it goes there.
+        assert!(inv.take_up_weapon(first).is_none());
+        assert_eq!(inv.slots[0].map(|g| g.id), Some(first.id));
+        // The hand is full, the other slot free: it goes there and the hand is left alone.
+        assert!(inv.take_up_weapon(second).is_none());
+        assert_eq!((inv.slots[0].map(|g| g.id), inv.slots[1].map(|g| g.id), inv.active), (Some(first.id), Some(second.id), 0));
+        // Both full: the new one is in hand, and the one that was is given back.
+        let displaced = inv.take_up_weapon(third).expect("one is put down");
+        assert_eq!(displaced.id, first.id);
+        assert_eq!((inv.slots[0].map(|g| g.id), inv.slots[1].map(|g| g.id)), (Some(third.id), Some(second.id)));
+        // With the other slot in hand, that is the one replaced.
+        inv.active = 1;
+        let fourth = inv.make_gun(WeaponKind::Auto5, AmmoKind::Buckshot, 5);
+        assert_eq!(inv.take_up_weapon(fourth).map(|g| g.id), Some(second.id));
+        assert_eq!(inv.slots[1].map(|g| g.id), Some(fourth.id));
+    }
+
+    #[test]
+    fn only_the_supplies_that_heal_do_and_a_first_aid_kit_heals_the_most() {
+        let heals: Vec<Supply> = Supply::ALL.into_iter().filter(|s| s.healing().is_some()).collect();
+        assert!(heals.contains(&Supply::Bandage) && heals.contains(&Supply::FirstAid));
+        assert!(Supply::Torch.healing().is_none() && Supply::Compass.healing().is_none() && Supply::Canteen.healing().is_none());
+        let (kit, kit_time) = Supply::FirstAid.healing().unwrap();
+        let (dressing, _) = Supply::Bandage.healing().unwrap();
+        assert!(kit > dressing);
+        // Slowly: it takes seconds, not an instant.
+        assert!(kit_time >= 5.0 && Supply::Bandage.healing().unwrap().1 >= 5.0);
+    }
+
+    #[test]
+    fn using_one_takes_one_off_a_stack_and_the_whole_item_when_it_is_the_last() {
+        let mut inv = Inventory::default();
+        let mut stack = inv.make(ItemKind::Supply(Supply::Bandage), 3);
+        stack.count = 3;
+        let id = stack.id;
+        inv.add(stack).unwrap();
+        assert!(inv.consume_one(id));
+        assert_eq!(inv.find(id).map(|(_, i)| i.count), Some(2));
+        assert!(inv.consume_one(id) && inv.consume_one(id));
+        assert!(inv.find(id).is_none(), "the last one is the item gone");
+        assert!(!inv.consume_one(id), "nothing left to use");
     }
 }

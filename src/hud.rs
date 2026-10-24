@@ -4,6 +4,7 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
+use crate::health::PlayerHealth;
 use crate::pickup::PickupPrompt;
 use crate::weapon::Gun;
 
@@ -19,8 +20,9 @@ pub fn scope_opacity(blend: f32) -> f32 {
     ((blend - SCOPE_FROM) / (SCOPE_FULL - SCOPE_FROM)).clamp(0.0, 1.0)
 }
 
-pub fn draw_hud(mut contexts: EguiContexts, prompt: Res<PickupPrompt>, guns: Query<&Gun>) -> Result {
+pub fn draw_hud(mut contexts: EguiContexts, prompt: Res<PickupPrompt>, health: Res<PlayerHealth>, guns: Query<&Gun>) -> Result {
     let ctx = contexts.ctx_mut()?;
+    draw_health(ctx, &health);
     // The telescope.
     if let Ok(gun) = guns.single() {
         let opacity = if gun.def().scope.is_some() && !gun.holstered { scope_opacity(gun.aim_blend) } else { 0.0 };
@@ -43,6 +45,43 @@ pub fn draw_hud(mut contexts: EguiContexts, prompt: Res<PickupPrompt>, guns: Que
         });
     }
     Ok(())
+}
+
+/// The colour of a health bar that is `fraction` full: green when well, through amber to red.
+pub fn health_colour(fraction: f32) -> egui::Color32 {
+    let f = fraction.clamp(0.0, 1.0);
+    let (r, g) = if f > 0.5 { ((1.0 - f) * 2.0, 1.0) } else { (1.0, f * 2.0) };
+    egui::Color32::from_rgb((60.0 + 170.0 * r) as u8, (60.0 + 150.0 * g) as u8, 50)
+}
+
+/// The health bar at the bottom left, a red wash over the view just after a hurt, and a word when the
+/// player has just died and been put back.
+fn draw_health(ctx: &egui::Context, health: &PlayerHealth) {
+    if health.flash() > 0.0 {
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("hurt")));
+        painter.rect_filled(ctx.content_rect(), 0.0, egui::Color32::from_rgba_unmultiplied(170, 0, 0, (health.flash() * 90.0) as u8));
+    }
+    egui::Area::new(egui::Id::new("health")).anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(24.0, -24.0)).interactable(false).show(ctx, |ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(240.0, 18.0), egui::Sense::hover());
+        let painter = ui.painter();
+        painter.rect_filled(rect, 3.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 150));
+        let inner = rect.shrink(2.0);
+        // What healing under way has still to give, paler, ahead of what there is.
+        if health.pending() > 0.0 {
+            let mut coming = inner;
+            coming.set_width(inner.width() * health.fraction_after_healing());
+            painter.rect_filled(coming, 2.0, egui::Color32::from_rgba_unmultiplied(120, 220, 140, 110));
+        }
+        let mut filled = inner;
+        filled.set_width(inner.width() * health.fraction());
+        painter.rect_filled(filled, 2.0, health_colour(health.fraction()));
+        painter.text(rect.center(), egui::Align2::CENTER_CENTER, format!("{}", health.current.ceil() as i32), egui::FontId::proportional(13.0), egui::Color32::WHITE);
+    });
+    if health.died_message > 0.0 {
+        egui::Area::new(egui::Id::new("died")).anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 90.0)).interactable(false).show(ctx, |ui| {
+            ui.label(egui::RichText::new("You died. You are back where you began.").size(22.0).strong().color(egui::Color32::from_rgb(235, 110, 100)));
+        });
+    }
 }
 
 fn draw_scope(ctx: &egui::Context, opacity: f32) {
@@ -77,6 +116,13 @@ fn draw_scope(ctx: &egui::Context, opacity: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_health_bar_goes_from_green_through_amber_to_red() {
+        let (full, half, low) = (health_colour(1.0), health_colour(0.5), health_colour(0.05));
+        assert!(full.g() > full.r() && low.r() > low.g(), "{full:?} {low:?}");
+        assert!(half.r() > full.r() && half.g() > low.g(), "{half:?}");
+    }
 
     #[test]
     fn the_scope_comes_up_as_the_gun_does_and_is_full_on_the_sights() {

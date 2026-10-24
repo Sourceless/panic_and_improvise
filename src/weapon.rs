@@ -17,9 +17,10 @@ use crate::wind::Wind;
 use crate::player::{spawn_player, toggle_cursor_grab, AimBlend, FpsCamera, Stance};
 use crate::map::TerrainMap;
 use crate::target::{dummy_aabb, TargetDummy};
+use crate::zombie::{hit_damage, zombie_aabb, Zombie};
 
 /// Things the gun's mechanism does that make a sound.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum GunEvent {
     /// A reload begins; `charge` if the bolt had to be hauled back as well.
     ReloadStarted { charge: bool },
@@ -27,6 +28,9 @@ pub enum GunEvent {
     DryClick,
     /// The trigger is pulled on an empty open-bolt gun: the bolt slams forward on nothing.
     BoltDrop,
+    /// A bolt-action rifle has fired and its bolt is worked: lifted, drawn back, pushed home and turned down,
+    /// over `cycle_time` seconds.
+    BoltCycled { cycle_time: f32 },
 }
 
 /// How many of each gun sound have been made (for tests).
@@ -36,6 +40,7 @@ pub struct SoundLog {
     pub charged_reloads: u32,
     pub dry_clicks: u32,
     pub bolt_drops: u32,
+    pub bolt_cycles: u32,
 }
 
 #[derive(Resource)]
@@ -43,12 +48,31 @@ pub struct GunSounds {
     pub reload_swap: Handle<AudioSource>,
     pub reload_charge: Handle<AudioSource>,
     pub dry_clicks: Vec<Handle<AudioSource>>,
+    /// A real bolt-action rifle's bolt being worked, a few takes (`sounds/gun/bolt_cycle_N.wav`).
+    pub bolt_cycles: Vec<Handle<AudioSource>>,
 }
 
 impl GunSounds {
     pub fn all(&self) -> impl Iterator<Item = &Handle<AudioSource>> {
-        [&self.reload_swap, &self.reload_charge].into_iter().chain(&self.dry_clicks)
+        [&self.reload_swap, &self.reload_charge].into_iter().chain(&self.dry_clicks).chain(&self.bolt_cycles)
     }
+}
+
+/// How many recordings there are of the bolt being worked, how loud it is, and how long one lasts, seconds.
+const BOLT_CYCLE_TAKES: usize = 3;
+const BOLT_CYCLE_VOLUME: f32 = 0.9;
+/// How much louder a shot is played than the recording: the recordings are quick bangs with a long tail,
+/// which come out far quieter to the ear than footsteps and voices cut at the same peak.
+const SHOT_LOUDNESS: f32 = 1.8;
+const BOLT_CYCLE_LENGTH: f32 = 1.2;
+
+/// When the bolt is heard after the shot, and how fast the recording is played, for a rifle whose action takes
+/// `cycle_time` seconds to cycle: the recording is made to fit the time the gun takes (a little quicker for a
+/// rifle that cycles quickly, as the player would work it), starting once the shot has gone.
+fn bolt_cycle_timing(cycle_time: f32) -> (f32, f32) {
+    let delay = 0.12;
+    let speed = (BOLT_CYCLE_LENGTH / (cycle_time - delay).max(0.4)).clamp(0.85, 1.4);
+    (delay, speed)
 }
 
 /// An empty click comes this long after the trigger is pulled (the action takes a moment), and
@@ -400,6 +424,8 @@ pub struct Bullet {
     /// Whether it is in foliage right now (so that a burst of leaves is made when it goes in, and not
     /// again every step it is in there).
     in_foliage: bool,
+    /// The bodies it has already gone through, which it does not hit again on the way out.
+    through: Vec<Entity>,
 }
 
 impl Bullet {
@@ -500,6 +526,7 @@ pub fn spawn_gun(
         reload_swap: asset_server.load("sounds/gun/reload_swap.wav"),
         reload_charge: asset_server.load("sounds/gun/reload_charge.wav"),
         dry_clicks: (1..=2).map(|i| asset_server.load(format!("sounds/gun/dry_click_{i}.wav"))).collect(),
+        bolt_cycles: (1..=BOLT_CYCLE_TAKES).map(|i| asset_server.load(format!("sounds/gun/bolt_cycle_{i}.wav"))).collect(),
     });
     commands.insert_resource(BulletAssets {
         // A thin streak along the line of flight (the bullet is turned to face the way it goes).
@@ -877,12 +904,16 @@ fn fire(
 
     gun.shots_fired += 1;
     gun.ammo -= 1;
+    // A bolt-action rifle has its bolt worked for the next round, with the sound of it.
+    if def.kind.bolt_action() {
+        gun.pending_sounds.push(GunEvent::BoltCycled { cycle_time: def.mechanism.cycle_time });
+    }
     gun.last_shot_origin = Some(muzzle);
     gun.since_shot = 0.0;
     // A different recording each time, a little faster or slower, so a burst doesn't sound like
     // one sample on repeat; lower and louder for the bigger guns.
     let take = (gun.random() * assets.shot_sounds.len() as f32) as usize % assets.shot_sounds.len();
-    let (pitch, loudness) = ((0.97 + 0.06 * gun.random()) * def.shot_pitch, (0.9 + 0.1 * gun.random()) * def.shot_volume);
+    let (pitch, loudness) = ((0.97 + 0.06 * gun.random()) * def.shot_pitch, (0.9 + 0.1 * gun.random()) * def.shot_volume * SHOT_LOUDNESS);
     commands.spawn((
         AudioPlayer(assets.shot_sounds[take].clone()),
         PlaybackSettings { speed: pitch, volume: bevy::audio::Volume::Linear(loudness), ..PlaybackSettings::DESPAWN },
@@ -904,6 +935,7 @@ fn fire(
                 age: 0.0,
                 travelled: 0.0,
                 in_foliage: false,
+                through: Vec::new(),
                 glows: tracer,
             },
             Mesh3d(assets.mesh.clone()),
@@ -974,6 +1006,15 @@ fn play_gun_sounds(mut commands: Commands, mut guns: Query<&mut Gun>, sounds: Re
                 let pick = (roll * sounds.dry_clicks.len() as f32) as usize % sounds.dry_clicks.len();
                 play_after(&mut commands, DRY_CLICK_DELAY, sounds.dry_clicks[pick].clone(), pitch(0.95, 1.05), DRY_CLICK_VOLUME, None);
             }
+            GunEvent::BoltCycled { cycle_time } => {
+                gun.sound_log.bolt_cycles += 1;
+                if sounds.bolt_cycles.is_empty() {
+                    continue;
+                }
+                let pick = (roll * sounds.bolt_cycles.len() as f32) as usize % sounds.bolt_cycles.len();
+                let (delay, speed) = bolt_cycle_timing(cycle_time);
+                play_after(&mut commands, delay, sounds.bolt_cycles[pick].clone(), speed * pitch(0.97, 1.03), BOLT_CYCLE_VOLUME, None);
+            }
             GunEvent::BoltDrop => {
                 gun.sound_log.bolt_drops += 1;
                 // The same click, lower: a heavy bolt running home.
@@ -989,6 +1030,7 @@ fn move_bullets(
     wind: Res<Wind>,
     mut bullets: Query<(Entity, &mut Transform, &mut Bullet, &mut Visibility)>,
     mut dummies: Query<(Entity, &Transform, &mut TargetDummy), Without<Bullet>>,
+    mut zombies: Query<(Entity, &Transform, &mut Zombie), Without<Bullet>>,
     map: Res<TerrainMap>,
     colliders: Option<Res<Colliders>>,
     mut impacts: MessageWriter<Impact>,
@@ -1025,6 +1067,19 @@ fn move_bullets(
                     }
                 }
             }
+            for (target, zombie_transform, zombie) in &zombies {
+                if !zombie.alive() || bullet.through.contains(&target) {
+                    continue;
+                }
+                let (min, max) = zombie_aabb(zombie_transform.translation, zombie.kind);
+                if let Some((t, normal)) = segment_aabb_hit(start, flight.position, min, max) {
+                    let distance = t * start.distance(flight.position);
+                    if landing.as_ref().is_none_or(|(d, _)| distance < *d) {
+                        let position = start.lerp(flight.position, t);
+                        landing = Some((distance, Impact { position, normal, surface: Surface::Target, speed, target: Some(target) }));
+                    }
+                }
+            }
             // ...or a tree, a wall, a hedge, a building.
             if let Some(hit) = colliders.as_ref().and_then(|c| c.segment_hit(start, flight.position)) {
                 let distance = hit.t * start.distance(flight.position);
@@ -1033,13 +1088,29 @@ fn move_bullets(
                 }
             }
             if let Some((_, impact)) = landing {
+                let mut goes_on = false;
                 if let Some(target) = impact.target {
                     let hit_speed = impact.speed;
                     if let Ok((_, _, mut dummy)) = dummies.get_mut(target) {
                         dummy.take_hit(bullet.ammo.def().damage_at(hit_speed));
+                    } else if let Ok((_, at, mut zombie)) = zombies.get_mut(target) {
+                        let kind = zombie.kind;
+                        zombie.take_hit(hit_damage(bullet.ammo.def().damage_at(hit_speed), impact.position - at.translation, kind));
+                        // Through the body and out the other side, if it has the energy left for that: slower,
+                        // and so with less to give to whatever is behind.
+                        if let Some(out) = ballistics::speed_after_passing(&bullet.cartridge, hit_speed, kind.body_depth(), ballistics::FLESH_RESISTANCE) {
+                            let heading = flight.velocity.normalize_or(Vec3::NEG_Z);
+                            flight.velocity = heading * out;
+                            flight.position = impact.position + heading * 0.05;
+                            bullet.through.push(target);
+                            goes_on = true;
+                        }
                     }
                 }
                 impacts.write(impact);
+                if goes_on {
+                    continue;
+                }
                 finished = true;
                 break;
             }
@@ -1343,5 +1414,72 @@ mod tests {
     #[test]
     fn the_magazine_holds_thirty_rounds() {
         assert_eq!(sterling().0.magazine, 30);
+    }
+
+    /// A level field with zombies of `kinds` standing in a line away from the origin, 10 m apart from the muzzle and
+    /// 1.2 m from one another; one `ammo` round is fired down the line from the origin at chest height, and the
+    /// health each zombie has lost is returned, with whether the bullet is still flying.
+    fn fire_down_a_line(ammo: AmmoKind, kinds: &[crate::zombie::ZombieKind]) -> (Vec<f32>, bool) {
+        use crate::zombie::Zombie;
+        let mut app = App::new();
+        app.init_resource::<Time>().init_resource::<Wind>().insert_resource(TerrainMap::flat(0.0)).add_message::<Impact>().add_systems(Update, move_bullets);
+        let ids: Vec<Entity> = kinds
+            .iter()
+            .enumerate()
+            .map(|(i, &k)| app.world_mut().spawn((Zombie::new(k, 0.0), Transform::from_xyz(0.0, 0.0, -10.0 - 1.2 * i as f32))).id())
+            .collect();
+        let def = ammo.def();
+        let bullet = app
+            .world_mut()
+            .spawn((
+                Bullet { cartridge: def.cartridge, ammo, velocity: Vec3::NEG_Z * def.cartridge.muzzle_velocity, age: 0.0, travelled: 0.0, glows: false, in_foliage: false, through: Vec::new() },
+                Transform::from_xyz(0.0, 1.1, 0.0),
+                Visibility::Hidden,
+            ))
+            .id();
+        for _ in 0..40 {
+            app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_millis(10));
+            app.update();
+        }
+        let lost = ids.iter().zip(kinds).map(|(&id, k)| k.traits().health - app.world().get::<Zombie>(id).unwrap().health).collect();
+        (lost, app.world().get_entity(bullet).is_ok())
+    }
+
+    #[test]
+    fn a_pistol_round_goes_through_one_body_with_less_to_give_and_stops_in_the_next_while_a_rifle_round_goes_through_several() {
+        use crate::zombie::ZombieKind::Walker;
+        // A pistol round: hurts the first, comes out slower and hurts the second less, and goes no further.
+        let (lost, flying) = fire_down_a_line(AmmoKind::NineFmj, &[Walker, Walker, Walker]);
+        assert!(lost[0] > 20.0, "{lost:?}");
+        assert!(lost[1] > 0.0 && lost[1] < lost[0] * 0.6, "the second takes less: {lost:?}");
+        assert_eq!(lost[2], 0.0, "and the third none: {lost:?}");
+        assert!(!flying, "it stops in the second");
+        // A rifle round goes through the lot and flies on.
+        let (lost, flying) = fire_down_a_line(AmmoKind::NatoBall, &[Walker, Walker, Walker]);
+        assert!(lost.iter().all(|&l| l > 50.0), "every one is hit hard: {lost:?}");
+        assert!(flying || lost.iter().all(|&l| l > 0.0), "{lost:?}");
+        // A load of shot is stopped by the first.
+        let (lost, _) = fire_down_a_line(AmmoKind::Buckshot, &[Walker, Walker]);
+        assert!(lost[0] > 0.0 && lost[1] == 0.0, "{lost:?}");
+        // A big one takes more of a bullet's energy to get through than an ordinary one.
+        let (lost, _) = fire_down_a_line(AmmoKind::NineFmj, &[crate::zombie::ZombieKind::Brute, Walker]);
+        assert!(lost[0] > 0.0 && lost[1] == 0.0, "a pistol round does not come out of a brute: {lost:?}");
+    }
+
+    #[test]
+    fn a_bolt_action_rifle_works_its_bolt_after_each_shot_in_the_time_its_action_takes() {
+        assert!(WeaponKind::LeeEnfield.bolt_action() && WeaponKind::L42.bolt_action());
+        assert!(!WeaponKind::Sterling.bolt_action() && !WeaponKind::Slr.bolt_action() && !WeaponKind::Auto5.bolt_action() && !WeaponKind::HiPower.bolt_action());
+        let slow = WeaponKind::L42.def().mechanism.cycle_time;
+        let quick = WeaponKind::LeeEnfield.def().mechanism.cycle_time;
+        let (delay, slow_speed) = bolt_cycle_timing(slow);
+        let (_, quick_speed) = bolt_cycle_timing(quick);
+        assert!(delay > 0.0 && delay < 0.3, "after the shot, not before it");
+        assert!(quick_speed > slow_speed, "the quicker action is worked quicker");
+        // The recording, at that speed, takes about as long as the action does.
+        for (cycle, speed) in [(slow, slow_speed), (quick, quick_speed)] {
+            let heard = BOLT_CYCLE_LENGTH / speed + delay;
+            assert!((heard - cycle).abs() < 0.3, "{heard} s of sound for a {cycle} s action");
+        }
     }
 }

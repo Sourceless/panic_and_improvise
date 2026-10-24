@@ -169,8 +169,8 @@ pub fn furnish(model: &mut Model, room: &Room, avoid: &[Rect], floor: f32, heigh
     scatter_loot(&mut ctx, room.kind, style.richness);
 }
 
-/// How many things lie about in a room of this kind and size.
-fn loot_count(kind: RoomKind, area: f32) -> usize {
+/// How many boxes lie about, on average, in a room of this kind and size.
+fn loot_count(kind: RoomKind, area: f32) -> f32 {
     let base = match kind {
         RoomKind::Bedroom | RoomKind::Living | RoomKind::Dining | RoomKind::Cloakroom | RoomKind::Lounge | RoomKind::Nave | RoomKind::Chancel => 1.0,
         RoomKind::Kitchen | RoomKind::Bar | RoomKind::Classroom | RoomKind::Office | RoomKind::StaffRoom | RoomKind::MainHall => 2.0,
@@ -178,8 +178,18 @@ fn loot_count(kind: RoomKind, area: f32) -> usize {
         RoomKind::Bathroom | RoomKind::Hall | RoomKind::Landing | RoomKind::Corridor => 0.5,
         _ => 0.0,
     };
-    // Bigger rooms hold more.
-    (base * (0.6 + area / 30.0)).round() as usize
+    // Bigger rooms hold more; but loot is scarce, so it is a good deal less than the figures above.
+    base * LOOT_SCARCITY * (0.6 + area / 30.0)
+}
+
+/// What share of the boxes the room kinds would hold are there.
+const LOOT_SCARCITY: f32 = 0.5;
+
+/// A whole number of boxes whose average over many rooms is `expected`: the whole part, and one more by
+/// chance in proportion to the rest.
+fn boxes_for(expected: f32, roll: f32) -> usize {
+    let whole = expected.floor();
+    whole as usize + (roll < expected - whole) as usize
 }
 
 /// How much clear floor a box on the floor keeps round it, for what falls out to lie on: a square this
@@ -192,7 +202,7 @@ const TOP_ROOM: f32 = 0.45;
 /// put them on. Each has a clear space of its own, so that no two lie on top of each other and
 /// what falls out of a box lands on something, not in a wall or a chair.
 fn scatter_loot(c: &mut Ctx, kind: RoomKind, richness: f32) {
-    let wanted = loot_count(kind, c.clear.area());
+    let wanted = boxes_for(loot_count(kind, c.clear.area()), c.rng.unit());
     for _ in 0..wanted {
         let rarity = crate::loot::Rarity::roll(c.rng.unit(), richness);
         let on_furniture = c.rng.unit() < 0.75;
@@ -820,5 +830,30 @@ fn workshop(c: &mut Ctx) {
     if c.free(&truck.grown(0.6)) && c.take(truck) {
         c.solid_box(&truck, 0.2, 1.1, [0.9, 0.7, 0.1], Some(Material::Metal));
         c.solid_box(&Rect::new(truck.x0 + 0.1, truck.z0 - 0.9, truck.x1 - 0.1, truck.z0), 0.1, 0.1, [0.3, 0.3, 0.3], None);
+    }
+}
+
+#[cfg(test)]
+mod loot_count_tests {
+    use super::*;
+
+    #[test]
+    fn a_fraction_of_a_box_is_a_box_that_often() {
+        assert_eq!(boxes_for(2.0, 0.99), 2);
+        assert_eq!(boxes_for(0.4, 0.3), 1);
+        assert_eq!(boxes_for(0.4, 0.5), 0);
+        assert_eq!(boxes_for(1.25, 0.1), 2);
+        assert_eq!(boxes_for(1.25, 0.9), 1);
+    }
+
+    #[test]
+    fn rooms_hold_about_half_the_boxes_they_used_to_and_the_bigger_the_more() {
+        let rooms = [RoomKind::Bedroom, RoomKind::Kitchen, RoomKind::Shop, RoomKind::Bathroom];
+        for kind in rooms {
+            let expected = loot_count(kind, 20.0);
+            assert!(expected > 0.0 && expected < 2.0, "{kind:?}: {expected}");
+            assert!(loot_count(kind, 40.0) > loot_count(kind, 10.0));
+        }
+        assert_eq!(loot_count(RoomKind::Tower, 6.0), 0.0);
     }
 }

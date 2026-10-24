@@ -6,6 +6,7 @@ use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
 use crate::controls::{Action, Controls, Keyboard};
+use crate::health::PlayerHealth;
 use crate::inventory::{Container, Inventory, Item, ItemKind, Place};
 use crate::menu::Menu;
 
@@ -19,6 +20,8 @@ pub struct InventoryScreen {
     drag: Option<Drag>,
     /// A line at the bottom: why something couldn't be done.
     pub message: String,
+    /// Where the window was last drawn, so that a let-go outside it can be told.
+    window: Option<egui::Rect>,
 }
 
 /// Things thrown out of the inventory, waiting to be put on the ground in front of the player.
@@ -161,21 +164,27 @@ fn drop_origin(cell: (u32, u32), grab: (u32, u32)) -> Option<(u32, u32)> {
     Some((cell.0.checked_sub(grab.0)?, cell.1.checked_sub(grab.1)?))
 }
 
-pub fn draw_inventory(mut contexts: EguiContexts, mut screen: ResMut<InventoryScreen>, mut inventory: ResMut<Inventory>, mut thrown: ResMut<DropQueue>) -> Result {
+pub fn draw_inventory(mut contexts: EguiContexts, mut screen: ResMut<InventoryScreen>, mut inventory: ResMut<Inventory>, mut thrown: ResMut<DropQueue>, mut health: ResMut<PlayerHealth>) -> Result {
     if !screen.open {
         return Ok(());
     }
-    let ctx = contexts.ctx_mut()?;
+    show_inventory(contexts.ctx_mut()?, &mut screen, &mut inventory, &mut thrown, &mut health);
+    Ok(())
+}
+
+/// Draws the inventory screen into `ctx` and acts on the pointer: the whole of the screen, apart from the
+/// Bevy system that calls it.
+fn show_inventory(ctx: &egui::Context, screen: &mut InventoryScreen, inventory: &mut Inventory, thrown: &mut DropQueue, health: &mut PlayerHealth) {
     let pack = inventory.pack.as_ref().map(|c| (c.width, c.height));
     let (pointer, pressed, released, rotate, secondary) = ctx.input(|i| {
         (i.pointer.latest_pos(), i.pointer.primary_pressed(), i.pointer.primary_released(), i.key_pressed(egui::Key::R), i.pointer.secondary_pressed())
     });
     let mut drop_message: Option<String> = None;
     let mut closed = false;
-    // Let go anywhere outside the window and it is thrown on the ground.
-    let window_rect = ctx.memory(|m| m.area_rect(egui::Id::new("Inventory")));
-    let outside = matches!((pointer, window_rect), (Some(p), Some(r)) if !r.contains(p));
-    egui::Window::new("Inventory").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).collapsible(false).resizable(false).show(ctx, |ui| {
+    // Let go anywhere outside the window and it is thrown on the ground. (The window's place is the one it
+    // had when last drawn; egui's own record of areas is not kept under a name we can look up.)
+    let outside = matches!((pointer, screen.window), (Some(p), Some(r)) if !r.contains(p));
+    let shown = egui::Window::new("Inventory").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).collapsible(false).resizable(false).show(ctx, |ui| {
         let probe = Layout { origin: egui::Pos2::ZERO, pack };
         let (area, _) = ui.allocate_exact_size(probe.size(), egui::Sense::hover());
         let layout = Layout { origin: area.min, pack };
@@ -256,7 +265,8 @@ pub fn draw_inventory(mut contexts: EguiContexts, mut screen: ResMut<InventorySc
                 None => {}
             }
         }
-        // Right click on a weapon takes it up in the first free slot; on a pack, puts it on.
+        // Right click on a weapon takes it up in the first free slot; on a pack, puts it on; on a dressing or the
+        // like, uses it (it heals a little at a time).
         if secondary && screen.drag.is_none() {
             if let Some(Hover::Cell(place, x, y)) = over {
                 if let Some(item) = inventory.container(place).and_then(|c| c.at(x, y)).map(|p| p.item) {
@@ -266,9 +276,22 @@ pub fn draw_inventory(mut contexts: EguiContexts, mut screen: ResMut<InventorySc
                             inventory.equip_weapon(item.id, slot)
                         }
                         ItemKind::Pack(_) => inventory.wear_pack(item.id),
+                        ItemKind::Supply(supply) if supply.healing().is_some() => {
+                            let (total, seconds) = supply.healing().unwrap_or((0.0, 1.0));
+                            if health.heal_over_time(total, seconds) {
+                                inventory.consume_one(item.id);
+                                drop_message = Some(format!("Used the {}: it will heal {} over {} seconds.", item.kind.name().to_lowercase(), total, seconds));
+                                true
+                            } else {
+                                drop_message = Some("You don't need that.".to_string());
+                                true
+                            }
+                        }
                         _ => false,
                     };
-                    drop_message = Some(if done { String::new() } else { "That can't be done.".to_string() });
+                    if drop_message.is_none() {
+                        drop_message = Some(if done { String::new() } else { "That can't be done.".to_string() });
+                    }
                 }
             }
         }
@@ -314,7 +337,7 @@ pub fn draw_inventory(mut contexts: EguiContexts, mut screen: ResMut<InventorySc
                                     let room = item.kind.stack_limit() - target.count.min(item.kind.stack_limit());
                                     let moved = room.min(item.count);
                                     if moved > 0 {
-                                        merge_rounds(&mut inventory, item.id, target.id, moved);
+                                        merge_rounds(inventory, item.id, target.id, moved);
                                         done = true;
                                     }
                                 } else {
@@ -349,7 +372,7 @@ pub fn draw_inventory(mut contexts: EguiContexts, mut screen: ResMut<InventorySc
         }
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Drag to move; drop outside the window to throw away. R turns what you're holding. Right click equips a weapon or a pack.").small().weak());
+            ui.label(egui::RichText::new("Drag to move; drop outside the window to throw away. R turns what you're holding. Right click equips a weapon or a pack, or uses a dressing.").small().weak());
             if !screen.message.is_empty() {
                 ui.label(egui::RichText::new(&screen.message).color(egui::Color32::from_rgb(230, 160, 90)));
             }
@@ -358,13 +381,13 @@ pub fn draw_inventory(mut contexts: EguiContexts, mut screen: ResMut<InventorySc
             closed = true;
         }
     });
+    screen.window = shown.map(|w| w.response.rect);
     if let Some(m) = drop_message {
         screen.message = m;
     }
     if closed {
         screen.toggle();
     }
-    Ok(())
 }
 
 /// Moves `count` rounds from one stack to another of the same kind (taking the first away if it empties).
@@ -396,5 +419,155 @@ fn merge_rounds(inventory: &mut Inventory, from: u32, to: u32, count: u32) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SCREEN: egui::Vec2 = egui::vec2(1600.0, 1000.0);
+
+    /// Runs one frame of the inventory screen with these input events.
+    fn frame(ctx: &egui::Context, events: Vec<egui::Event>, screen: &mut InventoryScreen, inventory: &mut Inventory, thrown: &mut DropQueue) {
+        frame_with(ctx, events, screen, inventory, thrown, &mut PlayerHealth::default());
+    }
+
+    fn frame_with(ctx: &egui::Context, events: Vec<egui::Event>, screen: &mut InventoryScreen, inventory: &mut Inventory, thrown: &mut DropQueue, health: &mut PlayerHealth) {
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, SCREEN)), events, ..Default::default() };
+        let mut output = ctx.run_ui(input, |ui| show_inventory(ui.ctx(), screen, inventory, thrown, health));
+        output.textures_delta.clear();
+    }
+
+    fn moved(p: egui::Pos2) -> egui::Event {
+        egui::Event::PointerMoved(p)
+    }
+
+    fn button(p: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
+    }
+
+    /// Picks up the first thing found by pressing the mouse over the window, and says where it was.
+    fn grab_something(ctx: &egui::Context, screen: &mut InventoryScreen, inventory: &mut Inventory, thrown: &mut DropQueue) -> egui::Pos2 {
+        let window = screen.window.expect("the window has been drawn");
+        let mut y = window.min.y;
+        while y < window.max.y {
+            let mut x = window.min.x;
+            while x < window.max.x {
+                let p = egui::pos2(x, y);
+                frame(ctx, vec![moved(p), button(p, true)], screen, inventory, thrown);
+                if screen.drag.is_some() {
+                    return p;
+                }
+                frame(ctx, vec![button(p, false)], screen, inventory, thrown);
+                x += 6.0;
+            }
+            y += 6.0;
+        }
+        panic!("nothing in the window could be picked up");
+    }
+
+    #[test]
+    fn a_thing_let_go_of_outside_the_window_is_thrown_away() {
+        let ctx = egui::Context::default();
+        let mut screen = InventoryScreen { open: true, ..Default::default() };
+        let mut inventory = Inventory::starting();
+        let mut thrown = DropQueue::default();
+        // Once to lay the window out, so that it has a place.
+        frame(&ctx, vec![], &mut screen, &mut inventory, &mut thrown);
+        frame(&ctx, vec![], &mut screen, &mut inventory, &mut thrown);
+        let at = grab_something(&ctx, &mut screen, &mut inventory, &mut thrown);
+        let held = screen.drag.expect("holding something").id;
+        assert!(inventory.find(held).is_some());
+        // Carry it off the window, and let go.
+        let outside = egui::pos2(40.0, 40.0);
+        assert!(!screen.window.unwrap().contains(outside), "{at:?}");
+        frame(&ctx, vec![moved(outside)], &mut screen, &mut inventory, &mut thrown);
+        frame(&ctx, vec![button(outside, false)], &mut screen, &mut inventory, &mut thrown);
+        assert_eq!(thrown.0.len(), 1, "it is waiting to be put down; the screen says: {:?}", screen.message);
+        assert_eq!(thrown.0[0].id, held);
+        assert!(inventory.find(held).is_none(), "and it is no longer carried");
+        assert!(screen.drag.is_none());
+    }
+
+    #[test]
+    fn a_thing_let_go_of_on_the_window_but_not_on_a_place_for_it_is_kept() {
+        let ctx = egui::Context::default();
+        let mut screen = InventoryScreen { open: true, ..Default::default() };
+        let mut inventory = Inventory::starting();
+        let mut thrown = DropQueue::default();
+        frame(&ctx, vec![], &mut screen, &mut inventory, &mut thrown);
+        frame(&ctx, vec![], &mut screen, &mut inventory, &mut thrown);
+        grab_something(&ctx, &mut screen, &mut inventory, &mut thrown);
+        let held = screen.drag.unwrap().id;
+        // The title bar, at the top of the window.
+        let title = screen.window.unwrap().min + egui::vec2(20.0, 8.0);
+        frame(&ctx, vec![moved(title)], &mut screen, &mut inventory, &mut thrown);
+        frame(&ctx, vec![button(title, false)], &mut screen, &mut inventory, &mut thrown);
+        assert!(thrown.0.is_empty());
+        assert!(inventory.find(held).is_some());
+    }
+
+    fn right_click(p: egui::Pos2) -> egui::Event {
+        egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed: true, modifiers: egui::Modifiers::NONE }
+    }
+
+    /// Right-clicks over the window until the message line says something (the click landed on a thing).
+    fn right_click_something(ctx: &egui::Context, screen: &mut InventoryScreen, inventory: &mut Inventory, thrown: &mut DropQueue, health: &mut PlayerHealth, wanted: impl Fn(&Inventory) -> bool) -> bool {
+        let window = screen.window.expect("the window has been drawn");
+        let mut y = window.min.y;
+        while y < window.max.y {
+            let mut x = window.min.x;
+            while x < window.max.x {
+                let p = egui::pos2(x, y);
+                frame_with(ctx, vec![moved(p), right_click(p)], screen, inventory, thrown, health);
+                if wanted(inventory) {
+                    return true;
+                }
+                x += 6.0;
+            }
+            y += 6.0;
+        }
+        false
+    }
+
+    #[test]
+    fn right_clicking_a_dressing_uses_it_up_and_starts_healing_if_hurt_and_does_nothing_if_not() {
+        let ctx = egui::Context::default();
+        let mut screen = InventoryScreen { open: true, ..Default::default() };
+        let mut inventory = Inventory::starting();
+        let mut thrown = DropQueue::default();
+        let mut health = PlayerHealth::default();
+        frame_with(&ctx, vec![], &mut screen, &mut inventory, &mut thrown, &mut health);
+        frame_with(&ctx, vec![], &mut screen, &mut inventory, &mut thrown, &mut health);
+        let has_dressing = |inv: &Inventory| inv.grid_items().any(|i| i.kind == ItemKind::Supply(crate::inventory::Supply::Bandage));
+        assert!(has_dressing(&inventory));
+        // Not hurt: it is kept, and the screen says it is not needed.
+        let mut told = false;
+        'scan: for _ in 0..1 {
+            let window = screen.window.unwrap();
+            let mut y = window.min.y;
+            while y < window.max.y {
+                let mut x = window.min.x;
+                while x < window.max.x {
+                    let p = egui::pos2(x, y);
+                    frame_with(&ctx, vec![moved(p), right_click(p)], &mut screen, &mut inventory, &mut thrown, &mut health);
+                    if screen.message.contains("don't need") {
+                        told = true;
+                        break 'scan;
+                    }
+                    x += 6.0;
+                }
+                y += 6.0;
+            }
+        }
+        assert!(told, "it said so");
+        assert!(has_dressing(&inventory) && health.pending() == 0.0);
+        // Hurt: it is used up, and the healing is under way.
+        health.hurt(50.0);
+        assert!(right_click_something(&ctx, &mut screen, &mut inventory, &mut thrown, &mut health, |inv| !has_dressing(inv)));
+        assert_eq!(health.pending(), 30.0);
+        assert_eq!(health.current, 50.0, "not all at once");
+        assert!(screen.message.contains("heal"), "{:?}", screen.message);
     }
 }

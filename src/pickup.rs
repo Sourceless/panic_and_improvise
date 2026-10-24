@@ -64,6 +64,21 @@ pub fn make_item(inventory: &mut Inventory, found: &Found) -> Item {
     }
 }
 
+/// Takes what has been picked up: a pack goes on the back at once, a weapon is taken up ready (putting down
+/// the gun in hand if both slots are full, which comes back as the `Ok`), and the rest goes in the grids.
+/// Gives back what could not be taken, less any part that was.
+fn receive(inventory: &mut Inventory, item: Item) -> Result<Option<Item>, Item> {
+    match item.kind {
+        ItemKind::Pack(_) => match inventory.put_on(item) {
+            Ok(()) => Ok(None),
+            // If it will not go on (the old one's things have nowhere to go) it can still be carried.
+            Err(item) => inventory.add(item).map(|()| None),
+        },
+        ItemKind::Weapon(_) => Ok(inventory.take_up_weapon(item)),
+        _ => inventory.add(item).map(|()| None),
+    }
+}
+
 /// Of some things, the one most nearly in the middle of the view, so long as it is near enough: whatever
 /// is being looked at, and not merely whatever is nearest. How far from the middle counts (as cosine, so
 /// larger is nearer the middle) comes back with it.
@@ -87,6 +102,7 @@ fn pick_up(
     screen: Res<InventoryScreen>,
     mut inventory: ResMut<Inventory>,
     mut opened: ResMut<OpenedLoot>,
+    mut thrown: ResMut<DropQueue>,
     mut prompt: ResMut<PickupPrompt>,
     assets: Option<Res<LootAssets>>,
     camera: Query<&GlobalTransform, With<FpsCamera>>,
@@ -138,13 +154,21 @@ fn pick_up(
         return;
     }
     let item = make_item(&mut inventory, &pickup.found);
-    match inventory.add(item) {
-        Ok(()) => {
+    match receive(&mut inventory, item) {
+        Ok(displaced) => {
             if let Some(slot) = opened.0.get_mut(&pickup.spot).and_then(|d| d.get_mut(pickup.slot)) {
                 *slot = None;
             }
             commands.entity(entity).despawn();
-            prompt.message = format!("Picked up {}.", describe(&pickup.found));
+            prompt.message = match (item.kind, &displaced) {
+                (ItemKind::Weapon(_), Some(old)) => format!("Took the {} and put down the {}.", item.kind.name(), old.kind.name()),
+                (ItemKind::Weapon(_), None) => format!("Took the {}.", item.kind.name()),
+                (ItemKind::Pack(_), _) => format!("Put on the {}.", item.kind.name()),
+                _ => format!("Picked up {}.", describe(&pickup.found)),
+            };
+            if let Some(old) = displaced {
+                thrown.0.push(old);
+            }
         }
         Err(left) if left.count < item.count && matches!(item.kind, ItemKind::Ammo(_)) => {
             // Some of the rounds fitted: the rest stay where they are.
@@ -214,5 +238,25 @@ mod tests {
         assert!((at.translation.z - 19.1).abs() < 0.01 && (at.translation.x - 10.0).abs() < 0.5, "{:?}", at.translation);
         assert!(at.translation.y > 3.0 && at.translation.y < 3.5, "{:?}", at.translation);
         assert!(app.world().resource::<DropQueue>().0.is_empty());
+    }
+
+    #[test]
+    fn a_pack_is_put_on_a_weapon_is_taken_up_ready_and_the_gun_in_hand_is_put_down_when_both_slots_are_full() {
+        use crate::inventory::PackKind;
+        let mut inv = Inventory::starting();
+        let carried = inv.slots;
+        // A pack goes on at once.
+        let bergen = inv.make(ItemKind::Pack(PackKind::Bergen), 1);
+        assert!(matches!(receive(&mut inv, bergen), Ok(None)));
+        assert_eq!(inv.back.map(|b| b.id), Some(bergen.id));
+        // Both slots full: the new gun goes in hand and the old comes back to be put down.
+        let slr = inv.make_gun(WeaponKind::Slr, AmmoKind::NatoBall, 20);
+        let put_down = receive(&mut inv, slr).expect("taken").expect("the gun in hand is put down");
+        assert_eq!(put_down.id, carried[0].unwrap().id);
+        assert_eq!(inv.in_hand().map(|g| g.id), Some(slr.id));
+        // Anything else goes in the grids.
+        let tin = inv.make(ItemKind::Supply(crate::inventory::Supply::TinnedFood), 1);
+        assert!(matches!(receive(&mut inv, tin), Ok(None)));
+        assert!(inv.find(tin.id).is_some());
     }
 }

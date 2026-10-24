@@ -84,10 +84,10 @@ pub fn surface_under(p: Vec2, feet: f32, map: &TerrainMap, zones: Option<&ZoneMa
 /// How far the player goes between one footfall and the next, and how loud each is.
 pub fn stride(stance: Stance, speed: f32) -> (f32, f32) {
     match stance {
-        Stance::Prone => (0.45, 0.1),
-        Stance::Crouch => (0.7, 0.25),
-        Stance::Stand if speed > 8.0 => (1.45, 0.85),
-        Stance::Stand => (1.0, 0.5),
+        Stance::Prone => (0.45, 0.06),
+        Stance::Crouch => (0.7, 0.14),
+        Stance::Stand if speed > 8.0 => (1.45, 0.5),
+        Stance::Stand => (1.0, 0.28),
     }
 }
 
@@ -96,8 +96,16 @@ pub fn stride(stance: Stance, speed: f32) -> (f32, f32) {
 pub struct RoadSurfaces(pub RoadClearance);
 
 #[derive(Resource)]
-struct StepSounds {
+pub(crate) struct StepSounds {
     by_surface: HashMap<Surface, Vec<Handle<AudioSource>>>,
+}
+
+impl StepSounds {
+    /// One of the recordings of a step on `surface`, chosen by `roll` (0 to 1).
+    pub(crate) fn pick(&self, surface: Surface, roll: f32) -> Option<Handle<AudioSource>> {
+        let takes = self.by_surface.get(&surface).filter(|t| !t.is_empty())?;
+        takes.get((roll.clamp(0.0, 0.999) * takes.len() as f32) as usize).cloned()
+    }
 }
 
 #[derive(Resource, Default)]

@@ -34,6 +34,11 @@ impl WeaponKind {
     pub fn def(self) -> &'static WeaponDef {
         &WEAPONS[self as usize]
     }
+
+    /// Whether the shooter works the bolt by hand between shots (the bolt-action rifles).
+    pub fn bolt_action(self) -> bool {
+        matches!(self, WeaponKind::L42 | WeaponKind::LeeEnfield)
+    }
 }
 
 /// How the trigger works.

@@ -217,6 +217,22 @@ impl FpsCamera {
         self.floor + self.air_height
     }
 
+    /// Stands the player up on the ground at `at`, at rest, with `transform` as their eye.
+    pub fn restart_at(&mut self, transform: &mut Transform, at: Vec2, map: &TerrainMap) {
+        let ground = map.height_at(at);
+        self.velocity = Vec2::ZERO;
+        self.air_height = 0.0;
+        self.vertical_speed = 0.0;
+        self.stance = Stance::Stand;
+        self.eye_height = EYE_HEIGHT;
+        self.floor = ground;
+        self.view_feet = ground;
+        self.mantle = None;
+        self.sliding = false;
+        self.jump_spent_standing = false;
+        transform.translation = Vec3::new(at.x, ground + EYE_HEIGHT, at.y);
+    }
+
     /// How many climbs the player has made, and whether one is going on now.
     pub fn mantles(&self) -> u32 {
         self.mantles
