@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 default-run = "fps_prototype"
 
+[workspace]
+members = ["launcher"]
+
 [dependencies]
 arboard = "3.6.1"
 bevy = { version = "0.19.1", features = ["jpeg", "wav", "pbr_light_textures"] }

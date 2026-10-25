@@ -86,6 +86,20 @@
       windowsDeps = craneWindows.buildDepsOnly windowsCommon;
       windows = craneWindows.buildPackage (windowsCommon // { cargoArtifacts = windowsDeps; });
 
+      # --- The launcher: a small program of its own (no Bevy), made for each system -------------------------------
+      launcherCommon = common // {
+        pname = "panic-and-improvise-launcher";
+        cargoExtraArgs = "-p launcher";
+      };
+      launcherLinuxDeps = craneLib.buildDepsOnly launcherCommon;
+      launcherLinux = craneLib.buildPackage (launcherCommon // {
+        cargoArtifacts = launcherLinuxDeps;
+        # Its tests stand a web server up on the loopback.
+        doCheck = true;
+      });
+      launcherWindowsDeps = craneWindows.buildDepsOnly launcherCommon;
+      launcherWindows = craneWindows.buildPackage (launcherCommon // { cargoArtifacts = launcherWindowsDeps; });
+
       # --- What is handed out: the programs and the assets they read, which are looked for next to them ---------
       assets = lib.fileset.toSource {
         root = ./.;
@@ -104,6 +118,10 @@
         cp -r ${assets}/assets $dir/assets
         mkdir -p $out
         tar --sort=name --owner=0 --group=0 --mtime=@0 -czf $out/$dir.tar.gz $dir
+        # The launcher is handed out beside it, not in it: it is what fetches the archive.
+        cp ${launcherLinux}/bin/launcher $out/panic-and-improvise-launcher-linux-x86_64
+        chmod +w $out/panic-and-improvise-launcher-linux-x86_64
+        patchelf --set-interpreter /lib64/ld-linux-x86-64.so.2 --remove-rpath $out/panic-and-improvise-launcher-linux-x86_64
       '';
 
       windowsArchive = pkgs.runCommand "panic-and-improvise-windows-x86_64" { nativeBuildInputs = [ pkgs.zip ]; } ''
@@ -113,16 +131,17 @@
         cp -r ${assets}/assets $dir/assets
         mkdir -p $out
         zip -qr -X $out/$dir.zip $dir
+        cp ${launcherWindows}/bin/launcher.exe $out/panic-and-improvise-launcher-windows-x86_64.exe
       '';
     in
     {
       packages.${system} = {
         default = linux;
-        inherit linux windows linuxArchive windowsArchive;
+        inherit linux windows launcherLinux launcherWindows linuxArchive windowsArchive;
       };
 
       checks.${system} = {
-        inherit linux windows;
+        inherit linux windows launcherLinux launcherWindows;
       };
 
       devShells.${system}.default = craneLib.devShell {
