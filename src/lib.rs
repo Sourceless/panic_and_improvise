@@ -62,6 +62,28 @@ use crate::map::{TerrainMap, HALF_SIZE};
 pub const MAP_HALF_SIZE: f32 = HALF_SIZE;
 pub const MAP_SEED: u64 = 2026;
 
+/// The release this was built as (set by the build of a release, `0.1.<number>`); the crate's own version when built
+/// any other way.
+pub const VERSION: &str = match option_env!("PANIC_AND_IMPROVISE_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
+/// What the game's window is called.
+pub fn window_title() -> String {
+    format!("Panic and Improvise v{VERSION}")
+}
+
+#[cfg(test)]
+mod version_tests {
+    #[test]
+    fn the_window_is_named_for_the_game_and_its_version() {
+        let title = super::window_title();
+        assert!(title.starts_with("Panic and Improvise v"), "{title}");
+        assert!(title.ends_with(super::VERSION) && super::VERSION.chars().next().unwrap().is_ascii_digit(), "{title}");
+    }
+}
+
 /// The seed for the map the game plays on: a fresh random one each run. `FPS_SEED` pins it
 /// (to replay a map), and the benchmark and screenshot modes pin it to `MAP_SEED` so their
 /// results stay comparable from run to run.

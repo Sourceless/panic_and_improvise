@@ -15,7 +15,7 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "FPS Prototype".into(),
+                title: fps_prototype::window_title(),
                 ..default()
             }),
             ..default()

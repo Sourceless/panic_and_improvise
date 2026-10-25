@@ -20,6 +20,10 @@
       lib = pkgs.lib;
       windowsTarget = "x86_64-pc-windows-gnu";
 
+      # The release this is: 0.1 and the number of commits behind it, which is what the workflow tags a release
+      # with. A tree with changes in it, or without its history, is not a release.
+      version = if self ? revCount then "0.1.${toString self.revCount}" else "0.1.0-dev";
+
       toolchain = p: p.rust-bin.stable.latest.minimal.override {
         targets = [ windowsTarget ];
       };
@@ -61,6 +65,8 @@
       linuxDeps = craneLib.buildDepsOnly linuxCommon;
       linux = craneLib.buildPackage (linuxCommon // {
         cargoArtifacts = linuxDeps;
+        # Not given to the dependencies, which would rebuild them for every commit.
+        PANIC_AND_IMPROVISE_VERSION = version;
         # The windowing, graphics and input libraries are opened when the game starts, not linked.
         postFixup = ''
           for exe in fps_prototype bot; do
@@ -84,7 +90,7 @@
         buildInputs = [ pkgsWindows.windows.pthreads ];
       };
       windowsDeps = craneWindows.buildDepsOnly windowsCommon;
-      windows = craneWindows.buildPackage (windowsCommon // { cargoArtifacts = windowsDeps; });
+      windows = craneWindows.buildPackage (windowsCommon // { cargoArtifacts = windowsDeps; PANIC_AND_IMPROVISE_VERSION = version; });
 
       # --- The launcher: a small program of its own (no Bevy), made for each system -------------------------------
       launcherCommon = common // {
@@ -106,6 +112,45 @@
         fileset = ./assets;
       };
 
+      # A package for Debian and Ubuntu: the launcher, a menu entry, and the libraries the game opens when it
+      # starts, so that installing it with apt is all that is needed. The game itself the launcher fetches, and
+      # keeps up to date, so the package does not have to be installed again for each release.
+      debPackage = pkgs.runCommand "panic-and-improvise-deb" { nativeBuildInputs = [ pkgs.dpkg pkgs.patchelf ]; } ''
+        root=deb
+        mkdir -p $root/DEBIAN $root/usr/bin $root/usr/share/applications
+        cp ${launcherLinux}/bin/launcher $root/usr/bin/panic-and-improvise
+        chmod 755 $root/usr/bin/panic-and-improvise
+        patchelf --set-interpreter /lib64/ld-linux-x86-64.so.2 --remove-rpath $root/usr/bin/panic-and-improvise
+        cat > $root/usr/share/applications/panic-and-improvise.desktop <<'DESKTOP'
+        [Desktop Entry]
+        Type=Application
+        Name=Panic and Improvise
+        Comment=First-person survival
+        Exec=panic-and-improvise
+        Terminal=true
+        Categories=Game;ActionGame;
+        DESKTOP
+        sed -i 's/^ *//' $root/usr/share/applications/panic-and-improvise.desktop
+        cat > $root/DEBIAN/control <<CONTROL
+        Package: panic-and-improvise
+        Version: ${version}
+        Architecture: amd64
+        Maintainer: Laurence Pakenham-Smith <laurence@sourceless.org>
+        Installed-Size: $(du -sk $root/usr | cut -f1)
+        Depends: libc6 (>= 2.39), libasound2t64 | libasound2, libudev1, libvulkan1, libxkbcommon0, libwayland-client0, libx11-6, libxcursor1, libxi6, libxrandr2, libxcb1
+        Recommends: mesa-vulkan-drivers
+        Section: games
+        Priority: optional
+        Homepage: https://github.com/Sourceless/panic_and_improvise
+        Description: Panic and Improvise, a first-person survival game
+         Installs the launcher, which downloads the latest release of the game
+         when it is started and keeps it up to date.
+        CONTROL
+        sed -i 's/^        //' $root/DEBIAN/control
+        mkdir -p $out
+        dpkg-deb --root-owner-group -Zxz --build $root $out/panic-and-improvise_${version}_amd64.deb
+      '';
+
       linuxArchive = pkgs.runCommand "panic-and-improvise-linux-x86_64" { nativeBuildInputs = [ pkgs.patchelf pkgs.gnutar pkgs.gzip ]; } ''
         dir=panic-and-improvise-linux-x86_64
         mkdir -p $dir
@@ -118,6 +163,7 @@
         cp -r ${assets}/assets $dir/assets
         mkdir -p $out
         tar --sort=name --owner=0 --group=0 --mtime=@0 -czf $out/$dir.tar.gz $dir
+        cp ${debPackage}/*.deb $out/
         # The launcher is handed out beside it, not in it: it is what fetches the archive.
         cp ${launcherLinux}/bin/launcher $out/panic-and-improvise-launcher-linux-x86_64
         chmod +w $out/panic-and-improvise-launcher-linux-x86_64
@@ -137,7 +183,7 @@
     {
       packages.${system} = {
         default = linux;
-        inherit linux windows launcherLinux launcherWindows linuxArchive windowsArchive;
+        inherit linux windows launcherLinux launcherWindows debPackage linuxArchive windowsArchive;
       };
 
       checks.${system} = {
