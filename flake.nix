@@ -25,7 +25,7 @@
       version = if self ? revCount then "0.1.${toString self.revCount}" else "0.1.0-dev";
 
       toolchain = p: p.rust-bin.stable.latest.minimal.override {
-        targets = [ windowsTarget ];
+        targets = [ windowsTarget "x86_64-unknown-linux-musl" ];
       };
       craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
 
@@ -97,10 +97,20 @@
         pname = "panic-and-improvise-launcher";
         cargoExtraArgs = "-p launcher";
       };
-      launcherLinuxDeps = craneLib.buildDepsOnly launcherCommon;
-      launcherLinux = craneLib.buildPackage (launcherCommon // {
-        cargoArtifacts = launcherLinuxDeps;
-        # Its tests stand a web server up on the loopback.
+      # On Linux it is linked with musl and all of it is in the one file, so it needs nothing from the system
+      # it runs on, whatever the age of the C library there. (The game cannot be: it opens the system's
+      # graphics, windowing and sound libraries, which have to be the system's own.)
+      pkgsMusl = import nixpkgs {
+        localSystem = system;
+        crossSystem = { config = "x86_64-unknown-linux-musl"; };
+        overlays = [ (import rust-overlay) ];
+      };
+      craneMusl = (crane.mkLib pkgsMusl).overrideToolchain toolchain;
+      launcherLinuxDeps = craneMusl.buildDepsOnly launcherCommon;
+      launcherLinux = craneMusl.buildPackage (launcherCommon // { cargoArtifacts = launcherLinuxDeps; });
+      # Its tests, which stand a web server up on the loopback, are run with the ordinary toolchain.
+      launcherTests = craneLib.buildPackage (launcherCommon // {
+        cargoArtifacts = craneLib.buildDepsOnly launcherCommon;
         doCheck = true;
       });
       launcherWindowsDeps = craneWindows.buildDepsOnly launcherCommon;
@@ -120,7 +130,6 @@
         mkdir -p $root/DEBIAN $root/usr/bin $root/usr/share/applications
         cp ${launcherLinux}/bin/launcher $root/usr/bin/panic-and-improvise
         chmod 755 $root/usr/bin/panic-and-improvise
-        patchelf --set-interpreter /lib64/ld-linux-x86-64.so.2 --remove-rpath $root/usr/bin/panic-and-improvise
         cat > $root/usr/share/applications/panic-and-improvise.desktop <<'DESKTOP'
         [Desktop Entry]
         Type=Application
@@ -166,8 +175,6 @@
         cp ${debPackage}/*.deb $out/
         # The launcher is handed out beside it, not in it: it is what fetches the archive.
         cp ${launcherLinux}/bin/launcher $out/panic-and-improvise-launcher-linux-x86_64
-        chmod +w $out/panic-and-improvise-launcher-linux-x86_64
-        patchelf --set-interpreter /lib64/ld-linux-x86-64.so.2 --remove-rpath $out/panic-and-improvise-launcher-linux-x86_64
       '';
 
       windowsArchive = pkgs.runCommand "panic-and-improvise-windows-x86_64" { nativeBuildInputs = [ pkgs.zip ]; } ''
@@ -187,7 +194,7 @@
       };
 
       checks.${system} = {
-        inherit linux windows launcherLinux launcherWindows;
+        inherit linux windows launcherLinux launcherWindows launcherTests;
       };
 
       devShells.${system}.default = craneLib.devShell {
