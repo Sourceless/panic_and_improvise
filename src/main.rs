@@ -1,3 +1,7 @@
+// A release build on Windows is a windowed program: no console opens behind the game. (Its `--help` has nowhere to
+// print, then; the bot is a console program and does.)
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use bevy::prelude::*;
 use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
 use fps_prototype::controls::{controls_path, Controls, Preset};

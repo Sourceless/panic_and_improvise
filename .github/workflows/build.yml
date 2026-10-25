@@ -1,0 +1,76 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            package: linuxArchive
+          - name: Windows
+            package: windowsArchive
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: nixbuild/nix-quick-install-action@v35
+        with:
+          # `keep-*` so that the dependencies, which the final build only needs while it runs, are kept in the
+          # store when it is trimmed for the cache.
+          nix_conf: |
+            experimental-features = nix-command flakes
+            keep-env-derivations = true
+            keep-outputs = true
+
+      # The store is kept in the Actions cache. Compiling the dependencies (Bevy and the rest) is nearly all of the
+      # time, and they change only with Cargo.lock, the flake or its inputs, so that is what the cache is keyed on;
+      # the game's own code is built each time. Only main saves one, so that a pull request reads main's.
+      - name: Restore and save the Nix store
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-${{ matrix.package }}-${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.toml', 'Cargo.lock') }}
+          restore-prefixes-first-match: nix-${{ matrix.package }}-
+          save: ${{ github.ref == 'refs/heads/main' }}
+          # GitHub keeps 10 GB of caches for the whole repository, and there are two of these.
+          gc-max-store-size-linux: 4G
+
+      - name: Build
+        run: nix build .#${{ matrix.package }} --print-build-logs
+
+      - name: Collect the archive
+        run: |
+          mkdir dist
+          cp result/* dist/
+          ls -lh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
