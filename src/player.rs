@@ -464,7 +464,7 @@ pub fn step_movement(mut state: MoveState, intent: MoveIntent, dt: f32) -> MoveS
     state
 }
 
-fn player_movement(
+pub(crate) fn player_movement(
     time: Res<Time>,
     keys: Res<Keyboard>,
     controls: Res<Controls>,

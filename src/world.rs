@@ -93,6 +93,43 @@ pub fn skip(category: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// Prints where to stand, and which way to face, to have a wall half a metre ahead: `FPS_AT=x,z FPS_YAW=yaw`
+    /// (for looking at how things are drawn against a wall). `cargo test --lib where_to_stand_at_a_wall -- --ignored --nocapture`
+    #[test]
+    #[ignore = "prints a place to look at"]
+    fn where_to_stand_at_a_wall() {
+        let params = GenParams::default();
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
+        let colliders = headless_colliders(&map, &params);
+        let start = map.spawn_point();
+        let mut best: Option<(f32, Vec2, Vec2)> = None;
+        for i in 0..64 {
+            let angle = i as f32 / 64.0 * std::f32::consts::TAU;
+            let direction = Vec2::from_angle(angle);
+            let from = Vec3::new(start.x, map.height_at(start) + 1.8, start.y);
+            let to = from + Vec3::new(direction.x, 0.0, direction.y) * 40.0;
+            if let Some(hit) = colliders.segment_hit(from, to) {
+                let distance = hit.t * 40.0;
+                if best.is_none_or(|(d, _, _)| distance < d) && hit.normal.y.abs() < 0.2 {
+                    best = Some((distance, Vec2::new(hit.point.x, hit.point.z), Vec2::new(hit.normal.x, hit.normal.z)));
+                }
+            }
+        }
+        let (distance, point, normal) = best.expect("a wall near the start");
+        let stand = point + normal.normalize() * 0.5;
+        let yaw = (normal.x).atan2(normal.y);
+        eprintln!("nearest wall {distance:.1} m from the start: FPS_AT={:.2},{:.2} FPS_YAW={yaw:.3}", stand.x, stand.y);
+        // And what a gun held out there would be in.
+        let eye = Transform::from_xyz(stand.x, map.height_at(stand) + 1.8, stand.y).with_rotation(Quat::from_rotation_y(yaw));
+        let cam = GlobalTransform::from(eye);
+        let model = crate::gun_models::build(crate::weapons::WeaponKind::Sterling);
+        let pose = crate::weapon::gun_pose_held(&model.spec, &crate::weapons::WeaponKind::Sterling.def().handling, 0.0, 0.0, 0.0, 0.0);
+        let muzzle = cam.mul_transform(pose).transform_point(model.spec.muzzle);
+        let facing = cam.forward();
+        eprintln!("eye {:?} looking {:?} muzzle {muzzle:?} wall at {point:?}: {:?}", eye.translation, *facing, colliders.segment_hit(eye.translation, muzzle));
+        eprintln!("intrusion {}", crate::weapon::barrel_intrusion(eye.translation, muzzle, &colliders, &map));
+    }
+
     #[test]
     fn the_solids_of_a_world_can_be_built_with_no_window_and_are_the_same_every_time() {
         let params = GenParams::default();

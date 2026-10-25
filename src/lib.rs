@@ -1,5 +1,6 @@
 pub mod ammo;
 pub mod ballistics;
+pub mod body;
 pub mod bot;
 pub mod building;
 pub mod cloud_material;
@@ -126,6 +127,8 @@ impl Plugin for GamePlugin {
             sound::SoundPlugin,
             impact::ImpactPlugin,
             target::TargetPlugin,
+            figure::FigurePlugin,
+            body::BodyPlugin,
         ));
     }
 }

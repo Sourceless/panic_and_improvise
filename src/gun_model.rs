@@ -39,6 +39,18 @@ pub fn photo(x: f32, y: f32) -> (f32, f32) {
     (MUZZLE_Z + (1262.0 - x) / 1752.0, BORE_Y + (214.7 - y) / 1752.0)
 }
 
+/// Where the right hand is held on the pistol grip, in gun space: the middle of it.
+pub fn grip_centre() -> Vec3 {
+    let (top_z, top_y) = photo(727.0, 240.0);
+    let (heel_z, heel_y) = photo(656.0, 420.0);
+    Vec3::new(0.0, (top_y + heel_y) * 0.5 + 0.01, (top_z + heel_z) * 0.5)
+}
+
+/// Where the other hand is held: under the front of the jacket round the barrel.
+pub fn fore_hold() -> Vec3 {
+    Vec3::new(0.0, BORE_Y - 0.03, JACKET_FRONT_Z + 0.09)
+}
+
 /// Accumulates geometry into one mesh.
 #[derive(Default)]
 pub struct Parts {

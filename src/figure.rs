@@ -14,7 +14,11 @@ pub const CAPS: usize = 8;
 #[derive(Resource)]
 pub struct FigureLook {
     cuboid: Handle<Mesh>,
+    forearm: Handle<Mesh>,
     skin: Handle<StandardMaterial>,
+    /// What the arms in the view are made of: as the others, but drawn over what is in the way.
+    arm_sleeve: Handle<StandardMaterial>,
+    arm_skin: Handle<StandardMaterial>,
     jacket: Handle<StandardMaterial>,
     trousers: Handle<StandardMaterial>,
     boots: Handle<StandardMaterial>,
@@ -24,21 +28,45 @@ pub struct FigureLook {
 
 impl FigureLook {
     pub fn new(meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) -> FigureLook {
-        let mut paint = |rgb: [f32; 3], roughness: f32| materials.add(StandardMaterial { base_color: Color::srgb(rgb[0], rgb[1], rgb[2]), perceptual_roughness: roughness, ..default() });
+        let mut made = |rgb: [f32; 3], roughness: f32, depth_bias: f32| materials.add(StandardMaterial { base_color: Color::srgb(rgb[0], rgb[1], rgb[2]), perceptual_roughness: roughness, depth_bias, ..default() });
         FigureLook {
             cuboid: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
-            skin: paint([0.86, 0.68, 0.55], 0.8),
-            jacket: paint([0.27, 0.32, 0.2], 1.0),
-            trousers: paint([0.21, 0.22, 0.25], 1.0),
-            boots: paint([0.08, 0.07, 0.06], 0.7),
-            pack: paint([0.3, 0.26, 0.17], 1.0),
-            caps: CAP_COLOURS.iter().map(|&rgb| paint(rgb, 0.9)).collect(),
+            forearm: meshes.add(Capsule3d::new(FOREARM_RADIUS, FOREARM_LENGTH)),
+            skin: made([0.86, 0.68, 0.55], 0.8, 0.0),
+            arm_sleeve: made([0.27, 0.32, 0.2], 1.0, IN_FRONT),
+            arm_skin: made([0.86, 0.68, 0.55], 0.8, IN_FRONT),
+            jacket: made([0.27, 0.32, 0.2], 1.0, 0.0),
+            trousers: made([0.21, 0.22, 0.25], 1.0, 0.0),
+            boots: made([0.08, 0.07, 0.06], 0.7, 0.0),
+            pack: made([0.3, 0.26, 0.17], 1.0, 0.0),
+            caps: CAP_COLOURS.iter().map(|&rgb| made(rgb, 0.9, 0.0)).collect(),
         }
     }
 }
 
 /// Red, blue, yellow, orange, white, purple, teal and pink: easy to tell apart at a distance.
 const CAP_COLOURS: [[f32; 3]; CAPS] = [[0.8, 0.15, 0.12], [0.15, 0.3, 0.8], [0.9, 0.78, 0.15], [0.9, 0.45, 0.1], [0.9, 0.9, 0.88], [0.5, 0.2, 0.7], [0.1, 0.6, 0.6], [0.9, 0.45, 0.65]];
+
+/// Added to the depth of what is held in the view (the gun and the arms holding it), a number of the smallest steps
+/// the depth buffer has, so that they are drawn over a wall or the body that they are in the way of, as if they were
+/// drawn on their own.
+pub const IN_FRONT: f32 = 8_000_000.0;
+
+/// An arm in the view, which goes when the gun is raised to the sights.
+#[derive(Component)]
+pub struct Arm;
+
+/// A forearm, a sleeve, is a capsule this thick and this long (between the ends of its straight part).
+const FOREARM_RADIUS: f32 = 0.036;
+const FOREARM_LENGTH: f32 = 0.42;
+
+/// Whether a figure is looked at from outside, or is the body of the one looking out of it: that has no arms of its
+/// own (the view has them), no cap or gun, which would be in the way of the eyes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Seen {
+    FromOutside,
+    FromWithin,
+}
 
 /// Which part of the body swings.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -88,14 +116,17 @@ pub fn swing(joint: Joint, phase: f32, speed: f32) -> f32 {
 
 /// Builds a person with their feet at the parent's origin. `cap` picks the cap colour; `gun` is the model of what
 /// they carry, if anything (the parts and what each is drawn with).
-pub fn spawn_figure(parent: &mut ChildSpawnerCommands, look: &FigureLook, cap: usize, gun: &[(Handle<Mesh>, Handle<StandardMaterial>)]) {
+pub fn spawn_figure(parent: &mut ChildSpawnerCommands, look: &FigureLook, seen: Seen, cap: usize, gun: &[(Handle<Mesh>, Handle<StandardMaterial>)]) {
+    let outside = seen == Seen::FromOutside;
     let part = |centre: Vec3, size: Vec3, material: &Handle<StandardMaterial>| (Mesh3d(look.cuboid.clone()), MeshMaterial3d(material.clone()), Transform::from_translation(centre).with_scale(size));
     // The trunk, the head, the pack on the back, the cap.
     parent.spawn(part(Vec3::new(0.0, 1.24, 0.0), Vec3::new(0.42, 0.58, 0.24), &look.jacket));
     parent.spawn(part(Vec3::new(0.0, 0.97, 0.0), Vec3::new(0.38, 0.08, 0.22), &look.trousers));
     parent.spawn(part(Vec3::new(0.0, 1.67, 0.0), Vec3::new(0.2, 0.23, 0.22), &look.skin));
-    parent.spawn(part(Vec3::new(0.0, 1.8, 0.0), Vec3::new(0.23, 0.07, 0.25), &look.caps[cap % CAPS]));
-    parent.spawn(part(Vec3::new(0.0, 1.78, -0.15), Vec3::new(0.17, 0.02, 0.1), &look.caps[cap % CAPS]));
+    if outside {
+        parent.spawn(part(Vec3::new(0.0, 1.8, 0.0), Vec3::new(0.23, 0.07, 0.25), &look.caps[cap % CAPS]));
+        parent.spawn(part(Vec3::new(0.0, 1.78, -0.15), Vec3::new(0.17, 0.02, 0.1), &look.caps[cap % CAPS]));
+    }
     parent.spawn(part(Vec3::new(0.0, 1.28, 0.19), Vec3::new(0.32, 0.42, 0.16), &look.pack));
     // Legs, swinging from the hip, with boots at the bottom.
     for (joint, side) in [(Joint::LeftLeg, -1.0), (Joint::RightLeg, 1.0)] {
@@ -107,7 +138,7 @@ pub fn spawn_figure(parent: &mut ChildSpawnerCommands, look: &FigureLook, cap: u
             });
     }
     // Arms, brought forward to hold the gun: the right at the grip, the left under the front of it.
-    for (joint, side) in [(Joint::LeftArm, -1.0), (Joint::RightArm, 1.0)] {
+    for (joint, side) in [(Joint::LeftArm, -1.0), (Joint::RightArm, 1.0)].into_iter().filter(|_| outside) {
         let forward = if side < 0.0 { 1.35 } else { 1.05 };
         let rest = Quat::from_rotation_y(-side * 0.28) * Quat::from_rotation_x(forward);
         parent
@@ -118,13 +149,37 @@ pub fn spawn_figure(parent: &mut ChildSpawnerCommands, look: &FigureLook, cap: u
             });
     }
     // The gun, across the front of the body, its muzzle forward.
-    if !gun.is_empty() {
+    if outside && !gun.is_empty() {
         parent.spawn((Transform::from_xyz(0.1, 1.3, -0.12), Visibility::default())).with_children(|g| {
             for (mesh, material) in gun {
                 g.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone()), Transform::default()));
             }
         });
     }
+}
+
+/// How far back from the hand the elbow is taken to be, in gun space: out of the bottom of the view, behind and below.
+const RIGHT_ELBOW: Vec3 = Vec3::new(0.09, -0.34, 0.42);
+const LEFT_ELBOW: Vec3 = Vec3::new(-0.2, -0.3, 0.62);
+
+/// The two arms of the one holding a gun, in the gun's space, each from the elbow, which is out of the view, to a
+/// hand on the gun at `spec`'s hold: a sleeve and a hand. They go where the gun goes.
+pub fn spawn_arms(parent: &mut ChildSpawnerCommands, look: &FigureLook, hands: [(Vec3, Vec3); 2], marker: impl Bundle + Clone) {
+    for (hand, elbow_offset) in hands {
+        let toward_elbow = elbow_offset.normalize();
+        let turn = Quat::from_rotation_arc(Vec3::Y, toward_elbow);
+        // The sleeve starts a little back of the wrist, along the arm.
+        let sleeve = hand + toward_elbow * (0.06 + (FOREARM_LENGTH + 2.0 * FOREARM_RADIUS) * 0.5);
+        parent.spawn((Arm, marker.clone(), Mesh3d(look.forearm.clone()), MeshMaterial3d(look.arm_sleeve.clone()), Transform::from_translation(sleeve).with_rotation(turn)));
+        // The hand: a block along the arm, a thumb's width less than the sleeve.
+        let palm = hand + toward_elbow * 0.02;
+        parent.spawn((Arm, marker.clone(), Mesh3d(look.cuboid.clone()), MeshMaterial3d(look.arm_skin.clone()), Transform::from_translation(palm).with_rotation(turn).with_scale(Vec3::new(0.07, 0.11, 0.045))));
+    }
+}
+
+/// The hands of a figure holding the gun of `spec`: where each is, and the way its arm goes back from it.
+pub fn holds(spec: &crate::gun_models::ModelSpec) -> [(Vec3, Vec3); 2] {
+    [(spec.right_hand, RIGHT_ELBOW), (spec.left_hand, LEFT_ELBOW)]
 }
 
 /// The meshes and materials of `kind`'s model, for `spawn_figure`.
@@ -242,7 +297,7 @@ mod tests {
         let mut queue = bevy::ecs::world::CommandQueue::default();
         {
             let mut commands = Commands::new(&mut queue, &world);
-            commands.spawn(Transform::default()).with_children(|f| spawn_figure(f, &look, 3, &[]));
+            commands.spawn(Transform::default()).with_children(|f| spawn_figure(f, &look, Seen::FromOutside, 3, &[]));
         }
         queue.apply(&mut world);
         let mut top = f32::MIN;

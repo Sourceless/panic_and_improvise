@@ -11,7 +11,7 @@ use std::net::{SocketAddr, UdpSocket};
 use bevy::prelude::*;
 
 use crate::collision::Colliders;
-use crate::figure::{spawn_figure, FigureLook, FigurePlugin, Gait};
+use crate::figure::{spawn_figure, FigureLook, Gait, Seen};
 use crate::impact::surface_hit;
 use crate::map::TerrainMap;
 use crate::net::{Heard, Lobby, Packet, Passed, PlayerState, ZombieSeen, DEFAULT_PORT, EYE_HEIGHT, MAX_ZOMBIES_SEEN, SEND_RATE};
@@ -126,7 +126,7 @@ impl Plugin for HostPlugin {
         };
         let host = Host { socket, lobby: Lobby::default(), since_send: 0.0, tracers: Vec::new(), luck: 0x1F2E_3D4C };
         info!("hosting on {}: other players can join with `cargo run --bin bot -- <this machine's address>:{}`", host.local_addr(), host.local_addr().port());
-        app.insert_resource(host).add_plugins(FigurePlugin).add_systems(Update, (receive, broadcast, show_players).chain()).add_systems(Update, draw_tracers.run_if(resource_exists::<GizmoConfigStore>));
+        app.insert_resource(host).add_systems(Update, (receive, broadcast, show_players).chain()).add_systems(Update, draw_tracers.run_if(resource_exists::<GizmoConfigStore>));
     }
 }
 
@@ -276,7 +276,7 @@ fn show_players(mut commands: Commands, host: Res<Host>, time: Res<Time>, look: 
                 figure.insert(Gait::default());
                 if let Some(look) = &look {
                     let carried = guns.as_ref().map(|g| crate::figure::gun_parts(g, WeaponKind::Sterling)).unwrap_or_default();
-                    figure.with_children(|f| spawn_figure(f, look, client.id as usize, &carried));
+                    figure.with_children(|f| spawn_figure(f, look, Seen::FromOutside, client.id as usize, &carried));
                 }
             }
         }

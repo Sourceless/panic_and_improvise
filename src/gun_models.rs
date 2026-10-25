@@ -45,6 +45,9 @@ pub struct ModelSpec {
     pub front_z: f32,
     /// How far behind the rear sight the eye is when aiming.
     pub eye_relief: f32,
+    /// Where the hands are held on the gun: the one at the trigger, and the one under the front of it.
+    pub right_hand: Vec3,
+    pub left_hand: Vec3,
 }
 
 impl ModelSpec {
@@ -108,7 +111,7 @@ pub fn build(kind: WeaponKind) -> GunModel {
 fn sterling() -> GunModel {
     let (metal, plastic, dark) = gun_model::build();
     let (rear, front) = gun_model::sight_points();
-    let spec = ModelSpec { muzzle: Vec3::new(0.0, gun_model::BORE_Y, gun_model::MUZZLE_Z), sight_x: 0.0, sight_y: rear.y, rear_z: rear.z, front_z: front.z, eye_relief: 0.2 };
+    let spec = ModelSpec { muzzle: Vec3::new(0.0, gun_model::BORE_Y, gun_model::MUZZLE_Z), sight_x: 0.0, sight_y: rear.y, rear_z: rear.z, front_z: front.z, eye_relief: 0.2, right_hand: gun_model::grip_centre(), left_hand: gun_model::fore_hold() };
     finish_model(spec, vec![(Finish::Metal, metal), (Finish::Black, plastic), (Finish::Dark, dark)])
 }
 
@@ -138,7 +141,7 @@ fn hi_power() -> GunModel {
     slab(&mut metal, Vec3::new(-0.0075, 0.0205, -0.016), Vec3::new(0.009, 0.007, 0.007));
     slab(&mut metal, Vec3::new(0.0075, 0.0205, -0.016), Vec3::new(0.009, 0.007, 0.007));
     slab(&mut metal, Vec3::new(0.0, 0.0205, -0.196), Vec3::new(0.004, 0.007, 0.006));
-    let spec = ModelSpec { muzzle: Vec3::new(0.0, 0.0, -0.218), sight_x: 0.0, sight_y: 0.0225, rear_z: -0.016, front_z: -0.196, eye_relief: 0.42 };
+    let spec = ModelSpec { muzzle: Vec3::new(0.0, 0.0, -0.218), sight_x: 0.0, sight_y: 0.0225, rear_z: -0.016, front_z: -0.196, eye_relief: 0.42, right_hand: Vec3::new(0.0, -0.09, -0.01), left_hand: Vec3::new(-0.022, -0.118, -0.03) };
     finish_model(spec, vec![(Finish::Metal, metal), (Finish::Black, black), (Finish::Dark, dark)])
 }
 
@@ -176,7 +179,7 @@ fn slr() -> GunModel {
     tilted(&mut wood, Vec3::new(0.0, -0.028, 0.37), Vec3::new(0.042, 0.1, 0.1), 0.0);
     slab(&mut black, Vec3::new(0.0, -0.03, 0.425), Vec3::new(0.046, 0.115, 0.012));
     slab(&mut metal, Vec3::new(0.0, -0.065, 0.02), Vec3::new(0.012, 0.02, 0.012));
-    let spec = ModelSpec { muzzle: Vec3::new(0.0, 0.0, -0.665), sight_x: 0.0, sight_y: 0.052, rear_z: 0.0, front_z: -0.56, eye_relief: 0.11 };
+    let spec = ModelSpec { muzzle: Vec3::new(0.0, 0.0, -0.665), sight_x: 0.0, sight_y: 0.052, rear_z: 0.0, front_z: -0.56, eye_relief: 0.11, right_hand: Vec3::new(0.0, -0.075, 0.01), left_hand: Vec3::new(0.0, -0.045, -0.38) };
     finish_model(spec, vec![(Finish::Metal, metal), (Finish::Black, black), (Finish::Dark, dark), (Finish::Wood, wood)])
 }
 
@@ -220,7 +223,7 @@ fn bren() -> GunModel {
     slab(&mut wood, Vec3::new(0.0, -0.004, 0.2), Vec3::new(0.046, 0.082, 0.26));
     tilted(&mut wood, Vec3::new(0.0, -0.025, 0.34), Vec3::new(0.048, 0.112, 0.1), 0.0);
     slab(&mut black, Vec3::new(0.0, -0.025, 0.395), Vec3::new(0.05, 0.12, 0.012));
-    let spec = ModelSpec { muzzle: Vec3::new(0.0, 0.0, -0.855), sight_x: -0.04, sight_y: 0.066, rear_z: 0.005, front_z: -0.725, eye_relief: 0.12 };
+    let spec = ModelSpec { muzzle: Vec3::new(0.0, 0.0, -0.855), sight_x: -0.04, sight_y: 0.066, rear_z: 0.005, front_z: -0.725, eye_relief: 0.12, right_hand: Vec3::new(0.0, -0.08, 0.02), left_hand: Vec3::new(0.0, -0.085, -0.3) };
     finish_model(spec, vec![(Finish::Metal, metal), (Finish::Black, black), (Finish::Dark, dark), (Finish::Wood, wood)])
 }
 
@@ -261,7 +264,7 @@ fn mag() -> GunModel {
     slab(&mut metal, Vec3::new(0.0, -0.052, -0.04), Vec3::new(0.008, 0.006, 0.08));
     slab(&mut black, Vec3::new(0.0, -0.01, 0.17), Vec3::new(0.062, 0.1, 0.24));
     slab(&mut black, Vec3::new(0.0, -0.01, 0.298), Vec3::new(0.066, 0.108, 0.016));
-    let spec = ModelSpec { muzzle: Vec3::new(0.0, 0.0, -0.985), sight_x: 0.0, sight_y: 0.0775, rear_z: -0.07, front_z: -0.82, eye_relief: 0.16 };
+    let spec = ModelSpec { muzzle: Vec3::new(0.0, 0.0, -0.985), sight_x: 0.0, sight_y: 0.0775, rear_z: -0.07, front_z: -0.82, eye_relief: 0.16, right_hand: Vec3::new(0.0, -0.095, 0.025), left_hand: Vec3::new(0.0, -0.07, -0.34) };
     finish_model(spec, vec![(Finish::Metal, metal), (Finish::Black, black), (Finish::Dark, dark), (Finish::Olive, olive)])
 }
 
@@ -316,7 +319,7 @@ fn bolt_rifle(scoped: bool) -> GunModel {
         }
         (sight_y, rear_z, front_z, eye_relief) = (0.049, -0.015, muzzle + 0.04, 0.2);
     }
-    let spec = ModelSpec { muzzle: Vec3::new(0.0, 0.0, muzzle - 0.005), sight_x: 0.0, sight_y, rear_z, front_z, eye_relief };
+    let spec = ModelSpec { muzzle: Vec3::new(0.0, 0.0, muzzle - 0.005), sight_x: 0.0, sight_y, rear_z, front_z, eye_relief, right_hand: Vec3::new(0.0, -0.025, 0.08), left_hand: Vec3::new(0.0, -0.04, (fore_end - 0.22) * 0.5 - 0.02) };
     finish_model(spec, vec![(Finish::Metal, metal), (Finish::Black, black), (Finish::Dark, dark), (Finish::Wood, wood), (Finish::Glass, glass)])
 }
 
@@ -351,13 +354,32 @@ fn auto5() -> GunModel {
     slab(&mut black, Vec3::new(0.0, -0.075, 0.51), Vec3::new(0.044, 0.125, 0.014));
     // The cocking handle, small, on the right of the bolt.
     slab(&mut metal, Vec3::new(0.026, 0.01, -0.02), Vec3::new(0.012, 0.01, 0.02));
-    let spec = ModelSpec { muzzle: Vec3::new(0.0, 0.0, -0.785), sight_x: 0.0, sight_y: 0.052, rear_z: 0.0, front_z: -0.775, eye_relief: 0.17 };
+    let spec = ModelSpec { muzzle: Vec3::new(0.0, 0.0, -0.785), sight_x: 0.0, sight_y: 0.052, rear_z: 0.0, front_z: -0.775, eye_relief: 0.17, right_hand: Vec3::new(0.0, -0.05, 0.1), left_hand: Vec3::new(0.0, -0.05, -0.42) };
     finish_model(spec, vec![(Finish::Metal, metal), (Finish::Black, black), (Finish::Dark, dark), (Finish::Wood, wood)])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn both_hands_are_on_the_gun_the_one_at_the_trigger_behind_the_other_and_both_below_the_sights() {
+        for kind in WeaponKind::ALL {
+            let model = build(kind);
+            let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            for (_, parts) in &model.parts {
+                let (a, b) = parts.bounds();
+                lo = lo.min(a);
+                hi = hi.max(b);
+            }
+            let reach = Vec3::splat(0.03);
+            for (name, hand) in [("right", model.spec.right_hand), ("left", model.spec.left_hand)] {
+                assert!(hand.cmpge(lo - reach).all() && hand.cmple(hi + reach).all(), "{kind:?}: the {name} hand at {hand:?} is off the gun ({lo:?} to {hi:?})");
+                assert!(hand.y < model.spec.sight_y, "{kind:?}: the {name} hand is below the line of sight");
+            }
+            assert!(model.spec.right_hand.z > model.spec.left_hand.z, "{kind:?}: the left hand is out along the gun, the right at the grip");
+        }
+    }
 
     #[test]
     fn every_gun_has_a_model_with_its_muzzle_ahead_of_its_sights_and_its_sights_aligned() {
