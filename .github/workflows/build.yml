@@ -3,7 +3,6 @@ name: Build
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -60,7 +59,8 @@ jobs:
 
   release:
     name: Release
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Every build of main is released; a pull request is only built.
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -72,5 +72,8 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
+          # The launcher updates when the tag is not the one it has, so each build gets its own.
+          tag_name: v0.1.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
           files: dist/*
           generate_release_notes: true
