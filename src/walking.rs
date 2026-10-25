@@ -25,14 +25,15 @@ pub fn stand(map: &TerrainMap, colliders: &Colliders, p: Vec2, feet: f32, radius
     if p.abs().max_element() > MAP_HALF_SIZE - EDGE_MARGIN {
         return None;
     }
-    let ground = map.surface_height_at(p);
+    let deck = map.road_top_at(p);
+    let ground = map.floor_height_at(p);
     let support = colliders.support(p, feet, STEP_UP);
     let floor = support.unwrap_or(ground).max(ground);
     if floor - feet > STEP_UP + 1e-3 || feet - floor > STEP_DOWN {
         return None;
     }
-    // Water and cliffs are for the ground only; a floor over them is another matter.
-    let on_ground = support.is_none_or(|s| s <= ground + 0.05);
+    // Water and cliffs are for the ground only; a floor over them, or a road, is another matter.
+    let on_ground = deck.is_none() && support.is_none_or(|s| s <= ground + 0.05);
     if on_ground && (map.water_surface_at(p).is_some() || map.normal_at(p).y < MIN_FLATNESS) {
         return None;
     }
@@ -54,7 +55,7 @@ const POINT: f32 = 0.05;
 /// going down, and is kept between calls).
 pub fn walk(map: &TerrainMap, colliders: &Colliders, at: Vec2, feet: f32, falling: &mut f32, velocity: Vec2, dt: f32, radius: f32) -> (Vec2, f32) {
     let moved = colliders.resolve(at + velocity * dt, radius, feet, STEP_UP);
-    let ground = map.surface_height_at(moved);
+    let ground = map.floor_height_at(moved);
     let floor = colliders.support(moved, feet, STEP_UP).unwrap_or(f32::MIN).max(ground);
     if feet - floor > STEP_DOWN {
         *falling += GRAVITY * dt;
@@ -140,6 +141,46 @@ mod tests {
         }
         assert!(at.y > 8.0 && feet.abs() < 0.01 && falling == 0.0, "{at} {feet}");
         assert!(least_while_falling < 2.0, "it came down, not jumped down");
+    }
+
+    /// Flat ground at 10 m with a main road along the X axis.
+    fn map_with_a_road() -> TerrainMap {
+        use crate::roads::{half_width, RoadKind, RoadClearance, RoadRibbon};
+        let map = TerrainMap::flat(10.0);
+        let points: Vec<Vec2> = (0..=40).map(|i| Vec2::new(-50.0 + i as f32 * 2.5, 0.0)).collect();
+        let half_widths = vec![half_width(RoadKind::Major); points.len()];
+        map.set_roads(RoadClearance::new(&[RoadRibbon { kind: RoadKind::Major, points, half_widths, start_junction: false, end_junction: false }]));
+        map
+    }
+
+    #[test]
+    fn a_road_is_walked_on_and_not_in() {
+        let map = map_with_a_road();
+        let c = Colliders::default();
+        let road = map.road_top_at(Vec2::new(0.0, 0.0)).unwrap();
+        assert!(road > 10.2);
+        assert_eq!(stand(&map, &c, Vec2::new(0.0, 0.0), 10.0, 0.28), Some(road), "stepped up onto it from the verge");
+        // Walk across it from the verge: the feet are on its surface in the middle and on the ground again after.
+        let (mut at, mut feet, mut falling) = (Vec2::new(0.0, -8.0), 10.0, 0.0);
+        let mut highest = feet;
+        for _ in 0..200 {
+            (at, feet) = walk(&map, &c, at, feet, &mut falling, Vec2::new(0.0, 3.0), 0.05, 0.3);
+            highest = highest.max(feet);
+            if at.y.abs() < 3.0 {
+                assert!((feet - road).abs() < 0.01, "on the road at {at}: feet {feet}, road {road}");
+            }
+        }
+        assert!((highest - road).abs() < 0.01);
+        assert!(at.y > 8.0 && (feet - 10.0).abs() < 0.01, "down off the far side: {at}, feet {feet}");
+    }
+
+    #[test]
+    fn a_road_over_water_is_still_a_road() {
+        // Ground below the water's level at a place with a road over it: a bridge.
+        let map = map_with_a_road();
+        assert!(map.water_surface_at(Vec2::new(0.0, 0.0)).is_none());
+        let c = Colliders::default();
+        assert!(stand(&map, &c, Vec2::new(0.0, 0.0), map.road_top_at(Vec2::ZERO).unwrap(), 0.28).is_some());
     }
 
     #[test]

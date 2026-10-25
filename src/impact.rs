@@ -54,6 +54,9 @@ pub fn terrain_normal(map: &TerrainMap, p: Vec2) -> Vec3 {
 /// The height of whatever a bullet falling through `p` meets first: the water's surface where
 /// there is water, the ground otherwise.
 fn surface_at(map: &TerrainMap, p: Vec2) -> (f32, Surface) {
+    if let Some(top) = map.road_top_at(p) {
+        return (top, Surface::Ground);
+    }
     match map.water_surface_at(p) {
         Some(level) => (level, Surface::Water),
         None => (map.surface_height_at(p), Surface::Ground),
@@ -741,9 +744,9 @@ fn update_chips(
         // It tumbles as it flies.
         transform.rotate_local(Quat::from_euler(EulerRot::XYZ, 7.0 * dt, 5.0 * dt, 3.0 * dt));
         let at = Vec2::new(transform.translation.x, transform.translation.z);
-        let ground = map.surface_height_at(at);
+        let ground = map.floor_height_at(at);
         // Over water, what it falls onto is the water.
-        let (floor, in_water) = match map.water_surface_at(at) {
+        let (floor, in_water) = match map.water_surface_at(at).filter(|_| map.road_top_at(at).is_none()) {
             Some(level) => (level, true),
             None => (ground, false),
         };

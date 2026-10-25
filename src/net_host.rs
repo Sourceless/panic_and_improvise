@@ -11,12 +11,14 @@ use std::net::{SocketAddr, UdpSocket};
 use bevy::prelude::*;
 
 use crate::collision::Colliders;
+use crate::figure::{spawn_figure, FigureLook, FigurePlugin, Gait};
 use crate::impact::surface_hit;
 use crate::map::TerrainMap;
 use crate::net::{Heard, Lobby, Packet, Passed, PlayerState, ZombieSeen, DEFAULT_PORT, EYE_HEIGHT, MAX_ZOMBIES_SEEN, SEND_RATE};
 use crate::player::FpsCamera;
 use crate::sound::play_after;
 use crate::weapon::BulletAssets;
+use crate::weapons::WeaponKind;
 use crate::zombie::Zombie;
 
 /// The most packets read in one frame, so that a flood cannot stall the game.
@@ -86,14 +88,6 @@ impl Host {
 #[derive(Component)]
 pub struct RemotePlayer(pub u8);
 
-#[derive(Resource)]
-struct FigureLook {
-    cuboid: Handle<Mesh>,
-    skin: Handle<StandardMaterial>,
-    shirt: Handle<StandardMaterial>,
-    trousers: Handle<StandardMaterial>,
-}
-
 /// Hosts the game, if asked to.
 pub struct HostPlugin {
     address: Option<String>,
@@ -132,19 +126,8 @@ impl Plugin for HostPlugin {
         };
         let host = Host { socket, lobby: Lobby::default(), since_send: 0.0, tracers: Vec::new(), luck: 0x1F2E_3D4C };
         info!("hosting on {}: other players can join with `cargo run --bin bot -- <this machine's address>:{}`", host.local_addr(), host.local_addr().port());
-        app.insert_resource(host).add_systems(Startup, make_look).add_systems(Update, (receive, broadcast, show_players).chain()).add_systems(Update, draw_tracers.run_if(resource_exists::<GizmoConfigStore>));
+        app.insert_resource(host).add_plugins(FigurePlugin).add_systems(Update, (receive, broadcast, show_players).chain()).add_systems(Update, draw_tracers.run_if(resource_exists::<GizmoConfigStore>));
     }
-}
-
-fn make_look(mut commands: Commands, meshes: Option<ResMut<Assets<Mesh>>>, materials: Option<ResMut<Assets<StandardMaterial>>>) {
-    let (Some(mut meshes), Some(mut materials)) = (meshes, materials) else { return };
-    let paint = |materials: &mut Assets<StandardMaterial>, rgb: [f32; 3]| materials.add(StandardMaterial { base_color: Color::srgb(rgb[0], rgb[1], rgb[2]), perceptual_roughness: 0.9, ..default() });
-    commands.insert_resource(FigureLook {
-        cuboid: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
-        skin: paint(&mut materials, [0.86, 0.68, 0.55]),
-        shirt: paint(&mut materials, [0.1, 0.55, 0.62]),
-        trousers: paint(&mut materials, [0.18, 0.2, 0.28]),
-    });
 }
 
 /// Where the player at the keyboard is: their feet and which way they face.
@@ -271,7 +254,7 @@ fn broadcast(mut host: ResMut<Host>, time: Res<Time>, player: Query<(&Transform,
 }
 
 /// A figure for each player who has joined, moving to where they are; one for each that has gone is taken away.
-fn show_players(mut commands: Commands, host: Res<Host>, time: Res<Time>, look: Option<Res<FigureLook>>, mut figures: Query<(Entity, &mut Transform, &RemotePlayer)>) {
+fn show_players(mut commands: Commands, host: Res<Host>, time: Res<Time>, look: Option<Res<FigureLook>>, guns: Option<Res<crate::weapon::WeaponAssets>>, mut figures: Query<(Entity, &mut Transform, &RemotePlayer)>) {
     for (entity, _, figure) in &figures {
         if host.lobby.clients.iter().all(|c| c.id != figure.0) {
             commands.entity(entity).despawn();
@@ -290,8 +273,10 @@ fn show_players(mut commands: Commands, host: Res<Host>, time: Res<Time>, look: 
             }
             None => {
                 let mut figure = commands.spawn((RemotePlayer(client.id), Transform::from_translation(goal).with_rotation(turn), Visibility::default()));
+                figure.insert(Gait::default());
                 if let Some(look) = &look {
-                    figure.with_children(|f| spawn_body(f, look));
+                    let carried = guns.as_ref().map(|g| crate::figure::gun_parts(g, WeaponKind::Sterling)).unwrap_or_default();
+                    figure.with_children(|f| spawn_figure(f, look, client.id as usize, &carried));
                 }
             }
         }
@@ -299,17 +284,6 @@ fn show_players(mut commands: Commands, host: Res<Host>, time: Res<Time>, look: 
 }
 
 /// The parts of a person, standing about 1.8 m tall, facing -Z.
-fn spawn_body(parent: &mut ChildSpawnerCommands, look: &FigureLook) {
-    let mut part = |centre: Vec3, size: Vec3, material: &Handle<StandardMaterial>| {
-        parent.spawn((Mesh3d(look.cuboid.clone()), MeshMaterial3d(material.clone()), Transform::from_translation(centre).with_scale(size)));
-    };
-    part(Vec3::new(0.0, 1.15, 0.0), Vec3::new(0.5, 0.65, 0.28), &look.shirt);
-    part(Vec3::new(0.0, 1.62, 0.0), Vec3::new(0.24, 0.26, 0.24), &look.skin);
-    for side in [-1.0, 1.0] {
-        part(Vec3::new(side * 0.12, 0.4, 0.0), Vec3::new(0.2, 0.8, 0.22), &look.trousers);
-        part(Vec3::new(side * 0.36, 1.1, 0.0), Vec3::new(0.12, 0.6, 0.16), &look.shirt);
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -329,7 +303,7 @@ mod tests {
     fn game() -> App {
         let mut app = App::new();
         app.init_resource::<Time>().insert_resource(TerrainMap::flat(0.0)).add_plugins(HostPlugin::at("127.0.0.1:0"));
-        let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: crate::player::Stance::Stand, eye_height: 1.8, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 0.0 };
+        let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: crate::player::Stance::Stand, eye_height: 1.8, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 0.0, lean: 0.0, lean_offset: Vec2::ZERO };
         app.world_mut().spawn((camera, Transform::from_xyz(20.0, 1.8, -5.0)));
         app
     }

@@ -66,6 +66,8 @@ pub struct TerrainMap {
     water_distance: Vec<f32>,
     river_len: f32,
     pub pois: Vec<Poi>,
+    /// Where the roads are, once they have been laid (see `set_roads`).
+    roads: std::sync::OnceLock<crate::roads::RoadClearance>,
 }
 
 impl TerrainMap {
@@ -136,6 +138,7 @@ impl TerrainMap {
             water_distance,
             river_len,
             pois: Vec::new(),
+            roads: std::sync::OnceLock::new(),
         };
         map.pois = place_pois(&mut rng, &map);
         map.flatten_settlements();
@@ -170,6 +173,7 @@ impl TerrainMap {
             water_distance: vec![f32::MAX; COUNT],
             river_len: 0.0,
             pois: Vec::new(),
+            roads: std::sync::OnceLock::new(),
         }
     }
 
@@ -199,6 +203,23 @@ impl TerrainMap {
         } else {
             h(ix + 1, iz + 1) + (1.0 - u) * (h(ix, iz + 1) - h(ix + 1, iz + 1)) + (1.0 - v) * (h(ix + 1, iz) - h(ix + 1, iz + 1))
         }
+    }
+
+    /// Tells the map where the roads are, which the world does once it has laid them. (A second telling is ignored:
+    /// the same map has the same roads.)
+    pub fn set_roads(&self, roads: crate::roads::RoadClearance) {
+        let _ = self.roads.set(roads);
+    }
+
+    /// The height of the surface of the road at `p`, if there is one: above the ground, which it lies on.
+    pub fn road_top_at(&self, p: Vec2) -> Option<f32> {
+        self.roads.get()?.top_at(self, p)
+    }
+
+    /// The height of what a body stands on at `p`: the ground, or the road laid over it.
+    pub fn floor_height_at(&self, p: Vec2) -> f32 {
+        let ground = self.surface_height_at(p);
+        self.road_top_at(p).map_or(ground, |top| top.max(ground))
     }
 
     /// The height of the water over `p`, if `p` is under water: a lake or river, or the sea, which

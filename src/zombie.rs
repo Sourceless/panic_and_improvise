@@ -295,10 +295,11 @@ impl<'a> Sight<'a> {
 /// Whether the ground at `p` can have a zombie of `radius` put on it: dry land, not too steep, nothing solid
 /// there, and inside the map.
 pub fn standable(map: &TerrainMap, colliders: &Colliders, p: Vec2, radius: f32) -> bool {
-    if p.abs().max_element() > MAP_HALF_SIZE - 10.0 || map.water_surface_at(p).is_some() || map.normal_at(p).y < MIN_FLATNESS {
+    let on_a_road = map.road_top_at(p).is_some();
+    if p.abs().max_element() > MAP_HALF_SIZE - 10.0 || !on_a_road && (map.water_surface_at(p).is_some() || map.normal_at(p).y < MIN_FLATNESS) {
         return false;
     }
-    let ground = map.surface_height_at(p);
+    let ground = map.floor_height_at(p);
     colliders.resolve(p, radius, ground, STEP_UP).distance(p) < 0.02
 }
 
@@ -312,7 +313,7 @@ pub fn pick_spawn(sight: &Sight, map: &TerrainMap, colliders: &Colliders, player
         if !standable(map, colliders, p, 0.35 * t.girth) {
             return None;
         }
-        let base = Vec3::new(p.x, map.surface_height_at(p), p.y);
+        let base = Vec3::new(p.x, map.floor_height_at(p), p.y);
         (!sight.sees(base, t.scale)).then_some(base)
     })
 }
@@ -650,7 +651,7 @@ pub(crate) fn move_zombies(
         zombie.fall = falling;
         // The water and the steep are not for walking into: it turns about instead. (A floor or a stair over
         // them is another matter.)
-        let on_the_ground = new_feet <= map.surface_height_at(moved) + 0.05;
+        let on_the_ground = new_feet <= map.surface_height_at(moved) + 0.05 && map.road_top_at(moved).is_none();
         if velocity != Vec2::ZERO && on_the_ground && (map.water_surface_at(moved).is_some() || map.normal_at(moved).y < MIN_FLATNESS) {
             zombie.stroll = -zombie.stroll;
             zombie.following = false;
@@ -1030,7 +1031,7 @@ mod tests {
     fn a_zombie_up_close_hurts_the_player_in_the_game() {
         let mut app = App::new();
         app.init_resource::<Time>().init_resource::<ZombieDice>().init_resource::<PlayerHealth>().insert_resource(TerrainMap::flat(0.0)).init_resource::<Colliders>().add_systems(Update, move_zombies);
-        let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: crate::player::Stance::Stand, eye_height: 1.8, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 0.0 };
+        let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: crate::player::Stance::Stand, eye_height: 1.8, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 0.0, lean: 0.0, lean_offset: Vec2::ZERO };
         app.world_mut().spawn((camera, GlobalTransform::from(Transform::from_xyz(0.0, 1.8, 0.0))));
         let mut near = Zombie::new(Walker, 0.0);
         near.following = true;
@@ -1062,7 +1063,7 @@ mod tests {
         colliders.add(Solid::wall(Vec2::new(-40.0, -6.0), Vec2::new(9.5, -6.0), 0.15, 3.0, 3.0));
         colliders.add(Solid::wall(Vec2::new(10.5, -6.0), Vec2::new(40.0, -6.0), 0.15, 3.0, 3.0));
         app.init_resource::<Time>().init_resource::<ZombieDice>().init_resource::<PlayerHealth>().insert_resource(TerrainMap::flat(0.0)).insert_resource(colliders).add_systems(Update, move_zombies);
-        let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: crate::player::Stance::Stand, eye_height: 1.8, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 0.0 };
+        let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: crate::player::Stance::Stand, eye_height: 1.8, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 0.0, lean: 0.0, lean_offset: Vec2::ZERO };
         app.world_mut().spawn((camera, GlobalTransform::from(Transform::from_xyz(0.0, 1.8, 0.0))));
         let mut zombie = Zombie::new(Walker, 0.0);
         zombie.following = true;
@@ -1103,7 +1104,7 @@ mod tests {
             let floor = layout.floor_of(1);
             let mut app = App::new();
             app.init_resource::<Time>().init_resource::<ZombieDice>().init_resource::<PlayerHealth>().insert_resource(TerrainMap::flat(0.0)).insert_resource(colliders).add_systems(Update, move_zombies);
-            let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: crate::player::Stance::Stand, eye_height: 1.8, jump_spent_standing: false, floor, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: floor };
+            let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: crate::player::Stance::Stand, eye_height: 1.8, jump_spent_standing: false, floor, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: floor, lean: 0.0, lean_offset: Vec2::ZERO };
             app.world_mut().spawn((camera, GlobalTransform::from(Transform::from_xyz(room.x, floor + 1.8, room.y))));
             let mut zombie = Zombie::new(Walker, 0.0);
             zombie.following = true;
@@ -1158,7 +1159,7 @@ mod tests {
     fn a_zombie_that_walks_a_stride_is_due_a_footfall_and_the_one_that_notices_the_player_is_due_a_groan() {
         let mut app = App::new();
         app.init_resource::<Time>().init_resource::<ZombieDice>().init_resource::<PlayerHealth>().insert_resource(TerrainMap::flat(0.0)).init_resource::<Colliders>().add_systems(Update, move_zombies);
-        let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: crate::player::Stance::Stand, eye_height: 1.8, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 0.0 };
+        let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: crate::player::Stance::Stand, eye_height: 1.8, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 0.0, lean: 0.0, lean_offset: Vec2::ZERO };
         app.world_mut().spawn((camera, GlobalTransform::from(Transform::from_xyz(0.0, 1.8, 0.0))));
         let mut walker = Zombie::new(Walker, 0.0);
         walker.following = true;

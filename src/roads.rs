@@ -449,20 +449,25 @@ fn junction_mouths(ribbons: &[RoadRibbon]) -> Vec<(Vec2, f32)> {
 // the grid vertex, raised above any water for bridges. UV 0 tiles the surface texture in world
 // metres; UV 1 is (metres across from the centre line, metres along the road), for the lane
 // markings; the normals follow the ground.
+/// How far above the ground a road of `kind` lies. Where roads cross, the one that matters more is on top: a lane
+/// joins a main road without a seam.
+pub fn lift(kind: RoadKind) -> f32 {
+    ROAD_LIFT
+        - match kind {
+            RoadKind::Major => 0.0,
+            RoadKind::Lane => MINOR_SINK * 0.5,
+            RoadKind::Minor => MINOR_SINK,
+            RoadKind::Path => MINOR_SINK * 1.5,
+        }
+}
+
 pub fn road_mesh(map: &TerrainMap, ribbons: &[RoadRibbon], kind: RoadKind) -> Mesh {
     let tile = match kind {
         RoadKind::Major | RoadKind::Lane => ASPHALT_TILE,
         RoadKind::Minor => TRACK_TILE,
         RoadKind::Path => PATH_TILE,
     };
-    // Where roads cross the one that matters more is on top: a lane joins a main road without a seam.
-    let lift = ROAD_LIFT
-        - match kind {
-            RoadKind::Major => 0.0,
-            RoadKind::Lane => MINOR_SINK * 0.5,
-            RoadKind::Minor => MINOR_SINK,
-            RoadKind::Path => MINOR_SINK * 1.5,
-        };
+    let lift = lift(kind);
     let n = map.grid_size();
     let mouths = junction_mouths(ribbons);
     let (mut positions, mut normals, mut uv0, mut uv1, mut colours, mut indices) = (vec![], vec![], vec![], vec![], vec![], vec![]);
@@ -605,6 +610,20 @@ impl RoadClearance {
                 p.distance(e.a + ab * t) - (e.ha + (e.hb - e.ha) * t)
             })
             .fold(f32::MAX, f32::min)
+    }
+
+    /// The height of the surface of the road at `p`, if it is on one: where the road's mesh is, which lies above the
+    /// ground, so that something standing on a road stands on it and not in it.
+    pub fn top_at(&self, map: &TerrainMap, p: Vec2) -> Option<f32> {
+        let kind = self.kind_at(p)?;
+        // As the mesh is made: the highest of the ground here and a little way around, and the water if there is
+        // any, so that a crease in the ground doesn't come up through the road.
+        let around = [Vec2::ZERO, Vec2::X * 1.2, Vec2::NEG_X * 1.2, Vec2::Y * 0.7, Vec2::NEG_Y * 0.7];
+        let ground = around.iter().map(|d| map.surface_height_at(p + *d)).fold(f32::MIN, f32::max);
+        let n = map.grid_size();
+        let cell = nearest_cell(map, p);
+        let water = map.water_level(cell % n, cell / n).unwrap_or(f32::MIN);
+        Some(ground.max(water) + lift(kind))
     }
 
     /// The kind of road `p` is on, if it is on one (the nearest, where several overlap).
@@ -792,6 +811,18 @@ mod tests {
         let points: Vec<Vec2> = (0..=(length / 2.5) as usize).map(|i| Vec2::new(-length / 2.0 + i as f32 * 2.5, 0.0)).collect();
         let half_widths = vec![half_width(kind); points.len()];
         RoadRibbon { kind, points, half_widths, start_junction, end_junction }
+    }
+
+    #[test]
+    fn a_road_has_a_surface_above_the_ground_to_stand_on_and_the_ground_beside_it_is_not_that() {
+        let map = TerrainMap::flat(10.0);
+        let clearance = RoadClearance::new(&[straight(RoadKind::Major, 100.0, false, false)]);
+        let top = clearance.top_at(&map, Vec2::new(5.0, 1.0)).unwrap();
+        assert!((top - (10.0 + lift(RoadKind::Major))).abs() < 1e-3, "{top}");
+        assert!(top > 10.2, "it is raised, as it is drawn");
+        assert_eq!(clearance.top_at(&map, Vec2::new(5.0, 9.0)), None, "the verge is the ground");
+        let track = RoadClearance::new(&[straight(RoadKind::Minor, 100.0, false, false)]);
+        assert!(track.top_at(&map, Vec2::new(5.0, 0.0)).unwrap() < top, "a farm track lies a hair under a main road");
     }
 
     #[test]

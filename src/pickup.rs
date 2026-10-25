@@ -226,7 +226,7 @@ mod tests {
         let mut inv = Inventory::default();
         let item = inv.make(kind, 1);
         app.insert_resource(DropQueue(vec![item]));
-        let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: crate::player::Stance::Stand, eye_height: 1.7, jump_spent_standing: false, floor: 3.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 3.0 };
+        let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: crate::player::Stance::Stand, eye_height: 1.7, jump_spent_standing: false, floor: 3.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 3.0, lean: 0.0, lean_offset: Vec2::ZERO };
         app.world_mut().spawn((camera, GlobalTransform::from(Transform::from_xyz(10.0, 4.7, 20.0).looking_to(Vec3::NEG_Z, Vec3::Y))));
         app.add_systems(Update, put_down_thrown);
         app.update();

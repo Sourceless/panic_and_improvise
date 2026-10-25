@@ -158,7 +158,7 @@ impl Plugin for WeaponPlugin {
             .add_systems(Startup, spawn_gun.after(spawn_player))
             .add_systems(
                 Update,
-                (sync_with_inventory.before(refresh_gun_model), refresh_gun_model.before(aim), aim.before(fire), fire.before(toggle_cursor_grab), play_gun_sounds.after(fire), recover_view, animate_flash, move_bullets),
+                (sync_with_inventory.before(refresh_gun_model), refresh_gun_model.before(aim), crowd_gun.before(aim), aim.before(fire), fire.before(toggle_cursor_grab), play_gun_sounds.after(fire), recover_view, animate_flash, move_bullets),
             );
     }
 }
@@ -218,6 +218,9 @@ pub struct Gun {
     pub sound_log: SoundLog,
     /// How far the gun is lowered for the reload right now, 0 to 1.
     pub lowered: f32,
+    /// How far, metres, the barrel would be inside a wall or the ground if the gun were held out as usual;
+    /// the gun is drawn back and tipped up by this much, so that it does not poke into what is in front.
+    pub crowd: f32,
 }
 
 impl Gun {
@@ -350,12 +353,45 @@ pub fn gun_pose(spec: &ModelSpec, handling: &Handling, blend: f32, kick: f32) ->
 /// The gun's pose with `lowered` (0 to 1) of the way down for a reload: dropped away below the view
 /// and tipped muzzle-down.
 pub fn gun_pose_lowered(spec: &ModelSpec, handling: &Handling, blend: f32, kick: f32, lowered: f32) -> Transform {
+    gun_pose_held(spec, handling, blend, kick, lowered, 0.0)
+}
+
+/// The most the gun is drawn back, metres, and tipped up, radians, when something is in its way.
+const CROWD_BACK_MAX: f32 = 0.6;
+const CROWD_TIP_PER_METRE: f32 = 0.9;
+const CROWD_TIP_MAX: f32 = 0.6;
+
+/// How the gun is held `crowd` metres short of where it would be, against a wall: drawn back toward the
+/// shoulder, and tipped muzzle-up as a gun is brought up close.
+pub fn crowded(t: Transform, crowd: f32) -> Transform {
+    let crowd = crowd.clamp(0.0, CROWD_BACK_MAX);
+    let mut t = t;
+    t.translation.z += crowd;
+    t.rotation = Quat::from_rotation_x((crowd * CROWD_TIP_PER_METRE).min(CROWD_TIP_MAX)) * t.rotation;
+    t
+}
+
+/// The pose with everything: the jolt, the lowering for a reload, and being drawn back from what is in the way.
+pub fn gun_pose_held(spec: &ModelSpec, handling: &Handling, blend: f32, kick: f32, lowered: f32, crowd: f32) -> Transform {
     let k = kick * (1.0 - 0.5 * blend.clamp(0.0, 1.0)) * handling.model_kick;
     let mut t = gun_transform(spec, handling, blend);
     t.translation.z += GUN_KICK_BACK * k;
     t.rotation = Quat::from_rotation_x(GUN_KICK_TIP * k + RELOAD_TIP * lowered);
     t.translation.y -= RELOAD_DROP * lowered;
-    t
+    crowded(t, crowd)
+}
+
+/// How far, metres, the barrel of a gun held out as it would be (muzzle at `muzzle`, in world space) is inside
+/// what is solid, looking along the line from the eye to it and a little beyond; 0 when nothing is in the way.
+pub fn barrel_intrusion(eye: Vec3, muzzle: Vec3, colliders: &Colliders, map: &TerrainMap) -> f32 {
+    const BEYOND: f32 = 0.08;
+    let along = (muzzle - eye).normalize_or_zero();
+    let tip = muzzle + along * BEYOND;
+    let length = eye.distance(tip);
+    let reached = |hit: Option<f32>| hit.map_or(0.0, |t| (1.0 - t) * length);
+    let solid = colliders.segment_hit(eye, tip).map(|h| h.t);
+    let ground = surface_hit(map, eye, tip).map(|(point, _, _)| eye.distance(point) / length);
+    reached(solid).max(reached(ground))
 }
 
 /// How far down the gun is, 0 to 1, `elapsed` seconds into a reload of `total`: it drops away, stays
@@ -585,6 +621,7 @@ pub fn spawn_gun(
                     dry_click_cooldown: 0.0,
                     sound_log: SoundLog::default(),
                     lowered: 0.0,
+                    crowd: 0.0,
                 },
                 gun_transform(&start_spec, &def.handling, 0.0),
                 Visibility::default(),
@@ -711,6 +748,34 @@ fn refresh_gun_model(
     gun.shown = Some(gun.kind);
 }
 
+/// Draws the gun back when its barrel would be in a wall, a tree, the ground: the closer to what is in front,
+/// the further back, and eased so that it does not snap.
+fn crowd_gun(
+    time: Res<Time>,
+    weapons: Res<WeaponAssets>,
+    colliders: Option<Res<Colliders>>,
+    map: Option<Res<TerrainMap>>,
+    cameras: Query<&GlobalTransform, With<FpsCamera>>,
+    mut guns: Query<&mut Gun>,
+) {
+    let (Ok(cam), Ok(mut gun)) = (cameras.single(), guns.single_mut()) else { return };
+    let target = match (&colliders, &map) {
+        (Some(colliders), Some(map)) if !gun.holstered => {
+            let spec = weapons.spec(gun.kind);
+            // Where the muzzle would be, the gun held out as usual: not drawn back, no jolt of a shot.
+            let held_out = cam.mul_transform(gun_pose_held(&spec, &gun.def().handling, gun.aim_blend, 0.0, 0.0, 0.0));
+            barrel_intrusion(cam.translation(), held_out.transform_point(spec.muzzle), colliders, map)
+        }
+        _ => 0.0,
+    };
+    // Drawn back fast, let out a little slower.
+    let rate = if target > gun.crowd { 22.0 } else { 9.0 };
+    gun.crowd += (target - gun.crowd) * (1.0 - (-rate * time.delta_secs()).exp());
+    if gun.crowd < 0.002 && target == 0.0 {
+        gun.crowd = 0.0;
+    }
+}
+
 // Right click toggles aiming down the sights (only while the mouse is captured, so the click
 // that recaptures it doesn't also raise the gun). Sprinting drops the gun back to the hip. The
 // gun then eases toward its target, and the blend is shared (as AimBlend) so the camera can
@@ -801,7 +866,7 @@ fn aim(
         gun.gun_kick = 0.0;
     }
     let spec = assets.spec(gun.kind);
-    *transform = gun_pose_lowered(&spec, &gun.def().handling, gun.aim_blend, gun.gun_kick, gun.lowered);
+    *transform = gun_pose_held(&spec, &gun.def().handling, gun.aim_blend, gun.gun_kick, gun.lowered, gun.crowd);
     blend.0 = gun.aim_blend;
     // The view narrows on the sights: a little on iron sights, a lot through a telescope.
     let narrowed = gun.def().scope.map_or(gun.def().handling.ads_fov_scale, |s| s.fov_scale);
@@ -887,7 +952,7 @@ fn fire(
     let spec = weapons.spec(gun.kind);
 
     // The bullet leaves the end of the barrel, wherever the gun is right now (hip or sights).
-    let gun_in_world = cam.mul_transform(gun_pose(&spec, &def.handling, gun.aim_blend, gun.gun_kick));
+    let gun_in_world = cam.mul_transform(gun_pose_held(&spec, &def.handling, gun.aim_blend, gun.gun_kick, 0.0, gun.crowd));
     let muzzle = gun_in_world.transform_point(spec.muzzle);
     let (eye, forward) = (cam.translation, *cam.forward());
     // The barrel points where the bullet must start to cross the line of sight at the zero range.
@@ -1168,6 +1233,78 @@ mod tests {
     fn in_camera(blend: f32, gun_space: Vec3) -> Vec3 {
         let (def, spec) = sterling();
         gun_transform(&spec, &def.handling, blend).transform_point(gun_space)
+    }
+
+    /// A wall across the way `distance` metres from the origin along -Z, tall and wide.
+    fn wall_ahead(distance: f32) -> Colliders {
+        let mut c = Colliders::default();
+        c.add(crate::collision::Solid::wall(Vec2::new(-20.0, -distance - 0.02), Vec2::new(20.0, -distance - 0.02), 0.02, 5.0, 5.0));
+        c
+    }
+
+    /// Where the muzzle ends up in the world with the eye at (0, 1.6, 0) looking along -Z, the gun drawn back by `crowd`.
+    fn muzzle_crowded(blend: f32, crowd: f32) -> Vec3 {
+        let (def, spec) = sterling();
+        let eye = Transform::from_xyz(0.0, 1.6, 0.0);
+        GlobalTransform::from(eye).mul_transform(gun_pose_held(&spec, &def.handling, blend, 0.0, 0.0, crowd)).transform_point(spec.muzzle)
+    }
+
+    #[test]
+    fn a_gun_held_out_in_the_open_is_not_in_anything_and_one_against_a_wall_is() {
+        let map = TerrainMap::flat(0.0);
+        let eye = Vec3::new(0.0, 1.6, 0.0);
+        let free = barrel_intrusion(eye, muzzle_crowded(0.0, 0.0), &Colliders::default(), &map);
+        assert_eq!(free, 0.0);
+        let far = barrel_intrusion(eye, muzzle_crowded(0.0, 0.0), &wall_ahead(3.0), &map);
+        assert_eq!(far, 0.0, "a wall three metres off is no concern");
+        let muzzle_distance = eye.distance(muzzle_crowded(0.0, 0.0));
+        let near = barrel_intrusion(eye, muzzle_crowded(0.0, 0.0), &wall_ahead(muzzle_distance - 0.2), &map);
+        assert!((near - (0.2 + 0.075)).abs() < 0.05, "the barrel is {near} m into the wall");
+        let touching = barrel_intrusion(eye, muzzle_crowded(0.0, 0.0), &wall_ahead(0.4), &map);
+        assert!(touching > near);
+    }
+
+    #[test]
+    fn the_ground_in_front_of_a_gun_pointed_down_at_it_crowds_it_too() {
+        let map = TerrainMap::flat(0.0);
+        let eye = Vec3::new(0.0, 0.5, 0.0);
+        // Looking nearly straight down: the muzzle is below the surface.
+        let muzzle = Vec3::new(0.1, -0.2, -0.3);
+        assert!(barrel_intrusion(eye, muzzle, &Colliders::default(), &map) > 0.1);
+    }
+
+    #[test]
+    fn drawn_back_by_how_far_it_is_in_the_wall_the_gun_clears_it_from_the_hip_and_from_the_sights() {
+        let map = TerrainMap::flat(0.0);
+        let eye = Vec3::new(0.0, 1.6, 0.0);
+        for blend in [0.0, 1.0] {
+            let out = muzzle_crowded(blend, 0.0);
+            // (The player's body keeps the eye at least this far from a wall.)
+            for gap in [crate::collision::PLAYER_RADIUS, 0.55, 0.7] {
+                let wall = wall_ahead(gap);
+                let inside = barrel_intrusion(eye, out, &wall, &map);
+                assert!(inside > 0.0, "blend {blend}, wall at {gap}");
+                let held = muzzle_crowded(blend, inside);
+                assert!(
+                    barrel_intrusion(eye, held, &wall, &map) < 0.06,
+                    "blend {blend}, wall at {gap}: drawn back by {inside:.2} m the barrel is still {:.2} m in",
+                    barrel_intrusion(eye, held, &wall, &map)
+                );
+                assert!(held.z > -gap + 0.0, "the muzzle {:.2} m ahead is short of the wall at {gap}", -held.z);
+            }
+        }
+    }
+
+    #[test]
+    fn a_crowded_gun_comes_back_toward_the_shoulder_and_points_up() {
+        let (def, spec) = sterling();
+        let free = gun_pose_held(&spec, &def.handling, 0.0, 0.0, 0.0, 0.0);
+        let tight = gun_pose_held(&spec, &def.handling, 0.0, 0.0, 0.0, 0.3);
+        assert!((tight.translation.z - free.translation.z - 0.3).abs() < 1e-5);
+        assert!((tight.rotation * Vec3::NEG_Z).y > (free.rotation * Vec3::NEG_Z).y + 0.1);
+        let absurd = gun_pose_held(&spec, &def.handling, 0.0, 0.0, 0.0, 50.0);
+        assert!(absurd.translation.z - free.translation.z <= CROWD_BACK_MAX + 1e-5, "never further back than the shoulder");
+        assert_eq!(gun_pose_lowered(&spec, &def.handling, 0.0, 0.0, 0.0), free, "the older pose is the uncrowded one");
     }
 
     #[test]

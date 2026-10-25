@@ -40,10 +40,13 @@ pub enum Action {
     FireMode,
     /// The load that goes in at the next reload.
     CycleAmmo,
+    /// Hold to lean out to one side, to look round a corner or over cover.
+    LeanLeft,
+    LeanRight,
 }
 
 impl Action {
-    pub const ALL: [Action; 15] = [
+    pub const ALL: [Action; 17] = [
         Action::Forward,
         Action::Back,
         Action::Left,
@@ -59,6 +62,8 @@ impl Action {
         Action::Slot2,
         Action::FireMode,
         Action::CycleAmmo,
+        Action::LeanLeft,
+        Action::LeanRight,
     ];
 
     /// What it's called on screen.
@@ -79,6 +84,8 @@ impl Action {
             Action::Slot2 => "Second weapon",
             Action::FireMode => "Fire mode",
             Action::CycleAmmo => "Change ammunition",
+            Action::LeanLeft => "Lean left (hold)",
+            Action::LeanRight => "Lean right (hold)",
         }
     }
 
@@ -100,6 +107,8 @@ impl Action {
             Action::Slot2 => "slot2",
             Action::FireMode => "fire_mode",
             Action::CycleAmmo => "cycle_ammo",
+            Action::LeanLeft => "lean_left",
+            Action::LeanRight => "lean_right",
         }
     }
 
@@ -231,6 +240,9 @@ impl Preset {
             (_, Action::Inventory) => Bind::Tab,
             (_, Action::Slot1) => c('1'),
             (_, Action::Slot2) => c('2'),
+            (_, Action::LeanLeft) => c('q'),
+            (Preset::Qwerty, Action::LeanRight) => c('t'),
+            (Preset::ColemakModDh, Action::LeanRight) => c('b'),
             (Preset::Qwerty, Action::Interact) => c('e'),
             (Preset::Qwerty, Action::FireMode) => c('v'),
             (Preset::Qwerty, Action::CycleAmmo) => c('b'),

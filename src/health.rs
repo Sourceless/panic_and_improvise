@@ -320,7 +320,7 @@ mod tests {
     fn the_view_is_turned_by_a_blow_and_put_back_by_the_end_of_it() {
         let mut app = App::new();
         app.init_resource::<PlayerHealth>().add_systems(PostUpdate, shake_view);
-        let camera = FpsCamera { yaw: 0.7, pitch: -0.2, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: 1.8, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 0.0 };
+        let camera = FpsCamera { yaw: 0.7, pitch: -0.2, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: 1.8, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 0.0, lean: 0.0, lean_offset: Vec2::ZERO };
         let steady = Quat::from_euler(EulerRot::YXZ, 0.7, -0.2, 0.0);
         let eye = app.world_mut().spawn((camera, Transform::from_xyz(0.0, 1.8, 0.0).with_rotation(steady))).id();
         app.update();
@@ -342,7 +342,7 @@ mod tests {
     fn at_no_health_the_player_is_back_at_the_start_whole_and_the_zombies_are_gone() {
         let mut app = App::new();
         app.init_resource::<Time>().insert_resource(TerrainMap::flat(5.0)).init_resource::<PlayerHealth>().add_systems(Update, die_and_restart);
-        let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::new(3.0, 4.0), air_height: 2.0, vertical_speed: 1.0, stance: Stance::Prone, eye_height: 0.4, jump_spent_standing: false, floor: 9.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: true, view_feet: 9.0 };
+        let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::new(3.0, 4.0), air_height: 2.0, vertical_speed: 1.0, stance: Stance::Prone, eye_height: 0.4, jump_spent_standing: false, floor: 9.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: true, view_feet: 9.0, lean: 0.0, lean_offset: Vec2::ZERO };
         let player = app.world_mut().spawn((camera, Transform::from_xyz(300.0, 12.0, -200.0))).id();
         let zombie = app.world_mut().spawn((Zombie::new(crate::zombie::ZombieKind::Walker, 0.0), Transform::default())).id();
         // Alive: nothing changes.

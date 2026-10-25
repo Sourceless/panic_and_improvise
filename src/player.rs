@@ -153,6 +153,32 @@ pub struct FpsCamera {
     /// Where the eye is carried from: the height of the feet, but eased over steps and stairs so
     /// that going up them glides rather than judders.
     pub(crate) view_feet: f32,
+    /// How far the player is leaning, -1 (all the way out to the left) to 1 (right); and how far, along the
+    /// ground, that has moved the eye from where the body is.
+    pub(crate) lean: f32,
+    pub(crate) lean_offset: Vec2,
+}
+
+/// How far, metres, a full lean takes the eye to the side, and how far the view rolls with it, radians.
+pub const LEAN_DISTANCE: f32 = 0.42;
+const LEAN_ROLL: f32 = 0.3;
+/// How quickly a lean comes on and goes off.
+const LEAN_RATE: f32 = 9.0;
+/// How broad, metres, the head is taken to be where it meets a wall.
+const LEAN_HEAD_RADIUS: f32 = 0.12;
+
+/// How much of a full lean to the side of `side` (-1 or 1) of `right` there is room for from the body at `at`: the
+/// head, `reach` above the feet, stopped by what is solid at that height (and what is lower is leant over).
+pub fn lean_room(colliders: &Colliders, at: Vec2, right: Vec2, feet: f32, reach: f32, side: f32) -> f32 {
+    const STEPS: usize = 8;
+    for step in 1..=STEPS {
+        let fraction = step as f32 / STEPS as f32;
+        let head = at + right * side * fraction * LEAN_DISTANCE;
+        if colliders.resolve(head, LEAN_HEAD_RADIUS, feet, reach).distance(head) > 0.01 {
+            return (step - 1) as f32 / STEPS as f32;
+        }
+    }
+    1.0
 }
 
 /// A climb in progress: the player is carried from where they were to the top of what they climb.
@@ -219,7 +245,7 @@ impl FpsCamera {
 
     /// Stands the player up on the ground at `at`, at rest, with `transform` as their eye.
     pub fn restart_at(&mut self, transform: &mut Transform, at: Vec2, map: &TerrainMap) {
-        let ground = map.height_at(at);
+        let ground = map.height_at(at).max(map.road_top_at(at).unwrap_or(f32::MIN));
         self.velocity = Vec2::ZERO;
         self.air_height = 0.0;
         self.vertical_speed = 0.0;
@@ -229,6 +255,8 @@ impl FpsCamera {
         self.view_feet = ground;
         self.mantle = None;
         self.sliding = false;
+        self.lean = 0.0;
+        self.lean_offset = Vec2::ZERO;
         self.jump_spent_standing = false;
         transform.translation = Vec3::new(at.x, ground + EYE_HEIGHT, at.y);
     }
@@ -270,7 +298,7 @@ pub fn spawn_player(mut commands: Commands, map: Res<TerrainMap>) {
         // The player's ears, for sounds placed in the world.
         bevy::audio::SpatialListener::new(0.2),
         Transform::from_translation(eye).looking_at(eye - Vec3::Z, Vec3::Y),
-        FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false, floor: map.height_at(start), mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: map.height_at(start) },
+        FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false, floor: map.height_at(start), mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: map.height_at(start), lean: 0.0, lean_offset: Vec2::ZERO },
     ));
 }
 
@@ -516,7 +544,8 @@ fn player_movement(
         stance: cam.stance,
         slide: cam.sliding,
     };
-    let here = Vec2::new(transform.translation.x, transform.translation.z);
+    // (Where the body is, not the eye, which leaning has moved off to the side.)
+    let here = Vec2::new(transform.translation.x, transform.translation.z) - cam.lean_offset;
 
     // A climb that is under way carries the player until it's done; nothing else moves them.
     if let Some(mut climb) = cam.mantle {
@@ -533,6 +562,10 @@ fn player_movement(
         }
         cam.velocity = Vec2::ZERO;
         cam.view_feet = cam.floor + cam.air_height;
+        // A climb is made upright.
+        cam.lean = 0.0;
+        cam.lean_offset = Vec2::ZERO;
+        transform.rotation = Quat::from_euler(EulerRot::YXZ, cam.yaw, cam.pitch, 0.0);
         transform.translation = Vec3::new(at.x, cam.view_feet + cam.eye_height, at.y);
         return;
     }
@@ -567,7 +600,7 @@ fn player_movement(
     };
 
     // What is underfoot there, and how high the feet are above it now.
-    let floor = terrain.height_at(pos).max(colliders.support(pos, feet, STEP_UP).unwrap_or(f32::MIN));
+    let floor = terrain.height_at(pos).max(terrain.road_top_at(pos).unwrap_or(f32::MIN)).max(colliders.support(pos, feet, STEP_UP).unwrap_or(f32::MIN));
     let (air_height, grounded) = settle(feet, state.grounded(), floor, STEP_DOWN);
     cam.floor = floor;
     cam.air_height = air_height;
@@ -579,7 +612,20 @@ fn player_movement(
     } else {
         cam.view_feet = feet_now;
     }
-    transform.translation = Vec3::new(pos.x, cam.view_feet + cam.eye_height, pos.y);
+    // Leaning: the head goes out to the side and the view rolls with it, but only as far as there is room.
+    let upright = grounded && !sprint_keys && !cam.sliding && cam.stance != Stance::Prone;
+    let wanted = if upright { f32::from(held(Action::LeanRight)) - f32::from(held(Action::LeanLeft)) } else { 0.0 };
+    cam.lean += (wanted - cam.lean) * (1.0 - (-LEAN_RATE * dt).exp());
+    if wanted == 0.0 && cam.lean.abs() < 0.01 {
+        cam.lean = 0.0;
+    }
+    let head_reach = cam.eye_height - 0.2;
+    let room = |side: f32| if cam.lean * side > 0.0 || wanted * side > 0.0 { lean_room(colliders, pos, right, feet_now, head_reach, side) } else { 1.0 };
+    cam.lean = cam.lean.clamp(-room(-1.0), room(1.0));
+    cam.lean_offset = right * cam.lean * LEAN_DISTANCE;
+    transform.rotation = Quat::from_euler(EulerRot::YXZ, cam.yaw, cam.pitch, -cam.lean * LEAN_ROLL);
+    let eye = pos + cam.lean_offset;
+    transform.translation = Vec3::new(eye.x, cam.view_feet + cam.eye_height, eye.y);
 }
 
 /// Widens the view a little while sprinting, which makes speed read on screen.
@@ -731,7 +777,7 @@ mod tests {
             .add_systems(Update, player_movement);
         app.world_mut().spawn((
             Transform::from_xyz(0.0, ground + EYE_HEIGHT, 0.0),
-            FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 0.0 },
+            FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: Stance::Stand, eye_height: EYE_HEIGHT, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 0.0, lean: 0.0, lean_offset: Vec2::ZERO },
         ));
         // Every update advances the clock by exactly 1/60 s, whatever the real time taken.
         app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(std::time::Duration::from_secs_f32(1.0 / 60.0)));
@@ -765,6 +811,70 @@ mod tests {
             frame(&mut app, 1.0 / 60.0);
         }
         assert!((eye_height(&mut app) - standing).abs() < 1e-3, "back on the ground");
+    }
+
+    fn eye_at(app: &mut App) -> (Vec3, f32) {
+        let t = app.world_mut().query::<&Transform>().iter(app.world()).next().unwrap();
+        (t.translation, t.rotation.to_euler(EulerRot::YXZ).2)
+    }
+
+    #[test]
+    fn holding_a_lean_key_puts_the_head_out_to_that_side_and_rolls_the_view_and_letting_go_brings_it_back_where_it_was() {
+        let mut app = app_with_player(0.0);
+        frame(&mut app, 1.0 / 60.0);
+        let start = eye_at(&mut app).0;
+        app.world_mut().resource_mut::<Keyboard>().press(Bind::Char('q'));
+        for _ in 0..90 {
+            frame(&mut app, 1.0 / 60.0);
+        }
+        let (left, roll) = eye_at(&mut app);
+        assert!((start.x - left.x - LEAN_DISTANCE).abs() < 0.01, "out {} m to the left", start.x - left.x);
+        assert!(roll > 0.25, "the view rolls to the left: {roll}");
+        assert!((left.y - start.y).abs() < 1e-3, "no change of height");
+        app.world_mut().resource_mut::<Keyboard>().release(Bind::Char('q'));
+        app.world_mut().resource_mut::<Keyboard>().press(Bind::Char('t'));
+        for _ in 0..90 {
+            frame(&mut app, 1.0 / 60.0);
+        }
+        let (right, roll) = eye_at(&mut app);
+        assert!((right.x - start.x - LEAN_DISTANCE).abs() < 0.01 && roll < -0.25, "right: {} m, roll {roll}", right.x - start.x);
+        app.world_mut().resource_mut::<Keyboard>().release(Bind::Char('t'));
+        for _ in 0..120 {
+            frame(&mut app, 1.0 / 60.0);
+        }
+        let (back, roll) = eye_at(&mut app);
+        assert!(back.distance(start) < 1e-3 && roll.abs() < 1e-3, "the body never moved: {back:?} against {start:?}");
+    }
+
+    #[test]
+    fn a_wall_beside_the_player_stops_the_lean_short_of_it() {
+        let mut app = app_with_player(0.0);
+        let mut colliders = Colliders::default();
+        // A tall wall 0.3 m to the right.
+        colliders.add(crate::collision::Solid::wall(Vec2::new(0.35, -20.0), Vec2::new(0.35, 20.0), 0.05, 5.0, 5.0));
+        app.insert_resource(colliders);
+        app.world_mut().resource_mut::<Keyboard>().press(Bind::Char('t'));
+        for _ in 0..90 {
+            frame(&mut app, 1.0 / 60.0);
+        }
+        let (at, _) = eye_at(&mut app);
+        assert!(at.x < 0.3 - LEAN_HEAD_RADIUS + 0.01 && at.x > 0.0, "leaned to {} against a wall at 0.3", at.x);
+    }
+
+    #[test]
+    fn there_is_no_leaning_while_sprinting() {
+        let mut app = app_with_player(0.0);
+        {
+            let mut keys = app.world_mut().resource_mut::<Keyboard>();
+            keys.press(Bind::Char('w'));
+            keys.press(Bind::Shift);
+            keys.press(Bind::Char('q'));
+        }
+        for _ in 0..60 {
+            frame(&mut app, 1.0 / 60.0);
+        }
+        let (_, roll) = eye_at(&mut app);
+        assert!(roll.abs() < 1e-3, "rolled {roll} while sprinting");
     }
 
     #[test]

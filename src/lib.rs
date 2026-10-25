@@ -9,6 +9,7 @@ pub mod cloud_shadows;
 pub mod contour;
 pub mod crosshair;
 pub mod field_material;
+pub mod figure;
 pub mod fill;
 pub mod footsteps;
 pub mod grass;
