@@ -185,12 +185,20 @@
         mkdir -p $out
         zip -qr -X $out/$dir.zip $dir
         cp ${launcherWindows}/bin/launcher.exe $out/panic-and-improvise-launcher-windows-x86_64.exe
+        cp ${windowsInstaller}/*.exe $out/
+      '';
+
+      # The installer for Windows: the launcher, put where the player chooses, and the shortcuts they ask for.
+      windowsInstaller = pkgs.runCommand "panic-and-improvise-installer" { nativeBuildInputs = [ pkgs.nsis ]; } ''
+        mkdir -p $out
+        makensis -V2 -DOUTFILE=$out/panic-and-improvise-installer-windows-x86_64.exe -DVERSION=${version} -DLAUNCHER=${launcherWindows}/bin/launcher.exe ${./installer/windows.nsi}
+        test -s $out/panic-and-improvise-installer-windows-x86_64.exe
       '';
     in
     {
       packages.${system} = {
         default = linux;
-        inherit linux windows launcherLinux launcherWindows debPackage linuxArchive windowsArchive;
+        inherit linux windows launcherLinux launcherWindows debPackage windowsInstaller linuxArchive windowsArchive;
       };
 
       checks.${system} = {

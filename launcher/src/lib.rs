@@ -20,6 +20,10 @@ pub const GITHUB_API: &str = "https://api.github.com";
 /// Set to keep the game somewhere other than the usual place for the system.
 pub const HOME_VARIABLE: &str = "PANIC_AND_IMPROVISE_HOME";
 
+/// A file beside the launcher that says where the game is kept, written by the Windows installer. It holds one
+/// path, which is taken from the launcher's own folder when it is not absolute.
+pub const LOCATION_FILE: &str = "location.txt";
+
 /// What a release lists for download.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Asset {
@@ -77,10 +81,14 @@ impl Install {
         Install { root: root.into(), platform }
     }
 
-    /// The usual place for this system, or where `PANIC_AND_IMPROVISE_HOME` says.
+    /// Where `PANIC_AND_IMPROVISE_HOME` says; failing that, where the file beside the launcher says; failing
+    /// that, the usual place for this system.
     pub fn usual() -> Result<Install> {
+        let beside = std::env::current_exe().ok().and_then(|exe| location_beside(exe.parent()?));
         let root = if let Some(root) = std::env::var_os(HOME_VARIABLE).filter(|v| !v.is_empty()) {
             PathBuf::from(root)
+        } else if let Some(root) = beside {
+            root
         } else if cfg!(windows) {
             let base = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?;
             PathBuf::from(base).join("PanicAndImprovise")
@@ -113,6 +121,14 @@ impl Install {
         let tag = fs::read_to_string(self.version_file()).ok()?;
         Some(tag.trim().to_string()).filter(|t| !t.is_empty())
     }
+}
+
+/// The place `LOCATION_FILE` in `dir` names, if it is there and names one.
+pub fn location_beside(dir: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(dir.join(LOCATION_FILE)).ok()?;
+    // The installer's text may start with a byte order mark and end with a Windows line ending.
+    let line = text.trim_start_matches('\u{feff}').lines().next()?.trim();
+    (!line.is_empty()).then(|| dir.join(line))
 }
 
 /// What `update` found and did.
@@ -555,6 +571,20 @@ mod tests {
         let to = scratch.0.join("out");
         let _ = extract(Kind::TarGz, &file, &to);
         assert!(!scratch.0.join("escaped.txt").exists());
+    }
+
+    #[test]
+    fn the_installer_says_where_the_game_is_kept_by_a_file_beside_the_launcher() {
+        let scratch = Scratch::new("location");
+        assert_eq!(location_beside(&scratch.0), None);
+        fs::write(scratch.0.join(LOCATION_FILE), "\u{feff}data\r\n").unwrap();
+        assert_eq!(location_beside(&scratch.0), Some(scratch.0.join("data")));
+        // A path that is whole is used as it is.
+        let elsewhere = scratch.0.join("elsewhere");
+        fs::write(scratch.0.join(LOCATION_FILE), format!("{}\n", elsewhere.display())).unwrap();
+        assert_eq!(location_beside(&scratch.0), Some(elsewhere));
+        fs::write(scratch.0.join(LOCATION_FILE), "  \n").unwrap();
+        assert_eq!(location_beside(&scratch.0), None);
     }
 
     #[test]
