@@ -22,7 +22,7 @@ const DIED_TIME: f32 = 4.0;
 const HURT_SOUNDS: usize = 6;
 const HURT_SOUND_GAP: f32 = 0.35;
 
-#[derive(Resource, Debug, Clone)]
+#[derive(Resource, Debug, Clone, PartialEq)]
 pub struct PlayerHealth {
     pub current: f32,
     pub max: f32,
@@ -54,6 +54,50 @@ impl Default for PlayerHealth {
 }
 
 impl PlayerHealth {
+    /// All of it as one line of text, exactly (a recording keeps it), and back.
+    pub fn to_text(&self) -> String {
+        use crate::recording::bits;
+        let healing: Vec<String> = self.healing.iter().map(|h| format!("{}/{}", bits(h.left), bits(h.per_second))).collect();
+        format!(
+            "{} {} {} {} {} {} {} {} {}",
+            bits(self.current),
+            bits(self.max),
+            bits(self.since_hurt),
+            bits(self.flash),
+            bits(self.hit_strength),
+            bits(self.hit_age),
+            self.hurts,
+            bits(self.died_message),
+            if healing.is_empty() { "-".to_string() } else { healing.join(",") }
+        )
+    }
+
+    pub fn from_text(text: &str) -> Option<PlayerHealth> {
+        use crate::recording::unbits;
+        let mut parts = text.split_whitespace();
+        let mut next = || parts.next();
+        let current = unbits(next()?)?;
+        let max = unbits(next()?)?;
+        let since_hurt = unbits(next()?)?;
+        let flash = unbits(next()?)?;
+        let hit_strength = unbits(next()?)?;
+        let hit_age = unbits(next()?)?;
+        let hurts = next()?.parse().ok()?;
+        let died_message = unbits(next()?)?;
+        let doses = next()?;
+        if next().is_some() {
+            return None;
+        }
+        let mut healing = Vec::new();
+        if doses != "-" {
+            for dose in doses.split(',') {
+                let (left, per_second) = dose.split_once('/')?;
+                healing.push(Healing { left: unbits(left)?, per_second: unbits(per_second)? });
+            }
+        }
+        Some(PlayerHealth { current, max, since_hurt, flash, hit_strength, hit_age, hurts, healing, died_message })
+    }
+
     pub fn hurt(&mut self, amount: f32) {
         if amount <= 0.0 || self.current <= 0.0 {
             return;
@@ -218,6 +262,20 @@ fn die_and_restart(
 mod tests {
     use super::*;
     use crate::player::Stance;
+
+    #[test]
+    fn health_in_any_state_reads_back_from_its_text_exactly() {
+        let mut h = PlayerHealth::default();
+        assert_eq!(PlayerHealth::from_text(&h.to_text()).unwrap().to_text(), h.to_text());
+        h.hurt(40.0);
+        assert!(h.heal_over_time(30.0, 12.0));
+        assert!(h.heal_over_time(70.0, 10.0));
+        h.tick(0.37);
+        let again = PlayerHealth::from_text(&h.to_text()).expect("it reads its own text");
+        assert_eq!((again.current, again.pending(), again.flash(), again.wobble()), (h.current, h.pending(), h.flash(), h.wobble()));
+        assert_eq!(again.to_text(), h.to_text());
+        assert!(PlayerHealth::from_text("nonsense").is_none());
+    }
 
     #[test]
     fn a_hurt_takes_health_down_but_not_below_nothing_and_flashes() {

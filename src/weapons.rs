@@ -51,6 +51,8 @@ pub enum FireMode {
 }
 
 impl FireMode {
+    pub const ALL: [FireMode; 2] = [FireMode::Semi, FireMode::Auto];
+
     pub fn name(self) -> &'static str {
         match self {
             FireMode::Semi => "semi",

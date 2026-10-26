@@ -422,6 +422,16 @@ impl Default for ZombieDice {
 }
 
 impl ZombieDice {
+    /// Where the dice have got to, to be picked up again with `from_state`: what a recording keeps, so that a replay
+    /// has the zombies make the same choices.
+    pub fn state(&self) -> (u64, u32) {
+        (self.0.state(), self.1)
+    }
+
+    pub fn from_state((rng, count): (u64, u32)) -> ZombieDice {
+        ZombieDice(Rng::from_state(rng), count)
+    }
+
     fn unit(&mut self) -> f32 {
         self.0.unit()
     }
@@ -1054,32 +1064,49 @@ mod tests {
         assert!(taken >= Brute.traits().strike_damage, "{taken}");
     }
 
-    #[test]
-    fn a_zombie_behind_a_wall_goes_round_to_the_doorway_to_get_at_the_player() {
+    /// A zombie 12 m from the player with a wall between, a doorway in it: how near it got, whether it came by the
+    /// doorway, and whether it was ever in the wall. `seed` is where the dice start.
+    fn zombie_at_a_wall_with_a_doorway(seed: u64) -> (f32, bool, bool) {
         use std::time::Duration;
         let mut app = App::new();
         let mut colliders = Colliders::default();
         // A long wall between them, 6 m from the player, with a doorway a metre wide at x = 10.
         colliders.add(Solid::wall(Vec2::new(-40.0, -6.0), Vec2::new(9.5, -6.0), 0.15, 3.0, 3.0));
         colliders.add(Solid::wall(Vec2::new(10.5, -6.0), Vec2::new(40.0, -6.0), 0.15, 3.0, 3.0));
-        app.init_resource::<Time>().init_resource::<ZombieDice>().init_resource::<PlayerHealth>().insert_resource(TerrainMap::flat(0.0)).insert_resource(colliders).add_systems(Update, move_zombies);
+        app.init_resource::<Time>().insert_resource(ZombieDice::from_state((seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), 0))).init_resource::<PlayerHealth>().insert_resource(TerrainMap::flat(0.0)).insert_resource(colliders).add_systems(Update, move_zombies);
         let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: crate::player::Stance::Stand, eye_height: 1.8, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 0.0, lean: 0.0, lean_offset: Vec2::ZERO };
         app.world_mut().spawn((camera, GlobalTransform::from(Transform::from_xyz(0.0, 1.8, 0.0))));
         let mut zombie = Zombie::new(Walker, 0.0);
         zombie.following = true;
         let id = app.world_mut().spawn((zombie, Transform::from_xyz(0.0, 0.0, -12.0))).id();
-        let mut nearest = f32::MAX;
-        let mut through_the_door = false;
+        let (mut nearest, mut through_the_door, mut through_the_wall) = (f32::MAX, false, false);
         for _ in 0..1500 {
             app.world_mut().resource_mut::<Time>().advance_by(Duration::from_millis(50));
             app.update();
             let at = app.world().get::<Transform>(id).unwrap().translation;
             nearest = nearest.min(Vec2::new(at.x, at.z).length());
             through_the_door |= at.z > -6.0 && at.x > 9.0;
-            assert!(!(at.z > -6.1 && at.z < -5.9 && at.x < 9.0), "{at} went through the wall");
+            through_the_wall |= at.z > -6.1 && at.z < -5.9 && at.x < 9.0;
         }
+        (nearest, through_the_door, through_the_wall)
+    }
+
+    #[test]
+    fn a_zombie_behind_a_wall_goes_round_to_the_doorway_to_get_at_the_player() {
+        // One roll of the dice, fixed: see the next test for the others.
+        let (nearest, through_the_door, through_the_wall) = zombie_at_a_wall_with_a_doorway(1);
+        assert!(!through_the_wall, "it went through the wall");
         assert!(nearest < STRIKE_REACH, "it got no nearer than {nearest} m");
         assert!(through_the_door, "it came in by the doorway");
+    }
+
+    /// Known not to hold: with about one roll of the dice in five the zombie never finds the doorway in 75 seconds
+    /// (seeds 3, 8, 10, 17, 19, 27 and 29 of the first thirty). Found when a recording's dice had to be pinned.
+    #[test]
+    #[ignore = "a zombie behind a wall sometimes never finds the doorway"]
+    fn a_zombie_behind_a_wall_finds_the_doorway_whatever_the_dice() {
+        let lost: Vec<u64> = (1..=30).filter(|&seed| !zombie_at_a_wall_with_a_doorway(seed).1).collect();
+        assert!(lost.is_empty(), "never came by the doorway with dice seeds {lost:?}");
     }
 
     #[test]

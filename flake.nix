@@ -127,7 +127,7 @@
       # keeps up to date, so the package does not have to be installed again for each release.
       debPackage = pkgs.runCommand "panic-and-improvise-deb" { nativeBuildInputs = [ pkgs.dpkg pkgs.patchelf ]; } ''
         root=deb
-        mkdir -p $root/DEBIAN $root/usr/bin $root/usr/share/applications
+        mkdir -p $root/DEBIAN $root/usr/bin $root/usr/share/applications $root/usr/share/mime/packages
         cp ${launcherLinux}/bin/launcher $root/usr/bin/panic-and-improvise
         chmod 755 $root/usr/bin/panic-and-improvise
         cat > $root/usr/share/applications/panic-and-improvise.desktop <<'DESKTOP'
@@ -135,10 +135,22 @@
         Type=Application
         Name=Panic and Improvise
         Comment=First-person survival
-        Exec=panic-and-improvise
+        Exec=panic-and-improvise %f
         Terminal=true
         Categories=Game;ActionGame;
+        MimeType=application/x-panic-and-improvise-recording;
         DESKTOP
+        # A recording of play (.pir) opens in the game: the mime type is what says so.
+        cat > $root/usr/share/mime/packages/panic-and-improvise.xml <<'MIME'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+          <mime-type type="application/x-panic-and-improvise-recording">
+            <comment>Panic and Improvise recording</comment>
+            <glob pattern="*.pir"/>
+          </mime-type>
+        </mime-info>
+        MIME
+        sed -i 's/^ *//' $root/usr/share/mime/packages/panic-and-improvise.xml
         sed -i 's/^ *//' $root/usr/share/applications/panic-and-improvise.desktop
         cat > $root/DEBIAN/control <<CONTROL
         Package: panic-and-improvise

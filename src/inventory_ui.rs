@@ -164,8 +164,16 @@ fn drop_origin(cell: (u32, u32), grab: (u32, u32)) -> Option<(u32, u32)> {
     Some((cell.0.checked_sub(grab.0)?, cell.1.checked_sub(grab.1)?))
 }
 
-pub fn draw_inventory(mut contexts: EguiContexts, mut screen: ResMut<InventoryScreen>, mut inventory: ResMut<Inventory>, mut thrown: ResMut<DropQueue>, mut health: ResMut<PlayerHealth>) -> Result {
-    if !screen.open {
+pub fn draw_inventory(
+    mut contexts: EguiContexts,
+    mut screen: ResMut<InventoryScreen>,
+    mut inventory: ResMut<Inventory>,
+    mut thrown: ResMut<DropQueue>,
+    mut health: ResMut<PlayerHealth>,
+    replay: Option<Res<crate::playback::Playback>>,
+) -> Result {
+    // In a replay what was done on this screen comes from the recording, not from the mouse.
+    if !screen.open || replay.is_some_and(|r| r.driving()) {
         return Ok(());
     }
     show_inventory(contexts.ctx_mut()?, &mut screen, &mut inventory, &mut thrown, &mut health);

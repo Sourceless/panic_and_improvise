@@ -102,6 +102,12 @@ pub fn next_stance(current: Stance, crouch_pressed: bool, prone_pressed: bool, j
 #[derive(Resource, Default, Clone, Copy, Debug)]
 pub struct AimBlend(pub f32);
 
+/// Whether the game has the mouse: the player is looking around with it, and clicks fire the gun. (It is the
+/// window's cursor being grabbed, which the game keeps in step; in a replay it is what the recording says, since
+/// the window's own cursor is the viewer's.)
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq)]
+pub struct Captured(pub bool);
+
 pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
@@ -111,10 +117,13 @@ impl Plugin for PlayerPlugin {
             .init_resource::<crate::inventory_ui::InventoryScreen>()
             .init_resource::<crate::inventory_ui::DropQueue>()
             .init_resource::<AimBlend>()
+            .init_resource::<Captured>()
             .add_systems(Startup, (spawn_player, grab_cursor))
+            // Whatever set the window's cursor since the last frame (the test harness does) is seen by all.
+            .add_systems(PreUpdate, sync_captured_early.after(crate::controls::ControlsSet).before(crate::recorder::RecordSet))
             .add_systems(
                 Update,
-                (menu_keys, crate::inventory_ui::inventory_keys, toggle_cursor_grab, regrab_on_focus, mouse_look, player_movement, sprint_fov).chain(),
+                (menu_keys, crate::inventory_ui::inventory_keys, toggle_cursor_grab, regrab_on_focus, sync_captured, mouse_look, player_movement, sprint_fov).chain(),
             );
     }
 }
@@ -357,16 +366,37 @@ pub fn toggle_cursor_grab(
     }
 }
 
+/// At the start of a frame `Captured` is brought up to date with the window's cursor, which something other than
+/// the game may have set (the test harness does). A replay is its own: the window's cursor is the viewer's.
+fn sync_captured_early(cursors: Query<&CursorOptions, With<PrimaryWindow>>, replay: Option<Res<crate::playback::Playback>>, mut captured: ResMut<Captured>) {
+    if replay.is_some_and(|r| r.captured_now().is_some()) {
+        return;
+    }
+    let now = cursors.single().is_ok_and(|c| c.grab_mode == CursorGrabMode::Locked);
+    if captured.0 != now {
+        captured.0 = now;
+    }
+}
+
+/// In the middle of a frame, after the game has grabbed or freed the cursor, `Captured` follows it, or the recording
+/// being replayed, which kept what it was here.
+fn sync_captured(cursors: Query<&CursorOptions, With<PrimaryWindow>>, replay: Option<Res<crate::playback::Playback>>, mut captured: ResMut<Captured>) {
+    let now = match replay.and_then(|r| r.captured_now()) {
+        Some(recorded) => recorded,
+        None => cursors.single().is_ok_and(|c| c.grab_mode == CursorGrabMode::Locked),
+    };
+    if captured.0 != now {
+        captured.0 = now;
+    }
+}
+
 fn mouse_look(
-    cursors: Query<&CursorOptions, With<PrimaryWindow>>,
+    captured: Res<Captured>,
     mut mouse_motion: MessageReader<MouseMotion>,
     mut query: Query<(&mut Transform, &mut FpsCamera)>,
     zoom: Option<Res<crate::weapon::AimZoom>>,
 ) {
-    let Ok(cursor) = cursors.single() else {
-        return;
-    };
-    if cursor.grab_mode == CursorGrabMode::None {
+    if !captured.0 {
         mouse_motion.clear();
         return;
     }

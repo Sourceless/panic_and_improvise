@@ -42,6 +42,10 @@ pub enum AmmoKind {
     Buckshot,
 }
 
+impl AmmoKind {
+    pub const ALL: [AmmoKind; 4] = [AmmoKind::NineFmj, AmmoKind::NatoBall, AmmoKind::BritishBall, AmmoKind::Buckshot];
+}
+
 /// How a round is made, which decides how it hits.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Build {

@@ -44,6 +44,8 @@ fn run(skip_update: bool, game_args: &[String]) -> Result<(), String> {
         .args(game_args)
         .current_dir(installation.game_dir())
         .env("BEVY_ASSET_ROOT", installation.game_dir())
+        // Where the game keeps what it makes (its recordings), beside what it was installed as.
+        .env(launcher::HOME_VARIABLE, &installation.root)
         .spawn()
         .map_err(|e| format!("Could not start {}: {e}", installation.program().display()))?;
     Ok(())

@@ -20,9 +20,23 @@ pub fn scope_opacity(blend: f32) -> f32 {
     ((blend - SCOPE_FROM) / (SCOPE_FULL - SCOPE_FROM)).clamp(0.0, 1.0)
 }
 
-pub fn draw_hud(mut contexts: EguiContexts, prompt: Res<PickupPrompt>, health: Res<PlayerHealth>, guns: Query<&Gun>) -> Result {
+/// The red dot of a recording that is going (a circle drawn, since the font has none).
+pub fn recording_dot(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), 5.0, egui::Color32::from_rgb(230, 70, 60));
+}
+
+pub fn draw_hud(mut contexts: EguiContexts, prompt: Res<PickupPrompt>, health: Res<PlayerHealth>, guns: Query<&Gun>, recorder: Res<crate::recorder::Recorder>) -> Result {
     let ctx = contexts.ctx_mut()?;
     draw_health(ctx, &health);
+    if recorder.is_recording() {
+        egui::Area::new(egui::Id::new("recording")).anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 10.0)).interactable(false).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                recording_dot(ui);
+                ui.label(egui::RichText::new(format!("REC {}", crate::recorder::clock(recorder.seconds()))).strong().color(egui::Color32::from_rgb(230, 70, 60)));
+            });
+        });
+    }
     // The telescope.
     if let Ok(gun) = guns.single() {
         let opacity = if gun.def().scope.is_some() && !gun.holstered { scope_opacity(gun.aim_blend) } else { 0.0 };

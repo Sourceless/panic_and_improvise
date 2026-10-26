@@ -203,6 +203,16 @@ impl Rng {
         Rng(((p.x.to_bits() as u64) << 32 ^ p.y.to_bits() as u64) ^ 0xA076_1D64_78BD_642F | 1)
     }
 
+    /// Where the generator has got to, to be picked up again with `from_state`.
+    pub fn state(&self) -> u64 {
+        self.0
+    }
+
+    pub fn from_state(state: u64) -> Rng {
+        // Any state will do but nothing, which the generator would stay on.
+        Rng(state.max(1))
+    }
+
     pub fn unit(&mut self) -> f32 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
@@ -965,6 +975,24 @@ fn drop_unused_lanes(layout: &mut Layout) {
         let served = buildings.iter().filter(|b| clearance_of(lane, b.centre) < 14.0).count();
         served >= 2 || lane.end_junction
     });
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    #[test]
+    fn a_generator_picked_up_from_its_state_goes_on_as_it_would_have() {
+        let mut original = Rng::from_position(Vec2::new(3.5, 9.25));
+        for _ in 0..9 {
+            original.unit();
+        }
+        let mut again = Rng::from_state(original.state());
+        for _ in 0..50 {
+            assert_eq!(original.unit(), again.unit());
+        }
+        assert_eq!(Rng::from_state(0).state(), 1, "and one that is stuck is not let be");
+    }
 }
 
 #[cfg(test)]

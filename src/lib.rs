@@ -16,6 +16,7 @@ pub mod footsteps;
 pub mod grass;
 pub mod impact;
 pub mod inventory;
+pub mod inventory_text;
 pub mod inventory_ui;
 pub mod item_models;
 pub mod gun_state;
@@ -37,8 +38,11 @@ pub mod navigation;
 pub mod params;
 pub mod pickup;
 pub mod range;
+pub mod recorder;
+pub mod recording;
 pub mod perf;
 pub mod player;
+pub mod playback;
 pub mod road_material;
 pub mod roads;
 pub mod sound;
@@ -129,6 +133,7 @@ impl Plugin for GamePlugin {
             target::TargetPlugin,
             figure::FigurePlugin,
             body::BodyPlugin,
+            recorder::RecorderPlugin,
         ));
     }
 }

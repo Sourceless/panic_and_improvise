@@ -1,5 +1,4 @@
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use std::collections::HashMap;
 
@@ -14,7 +13,7 @@ use crate::weapons::{FireMode, Handling, WeaponDef, WeaponKind};
 use crate::impact::{segment_aabb_hit, surface_hit, Impact, Rng, Surface};
 use crate::sound::play_after;
 use crate::wind::Wind;
-use crate::player::{spawn_player, toggle_cursor_grab, AimBlend, FpsCamera, Stance};
+use crate::player::{spawn_player, toggle_cursor_grab, AimBlend, Captured, FpsCamera, Stance};
 use crate::map::TerrainMap;
 use crate::target::{dummy_aabb, TargetDummy};
 use crate::zombie::{hit_damage, zombie_aabb, Zombie};
@@ -153,6 +152,7 @@ impl Plugin for WeaponPlugin {
     fn build(&self, app: &mut App) {
         // The wind that bullets drift in (the terrain plugin's, when that is loaded too).
         app.init_resource::<Wind>()
+            .init_resource::<Captured>()
             .init_resource::<AimZoom>()
             .insert_resource(Inventory::starting())
             .add_systems(Startup, spawn_gun.after(spawn_player))
@@ -326,6 +326,16 @@ pub fn current_spread(gun: &Gun, player: &FpsCamera) -> f32 {
 }
 
 impl Gun {
+    /// Where the scatter generator has got to, and putting it back (a recording keeps it, so a replay's shots land
+    /// where the original's did).
+    pub fn rng_state(&self) -> u32 {
+        self.rng
+    }
+
+    pub fn set_rng_state(&mut self, state: u32) {
+        self.rng = state.max(1);
+    }
+
     /// The next random number in 0..1 (a small xorshift generator: plenty for scatter).
     fn random(&mut self) -> f32 {
         self.rng ^= self.rng << 13;
@@ -802,7 +812,7 @@ fn aim(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<Keyboard>,
     controls: Res<Controls>,
-    cursors: Query<&CursorOptions, With<PrimaryWindow>>,
+    cursor: Res<Captured>,
     mut guns: Query<(&mut Gun, &mut Transform)>,
     mut player: Query<&mut FpsCamera>,
     mut blend: ResMut<AimBlend>,
@@ -811,7 +821,7 @@ fn aim(
     let Ok((mut gun, mut transform)) = guns.single_mut() else {
         return;
     };
-    let captured = cursors.single().is_ok_and(|c| c.grab_mode == CursorGrabMode::Locked);
+    let captured = cursor.0;
     // With nothing in hand there is nothing to aim, reload or lower.
     if gun.holstered {
         gun.aiming = false;
@@ -894,7 +904,7 @@ fn fire(
     mut commands: Commands,
     time: Res<Time>,
     mouse: Res<ButtonInput<MouseButton>>,
-    cursors: Query<&CursorOptions, With<PrimaryWindow>>,
+    cursor: Res<Captured>,
     mut camera: Query<(&mut Transform, &mut FpsCamera)>,
     mut guns: Query<&mut Gun>,
     assets: Res<BulletAssets>,
@@ -922,10 +932,7 @@ fn fire(
         gun.trigger_blocked = false;
         return;
     }
-    let Ok(cursor) = cursors.single() else {
-        return;
-    };
-    if cursor.grab_mode != CursorGrabMode::Locked {
+    if !cursor.0 {
         // The click that recaptures the mouse must not fire.
         gun.trigger_blocked = true;
         return;

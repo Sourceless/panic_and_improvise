@@ -245,6 +245,7 @@ fn auto_screenshot(
     mut camera: Query<(&mut Transform, &mut FpsCamera)>,
     mut inventory: ResMut<crate::inventory::Inventory>,
     mut screen: ResMut<crate::inventory_ui::InventoryScreen>,
+    mut menu: ResMut<crate::menu::Menu>,
     mut exit: MessageWriter<AppExit>,
 ) {
     *frame += 1;
@@ -260,7 +261,7 @@ fn auto_screenshot(
         }
     }
     // FPS_GUN=sterling|hi_power|slr|bren|mag|l42|auto5|lee_enfield puts that gun, loaded, in the first slot
-    // (FPS_GUN2 the second); FPS_INVENTORY=1 opens the inventory. (FPS_AIM=1, read by the gun, holds it on its sights.)
+    // (FPS_GUN2 the second); FPS_INVENTORY=1 opens the inventory. (FPS_AIM=1, read by the gun, holds it on its sights; FPS_MENU=1 opens the menu.)
     if *frame == 100 {
         let kind_of = |name: &str| match name {
             "hi_power" => Some(crate::weapons::WeaponKind::HiPower),
@@ -281,6 +282,9 @@ fn auto_screenshot(
         }
         if std::env::var("FPS_INVENTORY").is_ok() {
             screen.open = true;
+        }
+        if std::env::var("FPS_MENU").is_ok() {
+            menu.open();
         }
     }
     // FPS_AT=x,z stands anywhere (FPS_YAW turns, FPS_PITCH tips).

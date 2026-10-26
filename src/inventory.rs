@@ -278,7 +278,7 @@ pub enum Place {
     Pack,
 }
 
-#[derive(Resource, Clone, Debug)]
+#[derive(Resource, Clone, Debug, PartialEq)]
 pub struct Inventory {
     /// The two weapon slots.
     pub slots: [Option<Item>; 2],
@@ -298,6 +298,15 @@ impl Default for Inventory {
 }
 
 impl Inventory {
+    /// The number the next new thing is given, and setting it (for putting an inventory back as it was).
+    pub fn next_id(&self) -> u32 {
+        self.next_id
+    }
+
+    pub fn set_next_id(&mut self, next_id: u32) {
+        self.next_id = next_id;
+    }
+
     /// A new thing, with a number nobody else has.
     pub fn make(&mut self, kind: ItemKind, count: u32) -> Item {
         let id = self.next_id;

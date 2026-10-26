@@ -1,13 +1,17 @@
-//! The menu that Escape opens: choose a keyboard layout preset, change single keys, and save.
+//! The menu that Escape opens: resume, start or stop a recording, choose a keyboard layout preset, change single
+//! keys and save them, and leave the game.
 //!
 //! What happens in it is plain logic on [`Menu`] and [`Controls`], tested without a screen; the
 //! window itself ([`draw_menu`], in egui) only shows that state and turns clicks into calls on it.
 //! While it is open the mouse is free and the game's controls are ignored.
 
+use bevy::app::AppExit;
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
 use crate::controls::{controls_path, Action, Controls, Keyboard, Preset};
+use crate::playback::Playback;
+use crate::recorder::{clock, Recorder};
 
 #[derive(Resource, Default, Debug)]
 pub struct Menu {
@@ -105,19 +109,34 @@ pub fn menu_keys(
 }
 
 /// The menu window.
-pub fn draw_menu(mut contexts: EguiContexts, mut menu: ResMut<Menu>, mut controls: ResMut<Controls>) -> Result {
-    if !menu.open {
+pub fn draw_menu(
+    mut contexts: EguiContexts,
+    mut menu: ResMut<Menu>,
+    mut controls: ResMut<Controls>,
+    mut recorder: ResMut<Recorder>,
+    replay: Option<Res<Playback>>,
+    mut exit: MessageWriter<AppExit>,
+) -> Result {
+    // A replay has its own menu.
+    if !menu.open || replay.is_some_and(|r| r.driving()) {
         return Ok(());
     }
     let ctx = contexts.ctx_mut()?;
     let mut state = (menu.rebinding, menu.message.clone());
-    let (mut choose, mut rebind, mut save, mut reset, mut resume) = (None, None, false, false, false);
+    let (mut choose, mut rebind, mut save, mut reset, mut resume, mut quit) = (None, None, false, false, false, false);
     let unsaved = menu.has_unsaved_changes(&controls);
-    egui::Window::new("Controls")
+    egui::Window::new(format!("Panic and Improvise v{}", crate::VERSION))
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .collapsible(false)
         .resizable(false)
         .show(ctx, |ui| {
+            if ui.add_sized([ui.available_width(), 28.0], egui::Button::new("Resume")).clicked() {
+                resume = true;
+            }
+            ui.separator();
+            recording_section(ui, &mut recorder);
+            ui.separator();
+            egui::CollapsingHeader::new("Controls").default_open(state.0.is_some()).show(ui, |ui| {
             ui.label("Keyboard layout");
             ui.horizontal(|ui| {
                 for preset in Preset::ALL {
@@ -147,9 +166,6 @@ pub fn draw_menu(mut contexts: EguiContexts, mut menu: ResMut<Menu>, mut control
                 if ui.add_enabled(controls.is_customised(), egui::Button::new("Reset keys to preset")).clicked() {
                     reset = true;
                 }
-                if ui.button("Resume").clicked() {
-                    resume = true;
-                }
             });
             if unsaved {
                 ui.colored_label(egui::Color32::from_rgb(230, 180, 60), "Changes not saved: they apply now, but won't be here next time.");
@@ -159,8 +175,17 @@ pub fn draw_menu(mut contexts: EguiContexts, mut menu: ResMut<Menu>, mut control
             if !state.1.is_empty() {
                 ui.label(&state.1);
             }
+            });
+            ui.separator();
+            if ui.add_sized([ui.available_width(), 28.0], egui::Button::new("Exit game")).clicked() {
+                quit = true;
+            }
             ui.label("Escape closes this menu.");
         });
+    if quit {
+        // A recording being made is closed properly as the game leaves.
+        exit.write(AppExit::Success);
+    }
     if let Some(preset) = choose {
         menu.choose_preset(preset, &mut controls);
     }
@@ -180,6 +205,32 @@ pub fn draw_menu(mut contexts: EguiContexts, mut menu: ResMut<Menu>, mut control
     }
     state.0 = menu.rebinding;
     Ok(())
+}
+
+/// Start or stop recording, and what happened the last time.
+fn recording_section(ui: &mut egui::Ui, recorder: &mut Recorder) {
+    if recorder.is_recording() {
+        ui.horizontal(|ui| {
+            crate::hud::recording_dot(ui);
+            ui.colored_label(egui::Color32::from_rgb(230, 70, 60), format!("Recording  {}", clock(recorder.seconds())));
+        });
+        if let Some(path) = recorder.path() {
+            ui.label(egui::RichText::new(path.display().to_string()).small());
+        }
+        if ui.button("Stop recording").clicked() {
+            recorder.stop();
+        }
+    } else if recorder.wanted() {
+        ui.label("Starting to record…");
+    } else {
+        if ui.button("Start recording").clicked() {
+            recorder.start();
+        }
+        ui.label(egui::RichText::new(format!("Kept in {} as a .pir file, to play again by opening it with the game.", crate::recording::recordings_dir().display())).small());
+    }
+    if !recorder.message.is_empty() && !recorder.is_recording() {
+        ui.label(&recorder.message);
+    }
 }
 
 #[cfg(test)]

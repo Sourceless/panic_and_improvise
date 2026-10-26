@@ -109,10 +109,21 @@ Section "Desktop shortcut" SecDesktop
   CreateShortcut "$DESKTOP\${NAME}.lnk" "$INSTDIR\launcher.exe" "" "$INSTDIR\launcher.exe" 0
 SectionEnd
 
+Section "Open recordings (.pir) with ${NAME}" SecRecordings
+  ; A recording is played by giving it to the game: the launcher passes it on.
+  WriteRegStr HKLM "Software\Classes\.pir" "" "PanicAndImprovise.Recording"
+  WriteRegStr HKLM "Software\Classes\PanicAndImprovise.Recording" "" "${NAME} recording"
+  WriteRegStr HKLM "Software\Classes\PanicAndImprovise.Recording\DefaultIcon" "" "$INSTDIR\launcher.exe,0"
+  WriteRegStr HKLM "Software\Classes\PanicAndImprovise.Recording\shell\open\command" "" '"$INSTDIR\launcher.exe" "%1"'
+  ; Tell Explorer the associations have changed.
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
+SectionEnd
+
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SecLauncher} "The launcher, which downloads the latest ${NAME} and keeps it up to date every time you play."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecStartMenu} "A ${NAME} entry in the Start menu."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecDesktop} "A ${NAME} shortcut on the desktop."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecRecordings} "Opening a recording of play (a .pir file) plays it again in the game."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 Section "Uninstall"
@@ -126,6 +137,9 @@ Section "Uninstall"
   Delete "$INSTDIR\uninstall.exe"
   ; Only if nothing else has been put in it.
   RMDir "$INSTDIR"
+  DeleteRegKey HKLM "Software\Classes\.pir"
+  DeleteRegKey HKLM "Software\Classes\PanicAndImprovise.Recording"
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
   DeleteRegKey HKLM "${UNINSTALL_KEY}"
   DeleteRegKey HKLM "Software\PanicAndImprovise"
 SectionEnd

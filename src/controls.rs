@@ -437,6 +437,14 @@ pub struct Keyboard {
     last_press: Option<Bind>,
 }
 
+/// The keyboard in one frame: see `Keyboard::frame`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct KeyboardFrame {
+    pub held: Vec<Bind>,
+    pub pressed: Vec<Bind>,
+    pub released: Vec<Bind>,
+}
+
 /// What a held key is tracked by: its place on the board, or (for tests and scripts) just its name.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Held {
@@ -494,6 +502,29 @@ impl Keyboard {
         self.last_press = None;
     }
 
+    /// What is held, what went down and what came up this frame, each in a fixed order (for recording).
+    pub fn frame(&self) -> KeyboardFrame {
+        let sorted = |keys: Vec<Bind>| {
+            let mut keys = keys;
+            keys.sort_by_key(|k| k.name());
+            keys.dedup();
+            keys
+        };
+        KeyboardFrame {
+            held: sorted(self.held.values().copied().collect()),
+            pressed: sorted(self.pressed_now.iter().copied().collect()),
+            released: sorted(self.released_now.iter().copied().collect()),
+        }
+    }
+
+    /// Becomes exactly `frame`: the keys held and the going down and up of this frame (for playing a recording).
+    pub fn set_frame(&mut self, frame: &KeyboardFrame) {
+        self.held = frame.held.iter().map(|&key| (Held::Named(key), key)).collect();
+        self.pressed_now = frame.pressed.iter().copied().collect();
+        self.released_now = frame.released.iter().copied().collect();
+        self.last_press = frame.pressed.last().copied();
+    }
+
     pub fn apply(&mut self, event: &KeyboardInput) {
         match event.state {
             ButtonState::Pressed if !event.repeat => {
@@ -549,6 +580,27 @@ impl Plugin for ControlsPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_keyboard_of_a_frame_can_be_taken_and_put_back() {
+        let mut keys = Keyboard::default();
+        keys.press(Bind::Char('w'));
+        keys.press(Bind::Shift);
+        keys.new_frame();
+        keys.press(Bind::Char(','));
+        keys.release(Bind::Shift);
+        let frame = keys.frame();
+        assert_eq!(frame.pressed, [Bind::Char(',')]);
+        assert_eq!(frame.released, [Bind::Shift]);
+        assert!(frame.held.contains(&Bind::Char('w')) && !frame.held.contains(&Bind::Shift));
+        let mut other = Keyboard::default();
+        other.set_frame(&frame);
+        assert_eq!(other.frame(), frame);
+        assert!(other.pressed(Bind::Char('w')) && other.just_pressed(Bind::Char(',')) && other.just_released(Bind::Shift));
+        other.new_frame();
+        assert!(other.pressed(Bind::Char('w')), "what is held stays held");
+        assert!(!other.just_pressed(Bind::Char(',')));
+    }
 
     #[test]
     fn qwerty_is_the_default_and_is_wasd() {
