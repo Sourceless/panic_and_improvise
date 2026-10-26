@@ -556,7 +556,7 @@ pub fn assemble(layout: &Layout, skirt: f32, rng: &mut Rng) -> Model {
                 Axis::Z => (e.at, w.centre, false),
             };
             let size = |len: f32, depth: f32, hh: f32| if along_x { Vec3::new(len, hh, depth) } else { Vec3::new(depth, hh, len) };
-            model.block(Vec3::new(cx, mid, cz), size(w.width, 0.03, h), colour::GLASS_PANE, Layer::Glass, None);
+            model.pane(Vec3::new(cx, mid, cz), along_x, w.width, h, colour::GLASS_PANE);
             // The frame: a bar up the middle and one across, and the sill.
             model.block(Vec3::new(cx, mid, cz), size(0.05, 0.08, h), style.trim_light(), Layer::Shell, None);
             model.block(Vec3::new(cx, mid, cz), size(w.width, 0.07, 0.05), style.trim_light(), Layer::Shell, None);

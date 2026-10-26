@@ -26,6 +26,7 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: fps_prototype::window_title(),
+                resolution: window_size().into(),
                 ..default()
             }),
             ..default()
@@ -39,6 +40,16 @@ fn main() {
         app.add_plugins(PlaybackPlugin { recording: replay.recording, strict: replay.strict });
     }
     app.run();
+}
+
+/// How big the window starts: 1080p, except in the benchmark and screenshot modes, which stay at 720p so that their
+/// numbers and pictures can be compared with the ones from before.
+fn window_size() -> (u32, u32) {
+    if std::env::var("FPS_BENCH").is_ok() || std::env::var("FPS_SCREENSHOT").is_ok() {
+        (1280, 720)
+    } else {
+        (1920, 1080)
+    }
 }
 
 /// The flags that do something and exit, instead of starting the game, return the exit code. A recording to play is

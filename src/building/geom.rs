@@ -34,6 +34,35 @@ pub struct Item {
     pub solid: Option<Material>,
 }
 
+/// A pane of glass filling a window: the glass itself, which is drawn apart from the building, can
+/// be broken and is solid till it is.
+#[derive(Clone, Copy, Debug)]
+pub struct Pane {
+    /// The middle of it.
+    pub centre: Vec3,
+    /// Whether it runs along the building's x (its face toward z) rather than along z.
+    pub along_x: bool,
+    pub width: f32,
+    pub height: f32,
+    pub colour: Rgb,
+}
+
+/// How thick a pane is drawn, and how thick a solid it is (a half; a body is stopped a little short of it).
+pub const PANE_DRAWN: f32 = 0.03;
+pub const PANE_HALF_SOLID: f32 = 0.05;
+
+impl Pane {
+    /// The solid it makes when the building's origin is at `origin` and the building is turned `yaw`:
+    /// hanging from the sill to the head of the window.
+    pub fn solid(&self, origin: Vec3, yaw: f32) -> Solid {
+        let turn = Quat::from_rotation_y(yaw);
+        let along = if self.along_x { Vec3::X } else { Vec3::Z } * (self.width * 0.5);
+        let (a, b) = (origin + turn * (self.centre - along), origin + turn * (self.centre + along));
+        let (bottom, top) = (a.y - self.height * 0.5, a.y + self.height * 0.5);
+        Solid::wall(Vec2::new(a.x, a.z), Vec2::new(b.x, b.z), PANE_HALF_SOLID, top, top).from(bottom).of(Material::Glass)
+    }
+}
+
 /// An axis-aligned rectangle on the floor plan.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {
@@ -105,6 +134,8 @@ pub struct Model {
     pub lights: Vec<(Vec3, f32)>,
     /// Where loot lies, in the building's frame.
     pub loot: Vec<LootSpot>,
+    /// The glass in its windows.
+    pub panes: Vec<Pane>,
 }
 
 /// A box of loot: where it is, how rare, and the clear space it opens onto.
@@ -156,9 +187,27 @@ impl Model {
         }
     }
 
+    /// A pane of glass from its middle and size.
+    pub fn pane(&mut self, centre: Vec3, along_x: bool, width: f32, height: f32, colour: Rgb) {
+        self.panes.push(Pane { centre, along_x, width, height, colour });
+    }
+
+    /// The glass of the windows, less the panes that are broken (`broken[i]` for pane `i`).
+    pub fn bake_glass(&self, broken: &[bool]) -> Mesh {
+        let mut b = MeshBuilder::with_alpha(0.22);
+        for pane in self.panes.iter().enumerate().filter(|(i, _)| !broken.get(*i).copied().unwrap_or(false)).map(|(_, p)| p) {
+            let size = if pane.along_x { Vec3::new(pane.width, pane.height, PANE_DRAWN) } else { Vec3::new(PANE_DRAWN, pane.height, pane.width) };
+            b.cuboid(pane.centre, size, 0.0, pane.colour);
+        }
+        b.into_mesh()
+    }
+
     /// The mesh of everything on a layer.
     pub fn bake(&self, layer: Layer) -> Mesh {
-        let mut b = if layer == Layer::Glass { MeshBuilder::with_alpha(0.22) } else { MeshBuilder::default() };
+        if layer == Layer::Glass {
+            return self.bake_glass(&[]);
+        }
+        let mut b = MeshBuilder::default();
         for item in self.items.iter().filter(|i| i.layer == layer) {
             match item.piece {
                 Piece::Block { centre, size, yaw } => b.cuboid(centre, size, yaw, item.colour),
@@ -174,10 +223,19 @@ impl Model {
         self.items.extend(other.items);
         self.lights.extend(other.lights);
         self.loot.extend(other.loot);
+        self.panes.extend(other.panes);
     }
 
     pub fn has(&self, layer: Layer) -> bool {
+        if layer == Layer::Glass {
+            return !self.panes.is_empty();
+        }
         self.items.iter().any(|i| i.layer == layer)
+    }
+
+    /// The solids of the panes, in the order of `panes`.
+    pub fn pane_solids(&self, origin: Vec3, yaw: f32) -> Vec<Solid> {
+        self.panes.iter().map(|p| p.solid(origin, yaw)).collect()
     }
 
     /// The solids the model makes when its origin is at `origin` (the middle of the building at the

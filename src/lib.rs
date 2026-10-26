@@ -56,6 +56,7 @@ pub mod wind;
 pub mod weapon;
 pub mod walking;
 pub mod weapons;
+pub mod windows;
 pub mod wind_material;
 pub mod world;
 pub mod zombie;

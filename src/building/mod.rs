@@ -339,7 +339,7 @@ mod tests {
     /// the feet in each, and the bounds the cells are numbered in.
     fn walk(model: &geom::Model, layouts: &[plan::Layout], ground: f32) -> (Vec<(IVec2, f32)>, geom::Rect) {
         let mut colliders = Colliders::default();
-        for solid in model.solids(Vec3::ZERO, 0.0) {
+        for solid in model.solids(Vec3::ZERO, 0.0).into_iter().chain(model.pane_solids(Vec3::ZERO, 0.0)) {
             colliders.add(solid);
         }
         let mut bounds = layouts[0].inside;
@@ -589,6 +589,103 @@ mod tests {
             count += 1;
         }
         eprintln!("{count} buildings in {:.2?}: {items} items, {solids} solids, about {shell_tris} shell triangles", start.elapsed());
+    }
+
+    /// What a jump to its highest point would do to someone standing at each reachable spot (every few
+    /// of them): how far it pushes them sideways, the worst of those pushes and how many spots push at
+    /// all, without a ceiling stopping the rise and with it.
+    fn pushes_at_the_top_of_a_jump(b: &Building, map: &TerrainMap) -> Option<[(f32, usize); 2]> {
+        let ground = crate::settlement::ground_under(map, b);
+        let mut rng = Rng::from_position(b.centre);
+        let (layouts, model) = planned(b, &ground.site, &mut rng);
+        if layouts.is_empty() {
+            return None;
+        }
+        let (reached, bounds) = walk(&model, &layouts, -0.12);
+        let mut colliders = Colliders::default();
+        for solid in model.solids(Vec3::ZERO, 0.0).into_iter().chain(model.pane_solids(Vec3::ZERO, 0.0)) {
+            colliders.add(solid);
+        }
+        let mut result = [(0.0f32, 0usize); 2];
+        for &(c, feet) in reached.iter().step_by(7) {
+            let p = Vec2::new(bounds.x0 + (c.x as f32 + 0.5) * CELL, bounds.z0 + (c.y as f32 + 0.5) * CELL);
+            let top = feet + crate::player::JUMP_HEIGHT;
+            for (i, feet_there) in [top, colliders.limit_rise(p, PLAYER_RADIUS, feet, top)].into_iter().enumerate() {
+                let moved = colliders.resolve(p, PLAYER_RADIUS, feet_there, STEP_UP).distance(p);
+                result[i].0 = result[i].0.max(moved);
+                result[i].1 += usize::from(moved > 0.02);
+            }
+        }
+        Some(result)
+    }
+
+    #[test]
+    fn a_jump_inside_a_building_does_not_push_you_through_its_walls() {
+        let params = GenParams::default();
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
+        let roads = crate::roads::RoadNetwork::generate(&map, &params);
+        let plan = SettlementPlan::generate(&map, &roads);
+        let (mut checked, mut without, mut with) = (0, 0, 0);
+        let mut worst = 0.0f32;
+        for b in plan.layouts.iter().flat_map(|l| &l.buildings).filter(|b| !matches!(b.kind, BuildingKind::Silo | BuildingKind::Mill)).step_by(9) {
+            let Some([before, after]) = pushes_at_the_top_of_a_jump(b, &map) else { continue };
+            checked += 1;
+            without += before.1;
+            with += after.1;
+            worst = worst.max(after.0);
+        }
+        eprintln!("{checked} buildings: {without} spots would push at the top of a jump without a ceiling stopping the rise, {with} with it");
+        assert!(checked > 5);
+        assert!(without > 0, "this is what the ceiling is for");
+        assert_eq!(with, 0, "the worst push was {worst} m");
+    }
+
+    /// Where someone inside could haul themselves up onto, from each reachable spot (every few of them) in sixteen
+    /// directions, and which of those places are not in the building: on or beyond its outside walls.
+    fn climbs_out(b: &Building, map: &TerrainMap) -> Option<(usize, Vec<String>)> {
+        use crate::collision::MANTLE_REACH;
+        let ground = crate::settlement::ground_under(map, b);
+        let mut rng = Rng::from_position(b.centre);
+        let (layouts, model) = planned(b, &ground.site, &mut rng);
+        if layouts.is_empty() {
+            return None;
+        }
+        let (reached, bounds) = walk(&model, &layouts, -0.12);
+        let mut colliders = Colliders::default();
+        for solid in model.solids(Vec3::ZERO, 0.0).into_iter().chain(model.pane_solids(Vec3::ZERO, 0.0)) {
+            colliders.add(solid);
+        }
+        let (mut tried, mut out) = (0, Vec::new());
+        for &(c, feet) in reached.iter().step_by(5) {
+            let p = Vec2::new(bounds.x0 + (c.x as f32 + 0.5) * CELL, bounds.z0 + (c.y as f32 + 0.5) * CELL);
+            for k in 0..16 {
+                let dir = Vec2::from_angle(k as f32 * std::f32::consts::TAU / 16.0);
+                tried += 1;
+                let Some(m) = colliders.mantle_target(p, dir, PLAYER_RADIUS, feet, feet, STEP_UP, MANTLE_REACH) else { continue };
+                if !layouts.iter().any(|l| l.inside.grown(-0.2).contains(m.land)) {
+                    out.push(format!("{:?} from {:.2},{:.2} (feet {feet:.2}) toward {dir:.2} onto {:.2},{:.2} at {:.2}", b.kind, p.x, p.y, m.land.x, m.land.y, m.top));
+                }
+            }
+        }
+        Some((tried, out))
+    }
+
+    #[test]
+    fn nobody_inside_a_building_can_climb_out_of_it_through_a_whole_window() {
+        let params = GenParams::default();
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
+        let roads = crate::roads::RoadNetwork::generate(&map, &params);
+        let plan = SettlementPlan::generate(&map, &roads);
+        let (mut buildings, mut tried, mut out) = (0, 0, Vec::new());
+        for b in plan.layouts.iter().flat_map(|l| &l.buildings).filter(|b| !matches!(b.kind, BuildingKind::Silo | BuildingKind::Mill)).step_by(7) {
+            let Some((t, o)) = climbs_out(b, &map) else { continue };
+            buildings += 1;
+            tried += t;
+            out.extend(o);
+        }
+        eprintln!("{buildings} buildings, {tried} climbs tried, {} out", out.len());
+        assert!(buildings > 5);
+        assert!(out.is_empty(), "{} ways out, for instance:\n{}", out.len(), out.iter().take(8).cloned().collect::<Vec<_>>().join("\n"));
     }
 
     #[test]

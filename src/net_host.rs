@@ -187,7 +187,7 @@ fn shoot(commands: &mut Commands, host: &mut Host, shooter: u8, target: u32, map
         return;
     }
     // Anything in the way: the land, or something solid.
-    let blocked = map.is_some_and(|m| surface_hit(m, muzzle, chest).is_some()) || colliders.is_some_and(|c| c.segment_hit(muzzle, chest).is_some());
+    let blocked = map.is_some_and(|m| surface_hit(m, muzzle, chest).is_some()) || colliders.is_some_and(|c| c.sight_hit(muzzle, chest).is_some());
     let hit_chance = HIT_NEAR + (HIT_FAR - HIT_NEAR) * (distance / SHOT_RANGE).clamp(0.0, 1.0);
     let hit = !blocked && host.roll() < hit_chance;
     let mut end = chest;

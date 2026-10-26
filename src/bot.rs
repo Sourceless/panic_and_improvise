@@ -232,7 +232,7 @@ impl Bot {
             .filter_map(|z| {
                 let chest = Vec3::new(z.x, z.y + AIM_HEIGHT, z.z);
                 let distance = eye.distance(chest);
-                let clear = surface_hit(map, eye, chest).is_none() && colliders.segment_hit(eye, chest).is_none();
+                let clear = surface_hit(map, eye, chest).is_none() && colliders.sight_hit(eye, chest).is_none();
                 (distance <= ENGAGE && clear).then_some((distance, *z))
             })
             .min_by(|a, b| a.0.total_cmp(&b.0))

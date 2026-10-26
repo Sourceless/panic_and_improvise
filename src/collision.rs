@@ -24,6 +24,11 @@ pub const MANTLE_REACH: f32 = 1.8;
 /// How tall the body is, for passing under things: a solid whose underside is higher than this above
 /// the feet (a ceiling, a lintel) is walked beneath.
 pub const BODY_HEIGHT: f32 = 1.75;
+/// A hung solid whose underside is within this of the head is already up against it (and not
+/// something the head has just gone into).
+const HEAD_SLACK: f32 = 0.02;
+/// How far below an underside the head is stopped.
+const HEAD_GAP: f32 = 0.001;
 /// How far beyond the body a hand can reach out to grab an edge.
 const ARM: f32 = 0.35;
 /// How far past the edge of something a person standing on it can have their middle before they
@@ -50,6 +55,8 @@ pub enum Material {
     Leaves,
     /// Sheds.
     Metal,
+    /// Window panes: a bullet breaks one and goes on, and so does someone running into it.
+    Glass,
 }
 
 /// A shape on the ground plane.
@@ -301,6 +308,8 @@ pub struct SolidHit {
     /// The way the surface faces there.
     pub normal: Vec3,
     pub material: Material,
+    /// Which solid it was (see `Colliders::add`).
+    pub solid: u32,
 }
 
 /// Every solid in the world.
@@ -365,7 +374,8 @@ impl Colliders {
         self.canopies.len()
     }
 
-    pub fn add(&mut self, solid: Solid) {
+    /// Adds a solid, and says which it is: the number to take it away by again.
+    pub fn add(&mut self, solid: Solid) -> u32 {
         let id = self.solids.len() as u32;
         let (lo, hi) = solid.shape.bounds();
         let (filed_lo, filed_hi) = (lo - Vec2::splat(FILE_MARGIN), hi + Vec2::splat(FILE_MARGIN));
@@ -376,33 +386,77 @@ impl Colliders {
         }
         self.bounds.push((lo, hi));
         self.solids.push(solid);
+        id
+    }
+
+    /// Takes a solid away (a pane that has been broken). The others keep their numbers.
+    pub fn remove(&mut self, id: u32) {
+        let Some(&(lo, hi)) = self.bounds.get(id as usize) else { return };
+        let (filed_lo, filed_hi) = (lo - Vec2::splat(FILE_MARGIN), hi + Vec2::splat(FILE_MARGIN));
+        for bz in (filed_lo.y / self.bucket).floor() as i32..=(filed_hi.y / self.bucket).floor() as i32 {
+            for bx in (filed_lo.x / self.bucket).floor() as i32..=(filed_hi.x / self.bucket).floor() as i32 {
+                if let Some(ids) = self.buckets.get_mut(&(bx, bz)) {
+                    ids.retain(|&other| other != id);
+                }
+            }
+        }
+    }
+
+    /// The pane of glass within `reach` of the point `p` (a body's middle, or where a bullet hit), if any.
+    /// With `toward`, only one that lies that way (a body pushing at it).
+    pub fn glass_near(&self, p: Vec3, reach: f32, toward: Option<Vec2>) -> Option<u32> {
+        let flat = Vec2::new(p.x, p.z);
+        self.near_ids(flat, reach)
+            .filter(|&id| {
+                let solid = &self.solids[id as usize];
+                let (distance, away) = solid.shape.separation(flat);
+                solid.material == Material::Glass
+                    && distance <= reach
+                    && p.y >= solid.bottom - reach
+                    && p.y <= solid.top_at(flat) + reach
+                    && toward.is_none_or(|t| away.dot(t) < -0.3)
+            })
+            .min_by(|&a, &b| self.solids[a as usize].shape.separation(flat).0.total_cmp(&self.solids[b as usize].shape.separation(flat).0))
     }
 
     /// The solids that could be within `reach` of `p`: those filed in its square whose bounding
     /// boxes, grown by `reach`, hold the point.
     fn near(&self, p: Vec2, reach: f32) -> impl Iterator<Item = &Solid> {
+        self.near_ids(p, reach).map(|id| &self.solids[id as usize])
+    }
+
+    fn near_ids(&self, p: Vec2, reach: f32) -> impl Iterator<Item = u32> + '_ {
         debug_assert!(reach <= FILE_MARGIN, "lookups can't reach further than solids are filed for");
         self.buckets
             .get(&((p.x / self.bucket).floor() as i32, (p.y / self.bucket).floor() as i32))
             .into_iter()
             .flatten()
-            .filter(move |&&id| {
+            .copied()
+            .filter(move |&id| {
                 let (lo, hi) = self.bounds[id as usize];
                 p.x >= lo.x - reach && p.x <= hi.x + reach && p.y >= lo.y - reach && p.y <= hi.y + reach
             })
-            .map(|&id| &self.solids[id as usize])
     }
 
     /// The first solid that a straight run from `from` to `to` (a bullet's path over a moment) hits,
     /// if any. The solids stand from the ground up to their tops, so a run that stays above one
     /// passes over it; one that comes down onto it from above hits its top.
     pub fn segment_hit(&self, from: Vec3, to: Vec3) -> Option<SolidHit> {
+        self.first_hit(from, to, true)
+    }
+
+    /// The same, for a look rather than a bullet: glass is seen through.
+    pub fn sight_hit(&self, from: Vec3, to: Vec3) -> Option<SolidHit> {
+        self.first_hit(from, to, false)
+    }
+
+    fn first_hit(&self, from: Vec3, to: Vec3, glass_stops: bool) -> Option<SolidHit> {
         // Long runs are looked at a piece at a time, so that every lookup is a short one.
         const PIECE: f32 = 1.5;
         let pieces = ((from.distance(to) / PIECE).ceil() as usize).max(1);
         for i in 0..pieces {
             let (a, b) = (from.lerp(to, i as f32 / pieces as f32), from.lerp(to, (i + 1) as f32 / pieces as f32));
-            if let Some(mut hit) = self.piece_hit(a, b) {
+            if let Some(mut hit) = self.piece_hit(a, b, glass_stops) {
                 hit.t = (i as f32 + hit.t) / pieces as f32;
                 return Some(hit);
             }
@@ -454,12 +508,13 @@ impl Colliders {
         depth
     }
 
-    fn piece_hit(&self, from: Vec3, to: Vec3) -> Option<SolidHit> {
+    fn piece_hit(&self, from: Vec3, to: Vec3, glass_stops: bool) -> Option<SolidHit> {
         let (a, b) = (Vec2::new(from.x, from.z), Vec2::new(to.x, to.z));
         let mut best: Option<SolidHit> = None;
-        for solid in self.near((a + b) * 0.5, (b - a).length() * 0.5 + 0.01) {
+        for id in self.near_ids((a + b) * 0.5, (b - a).length() * 0.5 + 0.01) {
+            let solid = &self.solids[id as usize];
             // A bullet goes through foliage rather than stopping at it (see `foliage_depth`).
-            if solid.material == Material::Leaves {
+            if solid.material == Material::Leaves || (solid.material == Material::Glass && !glass_stops) {
                 continue;
             }
             let Some((t_in, t_out)) = solid.shape.segment_interval(a, b) else { continue };
@@ -493,7 +548,7 @@ impl Colliders {
                     } else {
                         height_at(t)
                     };
-                    best = Some(SolidHit { t, point: Vec3::new(at.x, y, at.y), normal, material: solid.material });
+                    best = Some(SolidHit { t, point: Vec3::new(at.x, y, at.y), normal, material: solid.material, solid: id });
                 }
             }
         }
@@ -557,6 +612,32 @@ impl Colliders {
             .max_by(|a, b| a.0.total_cmp(&b.0))
     }
 
+    /// How high the feet of a body of `radius` over `p` can get in rising from `from` toward `to`: its
+    /// head stops against the underside of anything hung over it (a ceiling, a lintel) that was clear
+    /// of its head until now. (Without this, a jump into a ceiling would be a body inside a solid, and
+    /// be pushed out of it sideways: to the nearest edge of the ceiling, which is the far side of a wall.)
+    pub fn limit_rise(&self, p: Vec2, radius: f32, from: f32, to: f32) -> f32 {
+        if to <= from {
+            return to;
+        }
+        let mut limit = to;
+        for solid in self.near(p, radius) {
+            // Only what hangs above the head, and over the body.
+            if solid.bottom < from + BODY_HEIGHT - HEAD_SLACK || solid.shape.separation(p).0 >= radius {
+                continue;
+            }
+            limit = limit.min(solid.bottom - BODY_HEIGHT - HEAD_GAP);
+        }
+        limit.max(from)
+    }
+
+    /// Whether a body at `p` with its feet at `feet` stands on top of something that stands on the ground (a
+    /// hedge, a wall, a fence, a roof), rather than on a floor hung up in a building: someone there can be
+    /// reached from the ground beside it.
+    pub fn perched(&self, p: Vec2, feet: f32) -> bool {
+        self.near(p, LEDGE).any(|solid| solid.bottom == f32::NEG_INFINITY && solid.shape.separation(p).0 <= LEDGE && (feet - solid.top_at(p)).abs() < 0.15 && solid.top_at(p) > STEP_UP)
+    }
+
     /// Something ahead (in direction `facing`) of a body at `p` that it can climb: its top is more
     /// than `step` above the feet (otherwise it would just be stepped onto) and no more than
     /// `reach` above the `floor` they are over (a jump doesn't lengthen an arm), and close enough
@@ -573,6 +654,14 @@ impl Colliders {
             }
             let land = solid.shape.standing_point(p);
             let mantle = Mantle { land, top: solid.top_at(land) };
+            // Not onto a spot that is inside something taller: a sill with a pane of glass in the window
+            // above it, or a shelf with a ceiling too low to stand under.
+            let blocked = self.near(land, 0.0).any(|other| {
+                !std::ptr::eq(other, solid) && other.shape.separation(land).0 < 0.0 && other.top_at(land) > mantle.top + 0.05 && other.bottom < mantle.top + BODY_HEIGHT
+            });
+            if blocked {
+                continue;
+            }
             if best.is_none_or(|(d, _)| distance < d) {
                 best = Some((distance, mantle));
             }
@@ -996,6 +1085,67 @@ mod tests {
         let mut c = Colliders::default();
         c.add(Solid::rect(Vec2::ZERO, Vec2::splat(5.0), 0.0, 3.2).from(3.0));
         c
+    }
+
+    /// A wall 0.3 thick along x at z = 0 with a window in it: 0.9 m of wall under the sill, and a pane of glass
+    /// from there to 2.05 m, as the buildings make them.
+    fn window_world() -> (Colliders, u32) {
+        let mut c = Colliders::default();
+        c.add(Solid::rect(Vec2::new(0.0, 0.0), Vec2::new(0.6, 0.15), 0.0, 0.9));
+        let pane = c.add(Solid::wall(Vec2::new(-0.6, 0.0), Vec2::new(0.6, 0.0), 0.05, 2.05, 2.05).from(0.9).of(Material::Glass));
+        (c, pane)
+    }
+
+    #[test]
+    fn a_window_with_its_glass_in_cannot_be_climbed_through_and_one_without_can() {
+        let (mut c, pane) = window_world();
+        let from = Vec2::new(0.0, 0.8);
+        assert!(c.mantle_target(from, Vec2::NEG_Y, R, 0.0, 0.0, STEP_UP, MANTLE_REACH).is_none(), "the pane is in the way of the sill");
+        c.remove(pane);
+        let up = c.mantle_target(from, Vec2::NEG_Y, R, 0.0, 0.0, STEP_UP, MANTLE_REACH).expect("a broken window can be climbed through");
+        assert!((up.top - 0.9).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_pane_stops_a_body_and_a_bullet_until_it_is_taken_away_and_is_seen_through_throughout() {
+        let (mut c, pane) = window_world();
+        let waist = Vec2::new(0.0, 0.3);
+        assert!(c.resolve(waist, R, 0.0, STEP_UP).distance(waist) > 0.05, "the window is a wall to a body");
+        let hit = c.segment_hit(Vec3::new(0.0, 1.5, 3.0), Vec3::new(0.0, 1.5, -3.0)).expect("a bullet hits the pane");
+        assert_eq!((hit.material, hit.solid), (Material::Glass, pane));
+        assert!(c.sight_hit(Vec3::new(0.0, 1.5, 3.0), Vec3::new(0.0, 1.5, -3.0)).is_none(), "but a look goes through");
+        assert_eq!(c.glass_near(Vec3::new(0.0, 1.5, 0.2), 0.3, None), Some(pane));
+        assert_eq!(c.glass_near(Vec3::new(0.0, 1.5, 0.2), 0.3, Some(Vec2::Y)), None, "a body pushing the other way is not pushing at it");
+        assert_eq!(c.glass_near(Vec3::new(0.0, 1.5, 0.2), 0.3, Some(Vec2::NEG_Y)), Some(pane));
+        assert_eq!(c.glass_near(Vec3::new(0.0, 0.3, 0.2), 0.3, None), None, "a body at the sill's height is beside the wall, not the glass");
+        c.remove(pane);
+        assert!(c.segment_hit(Vec3::new(0.0, 1.5, 3.0), Vec3::new(0.0, 1.5, -3.0)).is_none());
+        assert_eq!(c.glass_near(Vec3::new(0.0, 1.5, 0.2), 0.3, None), None);
+    }
+
+    #[test]
+    fn a_head_stops_against_a_ceiling_it_rises_into_instead_of_being_thrown_out() {
+        let c = with_ceiling();
+        let middle = Vec2::new(0.0, 0.0);
+        let free = c.limit_rise(middle, R, 0.0, 0.5);
+        assert_eq!(free, 0.5, "a short rise is fine");
+        let capped = c.limit_rise(middle, R, 0.0, 2.0);
+        assert!(capped < 2.0 && capped > 0.0, "{capped}");
+        assert_eq!(c.resolve(middle, R, capped, STEP_UP), middle, "and at that height nothing pushes");
+        assert_eq!(c.limit_rise(middle, R, 1.0, 0.4), 0.4, "falling is not limited");
+        assert_eq!(c.limit_rise(Vec2::new(40.0, 40.0), R, 0.0, 2.0), 2.0, "out in the open there is nothing above");
+    }
+
+    #[test]
+    fn someone_on_a_hedge_is_perched_and_someone_on_a_floor_up_a_building_is_not() {
+        let hedge = world(&[Solid::wall(Vec2::new(-5.0, 0.0), Vec2::new(5.0, 0.0), 0.6, 1.5, 1.5).of(Material::Leaves)]);
+        assert!(hedge.perched(Vec2::ZERO, 1.5));
+        assert!(!hedge.perched(Vec2::ZERO, 0.0), "beside it is not on it");
+        assert!(!hedge.perched(Vec2::new(0.0, 4.0), 1.5));
+        let floor_up = world(&[Solid::rect(Vec2::ZERO, Vec2::splat(4.0), 0.0, 3.0).from(2.8)]);
+        assert!(!floor_up.perched(Vec2::ZERO, 3.0));
+        let ground = world(&[Solid::rect(Vec2::ZERO, Vec2::splat(4.0), 0.0, 0.1)]);
+        assert!(!ground.perched(Vec2::ZERO, 0.1), "a floor at the ground is just the ground");
     }
 
     #[test]

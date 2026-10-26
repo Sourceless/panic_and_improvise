@@ -246,6 +246,8 @@ fn auto_screenshot(
     mut inventory: ResMut<crate::inventory::Inventory>,
     mut screen: ResMut<crate::inventory_ui::InventoryScreen>,
     mut menu: ResMut<crate::menu::Menu>,
+    colliders: Option<Res<crate::collision::Colliders>>,
+    mut impacts: MessageWriter<crate::impact::Impact>,
     mut exit: MessageWriter<AppExit>,
 ) {
     *frame += 1;
@@ -302,6 +304,15 @@ fn auto_screenshot(
     }
     // The world takes a while to build and stream in, so shoot well after startup.
     let first: u32 = std::env::var("FPS_SHOT_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(900);
+    // FPS_BREAK_WINDOWS=1 shoots the glass in the middle of the view a little before the picture is taken.
+    if *frame + 30 == first && std::env::var("FPS_BREAK_WINDOWS").is_ok() {
+        if let (Some(colliders), Ok((transform, _))) = (&colliders, camera.single()) {
+            let forward = transform.forward().as_vec3();
+            if let Some(hit) = colliders.segment_hit(transform.translation, transform.translation + forward * 25.0).filter(|h| h.material == crate::collision::Material::Glass) {
+                impacts.write(crate::impact::Impact { position: hit.point, normal: hit.normal, surface: crate::impact::Surface::Solid(crate::collision::Material::Glass), speed: 400.0, target: None });
+            }
+        }
+    }
     if *frame == first {
         commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path.0.clone()));
     }

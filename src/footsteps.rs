@@ -56,7 +56,7 @@ pub fn surface_under(p: Vec2, feet: f32, map: &TerrainMap, zones: Option<&ZoneMa
             return match material {
                 Material::Wood => Surface::Wood,
                 Material::Leaves => Surface::Grass,
-                Material::Stone | Material::Metal => Surface::Stone,
+                Material::Stone | Material::Metal | Material::Glass => Surface::Stone,
             };
         }
     }

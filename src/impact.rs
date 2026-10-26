@@ -233,6 +233,8 @@ pub enum ChipKind {
     Leaf,
     Spark,
     Droplet,
+    /// Slivers of glass.
+    Glass,
 }
 
 /// Which recordings a thump is picked from.
@@ -243,6 +245,8 @@ pub enum ThumpKind {
     Stone,
     Metal,
     Splash,
+    /// Glass makes its own noise when it breaks (see `windows`), so a bullet's thump on it is nothing.
+    Glass,
 }
 
 /// Everything about what a bullet does on one kind of surface.
@@ -347,6 +351,17 @@ pub fn look(surface: Surface, y: f32) -> Look {
             pitch: (1.2, 1.4),
             volume: 0.4,
         },
+        Surface::Solid(Material::Glass) => Look {
+            hole: None,
+            hole_size: (0.0, 0.0),
+            chip: ChipKind::Glass,
+            chips: (14.0, 22.0),
+            puffs: 0,
+            dust: Color::NONE,
+            thump: ThumpKind::Glass,
+            pitch: (1.0, 1.0),
+            volume: 1.0,
+        },
         Surface::Solid(Material::Metal) => Look {
             hole: Some(HoleStyle::Metal),
             hole_size: (0.05, 0.08),
@@ -391,6 +406,7 @@ impl ImpactAssets {
             ThumpKind::Stone => &self.stone_sounds,
             ThumpKind::Metal => &self.metal_sounds,
             ThumpKind::Splash => &self.splash_sounds,
+            ThumpKind::Glass => &[],
         }
     }
 }
@@ -505,6 +521,7 @@ fn load_assets(
         (ChipKind::Leaf, matte(Color::srgb(0.22, 0.38, 0.1))),
         // Sparks glow: lit by nothing, bright enough to bloom.
         (ChipKind::Spark, StandardMaterial { base_color: Color::linear_rgb(30.0, 16.0, 3.0), unlit: true, ..default() }),
+        (ChipKind::Glass, StandardMaterial { base_color: Color::srgba(0.8, 0.9, 0.95, 0.55), alpha_mode: AlphaMode::Blend, perceptual_roughness: 0.05, reflectance: 0.8, ..default() }),
         (
             ChipKind::Droplet,
             StandardMaterial { base_color: Color::srgba(0.85, 0.92, 0.96, 0.8), alpha_mode: AlphaMode::Blend, perceptual_roughness: 0.2, ..default() },

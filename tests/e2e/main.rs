@@ -351,7 +351,9 @@ fn drive(world: &mut World) {
             Command::SetWind { heading, speed } => {
                 *world.resource_mut::<fps_prototype::wind::Wind>() = fps_prototype::wind::Wind { heading, speed };
             }
-            Command::AddSolid(solid) => world.resource_mut::<fps_prototype::collision::Colliders>().add(solid),
+            Command::AddSolid(solid) => {
+                world.resource_mut::<fps_prototype::collision::Colliders>().add(solid);
+            }
             Command::AddCanopy(canopy) => world.resource_mut::<fps_prototype::collision::Colliders>().add_canopy(canopy),
             Command::RemoveDummies => {
                 let dummies: Vec<Entity> = world.query_filtered::<Entity, With<TargetDummy>>().iter(world).collect();

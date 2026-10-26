@@ -58,6 +58,9 @@ pub const HEADSHOT: f32 = 2.0;
 /// for the blow to reach.
 const STRIKE_REACH: f32 = 1.6;
 const STRIKE_BELOW_EYE: (f32, f32) = (0.2, 2.6);
+/// The same, for someone stood up on a hedge or a wall: a zombie below reaches up for their legs, so their feet
+/// can be this much higher than a zombie's head and arms can reach (the eye is 1.7 m above the feet).
+const STRIKE_BELOW_EYE_PERCHED: f32 = 1.7 + 2.2;
 /// How near the player has to be to be noticed whatever is in the way, and how far away if seen.
 const NOTICE_NEAR: f32 = 6.0;
 const NOTICE_SIGHT: f32 = 35.0;
@@ -279,7 +282,7 @@ impl<'a> Sight<'a> {
 
     /// Whether the land, or something solid, or a good deal of foliage, is between the eye and `to`.
     pub fn blocked(&self, to: Vec3) -> bool {
-        surface_hit(self.map, self.eye, to).is_some() || self.colliders.segment_hit(self.eye, to).is_some() || self.colliders.foliage_depth(self.eye, to) > 0.6
+        surface_hit(self.map, self.eye, to).is_some() || self.colliders.sight_hit(self.eye, to).is_some() || self.colliders.foliage_depth(self.eye, to) > 0.6
     }
 
     /// Whether any of a zombie standing with its feet at `base` and `scale` times a walker's height can be
@@ -576,6 +579,15 @@ struct Target {
     /// Where their feet are, and their eyes.
     feet: Vec3,
     eye: Vec3,
+    /// Whether they are up on something that stands on the ground: a hedge, a wall, a roof.
+    perched: bool,
+}
+
+/// Whether a blow from a zombie of `scale` times a walker's size reaches someone whose eye is `below_eye` above its
+/// feet.
+fn reaches_up_to(below_eye: f32, scale: f32, perched: bool) -> bool {
+    let most = if perched { STRIKE_BELOW_EYE_PERCHED } else { STRIKE_BELOW_EYE.1 };
+    (STRIKE_BELOW_EYE.0..=most + scale - 1.0).contains(&below_eye)
 }
 
 /// How much nearer than another a target has to be for a zombie to give up the one it is after for it.
@@ -619,11 +631,12 @@ pub(crate) fn move_zombies(
     let dt = time.delta_secs();
     // The player at the keyboard, and any who have joined and are on their feet.
     let eye = eye.translation();
-    let mut targets = vec![Target { who: THE_PLAYER, feet: Vec3::new(eye.x, cam.floor + cam.air_height, eye.z), eye }];
+    let player_feet = Vec3::new(eye.x, cam.floor + cam.air_height, eye.z);
+    let mut targets = vec![Target { who: THE_PLAYER, feet: player_feet, eye, perched: colliders.perched(Vec2::new(eye.x, eye.z), player_feet.y) }];
     if let Some(host) = &host {
         targets.extend(host.lobby.clients.iter().filter(|c| c.alive()).map(|c| {
             let feet = Vec3::new(c.state.x, c.state.y, c.state.z);
-            Target { who: c.id, feet, eye: feet + Vec3::Y * crate::net::EYE_HEIGHT }
+            Target { who: c.id, feet, eye: feet + Vec3::Y * crate::net::EYE_HEIGHT, perched: colliders.perched(Vec2::new(feet.x, feet.z), feet.y) }
         }));
     }
     let mut routes_left = ROUTES_PER_FRAME;
@@ -642,13 +655,13 @@ pub(crate) fn move_zombies(
         if zombie.look_in <= 0.0 {
             zombie.look_in = LOOK_EVERY;
             let head = feet + Vec3::Y * 1.6 * t.scale;
-            zombie.sees_player = head.distance(target.eye) < NOTICE_SIGHT && surface_hit(&map, head, target.eye).is_none() && colliders.segment_hit(head, target.eye).is_none();
+            zombie.sees_player = head.distance(target.eye) < NOTICE_SIGHT && surface_hit(&map, head, target.eye).is_none() && colliders.sight_hit(head, target.eye).is_none();
         }
         let aim = steer(&mut zombie, feet, target.feet, dt, &mut routes_left, &map, &colliders, &mut dice);
         let velocity = velocity(&mut zombie, at, goal, aim, dt, || dice.unit());
         // Close enough, and not far above or below them, it hits them.
         let below_eye = target.eye.y - feet.y;
-        let within_reach = zombie.following && at.distance(goal) <= STRIKE_REACH * t.girth.max(1.0) && (STRIKE_BELOW_EYE.0..=STRIKE_BELOW_EYE.1 + t.scale - 1.0).contains(&below_eye);
+        let within_reach = zombie.following && at.distance(goal) <= STRIKE_REACH * t.girth.max(1.0) && reaches_up_to(below_eye, t.scale, target.perched);
         if strikes(&mut zombie, within_reach, dt) {
             if target.who == THE_PLAYER {
                 health.hurt(t.strike_damage);
@@ -1017,6 +1030,17 @@ mod tests {
         assert_eq!(hit_damage(25.0, Vec3::new(0.0, 2.2, 0.0), Brute), 50.0);
         assert_eq!(hit_damage(25.0, Vec3::new(0.0, 1.6, 0.0), Brute), 25.0, "that is its chest");
         assert_eq!(hit_damage(25.0, Vec3::new(0.0, 1.4, 0.0), Runner), 50.0);
+    }
+
+    #[test]
+    fn a_zombie_reaches_up_to_someone_on_a_hedge_but_not_through_a_ceiling() {
+        // Eyes 1.7 m above the feet: on the ground, on a hedge 1.5 m up, on a wall 2 m up, and a floor 3 m up.
+        for (feet_up, perched, hit) in [(0.0, false, true), (0.5, false, true), (1.5, false, false), (1.5, true, true), (2.0, true, true), (2.6, true, false), (3.0, false, false)] {
+            assert_eq!(reaches_up_to(feet_up + 1.7, 1.0, perched), hit, "feet {feet_up} m up, perched {perched}");
+        }
+        assert!(!reaches_up_to(0.0, 1.0, true), "nor does it hit someone below its feet");
+        assert!(reaches_up_to(2.0 + 1.7, 1.4, false) || reaches_up_to(2.0 + 1.7, 1.4, true), "a brute reaches higher");
+        assert!(reaches_up_to(2.6 + 1.7, 1.4, true) && !reaches_up_to(2.6 + 1.7, 1.0, true));
     }
 
     #[test]

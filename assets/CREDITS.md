@@ -88,3 +88,9 @@ and are not included in this repository or in the game.
 [Different steps on wood, stone, leaves, gravel and mud](https://opengameart.org/content/different-steps-on-wood-stone-leaves-gravel-and-mud) (TinyWorlds),
 [Fantozzi's Footsteps (Grass/Sand & Stone)](https://opengameart.org/content/fantozzis-footsteps-grasssand-stone) (Fantozzi, via qubodup) and
 [Water Splash and sand footsteps](https://opengameart.org/content/water-splash-and-sand-footsteps) (Peludo).
+
+## Breaking glass
+
+`sounds/glass/*.wav` are cut by `tools/make_glass_sounds.py` (trimmed, faded, a high-pass and levelled; nothing is synthesised) from two CC0 recordings on OpenGameArt:
+[75 CC0 breaking / falling / hit sfx](https://opengameart.org/content/75-cc0-breaking-falling-hit-sfx) (`glass_breaking_01`, `02`, `03`, `04`, `05`, `06`, `glass_falling_01`) and
+[Glass break](https://opengameart.org/content/glass-break) (Till Behrend, uploaded by TinyWorlds; `break_4.wav`).

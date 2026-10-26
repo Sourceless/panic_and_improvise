@@ -14,6 +14,8 @@ const SPRINT_MULTIPLIER: f32 = 1.8;
 const GRAVITY: f32 = 22.0;
 /// Launch speed of a jump: with the gravity above, about 1.1 m high and 0.64 s in the air.
 const JUMP_SPEED: f32 = 7.0;
+/// How high a jump goes, metres.
+pub const JUMP_HEIGHT: f32 = JUMP_SPEED * JUMP_SPEED / (2.0 * GRAVITY);
 /// How quickly (per second) the player's speed catches up with what the keys ask for, on the
 /// ground and in the air. In the air momentum mostly carries on, so you can't turn on a dime.
 const GROUND_RESPONSE: f32 = 14.0;
@@ -503,6 +505,7 @@ pub(crate) fn player_movement(
     terrain: Res<TerrainMap>,
     colliders: Option<Res<Colliders>>,
     aim: Res<AimBlend>,
+    mut bump: Option<ResMut<crate::windows::Bump>>,
     mut query: Query<(&mut Transform, &mut FpsCamera)>,
 ) {
     let Ok((mut transform, mut cam)) = query.single_mut() else {
@@ -612,7 +615,7 @@ pub(crate) fn player_movement(
         }
     }
 
-    let state = step_movement(
+    let mut state = step_movement(
         MoveState { velocity: cam.velocity, air_height: cam.air_height, vertical_speed: cam.vertical_speed },
         intent,
         dt,
@@ -620,8 +623,19 @@ pub(crate) fn player_movement(
 
     // Move, and get out of whatever that moved the player into.
     let wanted = (here + state.velocity * dt).clamp(Vec2::splat(-MAP_HALF_SIZE), Vec2::splat(MAP_HALF_SIZE));
+    // A jump stops with the head against a ceiling (or a lintel), rather than going into it and being thrown aside.
+    let was = cam.floor + cam.air_height;
+    let rise = colliders.limit_rise(wanted, PLAYER_RADIUS, was, cam.floor + state.air_height);
+    if rise < cam.floor + state.air_height {
+        state.air_height = rise - cam.floor;
+        state.vertical_speed = state.vertical_speed.min(0.0);
+    }
     let feet = cam.floor + state.air_height;
     let pos = colliders.resolve(wanted, PLAYER_RADIUS, feet, STEP_UP).clamp(Vec2::splat(-MAP_HALF_SIZE), Vec2::splat(MAP_HALF_SIZE));
+    if let Some(bump) = bump.as_deref_mut() {
+        // What was pushed at and not got through, for the glass to break if that is what it was.
+        bump.0 = (pos.distance_squared(wanted) > 1e-8).then(|| crate::windows::Pushed { at: pos, feet, into: (wanted - pos).normalize_or_zero(), speed: state.velocity.length() });
+    }
     cam.velocity = if pos.distance_squared(wanted) > 1e-8 {
         // Blocked: keep only the movement that happened (so a wall takes the speed out of a run).
         ((pos - here) / dt.max(1e-4)).clamp_length_max(state.velocity.length())

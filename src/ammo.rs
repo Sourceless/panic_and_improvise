@@ -97,7 +97,9 @@ impl Build {
             Build::Full => 1.0,
             Build::Expanding => 1.3,
             Build::Piercing => 0.8,
-            Build::Shot => 1.0,
+            // Pellets stop in the body and give up all they have, where a rifle bullet goes through with half of
+            // it; and a load is nine wounds in one place.
+            Build::Shot => 2.2,
             Build::Slug => 1.0,
         }
     }
@@ -184,7 +186,38 @@ mod tests {
     fn a_shotgun_at_point_blank_is_deadly_and_loses_it_with_distance_by_scatter() {
         let buck = AmmoKind::Buckshot.def();
         assert!(buck.damage_at_muzzle() > 100.0, "nine pellets together: {}", buck.damage_at_muzzle());
-        assert!(buck.damage_at(buck.cartridge.muzzle_velocity) < 25.0, "one pellet alone is not much");
+        assert!(buck.damage_at(buck.cartridge.muzzle_velocity) < 40.0, "one pellet alone is not much");
+    }
+
+    /// What one pellet of a load of buck does arriving `range` metres on, flying level.
+    fn pellet_at(range: f32) -> (f32, f32) {
+        use crate::ballistics::{step, Flight};
+        use bevy::prelude::Vec3;
+        let def = AmmoKind::Buckshot.def();
+        let mut flight = Flight { position: Vec3::ZERO, velocity: Vec3::NEG_Z * def.cartridge.muzzle_velocity };
+        while -flight.position.z < range {
+            flight = step(&def.cartridge, flight, Vec3::ZERO, 0.002);
+        }
+        let speed = flight.velocity.length();
+        (speed, def.damage_at(speed))
+    }
+
+    #[test]
+    fn a_load_of_buck_kills_a_walker_close_and_a_brute_in_a_few_and_thins_out_with_range() {
+        let buck = AmmoKind::Buckshot.def();
+        let (walker, brute) = (crate::zombie::ZombieKind::Walker.traits().health, crate::zombie::ZombieKind::Brute.traits().health);
+        // Hitting with every pellet is the most there is; at ten metres, say two in three land.
+        assert!(buck.damage_at_muzzle() > walker * 1.6, "a full load is {} against a walker's {walker}", buck.damage_at_muzzle());
+        let (ten_speed, ten) = pellet_at(10.0);
+        assert!(ten * 6.0 > walker, "six pellets at 10 m ({ten_speed:.0} m/s) do {}", ten * 6.0);
+        let (_, forty) = pellet_at(40.0);
+        assert!(forty < ten * 0.85, "shot is slowed: {forty} at 40 m against {ten} at 10");
+        let blasts = (brute / (buck.damage_at_muzzle() * 0.8)).ceil();
+        assert!(blasts <= 3.0, "{blasts} point-blank shells for a brute");
+        for range in [0.0, 5.0, 10.0, 20.0, 30.0, 40.0] {
+            let (speed, damage) = pellet_at(range);
+            eprintln!("{range:>4} m: {speed:>4.0} m/s, {damage:>5.1} a pellet, {:>5.1} a load", damage * 9.0);
+        }
     }
 
     #[test]

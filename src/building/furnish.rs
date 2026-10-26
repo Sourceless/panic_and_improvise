@@ -889,7 +889,7 @@ mod tests {
     use super::*;
 
     fn with_ctx<R>(room: Rect, seed: f32, f: impl FnOnce(&mut Ctx) -> R) -> R {
-        let mut model = Model { items: Vec::new(), lights: Vec::new(), loot: Vec::new() };
+        let mut model = Model { items: Vec::new(), lights: Vec::new(), loot: Vec::new(), panes: Vec::new() };
         let mut rng = Rng::from_position(Vec2::new(seed, 3.5));
         let mut ctx = Ctx { model: &mut model, clear: room, avoid: &[], taken: Vec::new(), tops: Vec::new(), floor: 0.0, height: 2.6, rng: &mut rng };
         f(&mut ctx)

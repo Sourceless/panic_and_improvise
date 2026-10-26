@@ -89,6 +89,8 @@ const RELOAD_LOWER_TIME: f32 = 0.45;
 /// enough to be right off the bottom of the screen.
 const RELOAD_DROP: f32 = 0.6;
 const RELOAD_TIP: f32 = -0.6;
+/// How much of its speed a bullet keeps going through a pane of glass.
+const GLASS_SLOWING: f32 = 0.9;
 /// A bullet that hasn't hit anything by now is long gone.
 const BULLET_LIFETIME: f32 = 5.0;
 /// How finely a bullet's flight is stepped, seconds (a frame is cut into steps this long or shorter).
@@ -1114,7 +1116,7 @@ fn play_gun_sounds(mut commands: Commands, mut guns: Query<&mut Gun>, sounds: Re
     }
 }
 
-fn move_bullets(
+pub(crate) fn move_bullets(
     mut commands: Commands,
     time: Res<Time>,
     wind: Res<Wind>,
@@ -1196,6 +1198,13 @@ fn move_bullets(
                             goes_on = true;
                         }
                     }
+                }
+                // Glass breaks and the bullet goes on through it, a little slower.
+                if impact.target.is_none() && impact.surface == Surface::Solid(crate::collision::Material::Glass) {
+                    let heading = flight.velocity.normalize_or(Vec3::NEG_Z);
+                    flight.velocity = heading * speed * GLASS_SLOWING;
+                    flight.position = impact.position + heading * (2.0 * crate::building::geom::PANE_HALF_SOLID + 0.02);
+                    goes_on = true;
                 }
                 impacts.write(impact);
                 if goes_on {

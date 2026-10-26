@@ -35,6 +35,16 @@ struct Entry {
     interior: Option<Entity>,
     /// The lamps lit inside, while the player is near.
     lamps: Vec<Entity>,
+    /// The glass of its windows, if it has any: the mesh it is drawn as, and what is broken.
+    glass: Option<Glass>,
+}
+
+struct Glass {
+    entity: Entity,
+    mesh: Handle<Mesh>,
+    /// The collider of each pane, and whether it has been broken.
+    solids: Vec<u32>,
+    broken: Vec<bool>,
 }
 
 /// Every building's model, for building and removing the insides as the player comes and goes.
@@ -54,6 +64,7 @@ pub struct SettlementPlugin;
 
 impl Plugin for SettlementPlugin {
     fn build(&self, app: &mut App) {
+        app.add_plugins(crate::windows::WindowsPlugin);
         app.add_systems(Update, stream_interiors);
     }
 }
@@ -98,14 +109,62 @@ pub fn spawn_settlements(
         for solid in model.solids(origin, b.yaw) {
             colliders.add(solid);
         }
+        let pane_solids: Vec<u32> = model.pane_solids(origin, b.yaw).into_iter().map(|solid| colliders.add(solid)).collect();
         let at = Transform::from_translation(origin).with_rotation(Quat::from_rotation_y(b.yaw));
         commands.spawn((SettlementRoot, Mesh3d(meshes.add(model.bake(Layer::Shell))), MeshMaterial3d(material.clone()), at));
-        if model.has(Layer::Glass) {
-            commands.spawn((SettlementRoot, Mesh3d(meshes.add(model.bake(Layer::Glass))), MeshMaterial3d(glass.clone()), at, bevy::light::NotShadowCaster));
-        }
-        entries.push(Entry { origin, yaw: b.yaw, model: Arc::new(model), interior: None, lamps: Vec::new() });
+        let panes = if model.has(Layer::Glass) {
+            let mesh = meshes.add(model.bake(Layer::Glass));
+            let entity = commands.spawn((SettlementRoot, Mesh3d(mesh.clone()), MeshMaterial3d(glass.clone()), at, bevy::light::NotShadowCaster)).id();
+            let broken = vec![false; pane_solids.len()];
+            Some(Glass { entity, mesh, solids: pane_solids, broken })
+        } else {
+            None
+        };
+        entries.push(Entry { origin, yaw: b.yaw, model: Arc::new(model), interior: None, lamps: Vec::new(), glass: panes });
     }
     commands.insert_resource(Buildings { entries, material, since_look: 1.0 });
+}
+
+impl Buildings {
+    /// Breaks the pane whose collider is `solid`, if it is one: the glass stops being drawn. Says where the
+    /// pane was (its middle, and which way it faces) if it was still whole.
+    pub fn break_pane(&mut self, solid: u32, meshes: &mut Assets<Mesh>, commands: &mut Commands) -> Option<(Vec3, Vec3)> {
+        for entry in &mut self.entries {
+            let Some(glass) = &mut entry.glass else { continue };
+            let Some(i) = glass.solids.iter().position(|&s| s == solid) else { continue };
+            if glass.broken[i] {
+                return None;
+            }
+            glass.broken[i] = true;
+            if glass.broken.iter().all(|&b| b) {
+                commands.entity(glass.entity).despawn();
+            } else if let Some(mut mesh) = meshes.get_mut(&glass.mesh) {
+                *mesh = entry.model.bake_glass(&glass.broken);
+            }
+            let pane = entry.model.panes[i];
+            let turn = Quat::from_rotation_y(entry.yaw);
+            let normal = turn * if pane.along_x { Vec3::Z } else { Vec3::X };
+            return Some((entry.origin + turn * pane.centre, normal));
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+impl Buildings {
+    /// A building that is only a wall of windows along x at z = 0 with a pane 1.2 m wide, sill 0.9 m, head 2.1 m;
+    /// added to the world. Returns the pane's collider.
+    pub(crate) fn add_one_window(world: &mut World) -> u32 {
+        let mut model = Model::default();
+        model.pane(Vec3::new(0.0, 1.5, 0.0), true, 1.2, 1.2, [0.5; 3]);
+        let solid = world.resource_mut::<Colliders>().add(model.pane_solids(Vec3::ZERO, 0.0).remove(0));
+        let mesh = world.resource_mut::<Assets<Mesh>>().add(model.bake(Layer::Glass));
+        let entity = world.spawn(SettlementRoot).id();
+        let glass = Glass { entity, mesh, solids: vec![solid], broken: vec![false] };
+        let entry = Entry { origin: Vec3::ZERO, yaw: 0.0, model: Arc::new(model), interior: None, lamps: Vec::new(), glass: Some(glass) };
+        world.insert_resource(Buildings { entries: vec![entry], material: Handle::default(), since_look: 0.0 });
+        solid
+    }
 }
 
 /// Builds the insides of the buildings the player is near, and takes them away from those they have left.
