@@ -105,6 +105,8 @@ pub fn build(kind: WeaponKind) -> GunModel {
         WeaponKind::L42 => l42(),
         WeaponKind::Auto5 => auto5(),
         WeaponKind::LeeEnfield => lee_enfield(),
+        WeaponKind::Revolver => revolver(),
+        WeaponKind::DoubleBarrel => double_barrel(),
     }
 }
 
@@ -358,6 +360,73 @@ fn auto5() -> GunModel {
     finish_model(spec, vec![(Finish::Metal, metal), (Finish::Black, black), (Finish::Dark, dark), (Finish::Wood, wood)])
 }
 
+/// The Webley Mk VI: a break-top revolver with a 6 inch barrel, a fluted cylinder in a solid frame under a top strap,
+/// the hammer behind, a hooked grip of dark wood, a blade at the muzzle.
+fn revolver() -> GunModel {
+    let (mut metal, mut dark, mut wood) = (Parts::default(), Parts::default(), Parts::default());
+    // The barrel, with a collar at the frame and the blade sight at the muzzle.
+    barrel(&mut metal, 0.0, -0.236, -0.07, 0.0085);
+    barrel(&mut metal, 0.0, -0.09, -0.07, 0.0115);
+    slab(&mut metal, Vec3::new(0.0, 0.0195, -0.228), Vec3::new(0.004, 0.022, 0.008));
+    // The frame, the top strap over the cylinder and the rear sight in it.
+    slab(&mut metal, Vec3::new(0.0, -0.014, 0.0), Vec3::new(0.03, 0.066, 0.1));
+    slab(&mut metal, Vec3::new(0.0, 0.0335, -0.045), Vec3::new(0.014, 0.01, 0.15));
+    slab(&mut metal, Vec3::new(0.0, 0.0365, 0.022), Vec3::new(0.016, 0.006, 0.012));
+    slab(&mut dark, Vec3::new(0.0, 0.0395, 0.022), Vec3::new(0.004, 0.002, 0.012));
+    // The cylinder, with the dark mouths of its six chambers in front.
+    barrel(&mut metal, -0.004, -0.092, -0.01, 0.0285);
+    for k in 0..6 {
+        let a = k as f32 * std::f32::consts::TAU / 6.0;
+        dark.add_tube(Vec3::new(a.sin() * 0.0165, -0.004 + a.cos() * 0.0165, -0.0922), 0.0052, 0.004, 10, NONE);
+    }
+    // The hinge under the barrel, and the latch on top at the back of the frame.
+    slab(&mut metal, Vec3::new(0.0, -0.034, -0.1), Vec3::new(0.02, 0.016, 0.024));
+    slab(&mut metal, Vec3::new(0.0, 0.0285, 0.034), Vec3::new(0.012, 0.014, 0.02));
+    // The hammer behind and the trigger in its guard.
+    tilted(&mut metal, Vec3::new(0.0, 0.026, 0.056), Vec3::new(0.01, 0.034, 0.014), -0.5);
+    slab(&mut metal, Vec3::new(0.0, -0.054, -0.026), Vec3::new(0.008, 0.005, 0.07));
+    slab(&mut metal, Vec3::new(0.0, -0.044, -0.056), Vec3::new(0.008, 0.026, 0.005));
+    slab(&mut metal, Vec3::new(0.0, -0.034, -0.012), Vec3::new(0.006, 0.02, 0.006));
+    // The grip, hooked back at the heel, with a lanyard ring at the bottom.
+    tilted(&mut wood, Vec3::new(0.0, -0.09, 0.044), Vec3::new(0.033, 0.12, 0.052), 0.38);
+    tilted(&mut wood, Vec3::new(0.0, -0.148, 0.071), Vec3::new(0.034, 0.02, 0.07), 0.38);
+    dark.add_ring(Vec3::new(0.0, -0.158, 0.05), 0.011, 0.007, 0.004, 12, Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+    let spec = ModelSpec { muzzle: Vec3::new(0.0, 0.0, -0.237), sight_x: 0.0, sight_y: 0.0405, rear_z: 0.022, front_z: -0.228, eye_relief: 0.3, right_hand: Vec3::new(0.0, -0.085, 0.044), left_hand: Vec3::new(0.0, -0.12, 0.0) };
+    finish_model(spec, vec![(Finish::Metal, metal), (Finish::Dark, dark), (Finish::Wood, wood)])
+}
+
+/// A side-by-side double-barrelled shotgun: two barrels with a rib between, a flat action with its two hammers, a
+/// fore end of walnut and a straight stock behind two triggers.
+fn double_barrel() -> GunModel {
+    let (mut metal, mut dark, mut wood, mut black) = (Parts::default(), Parts::default(), Parts::default(), Parts::default());
+    // The barrels side by side, a rib along the top between them, the bead at the muzzle.
+    for x in [-0.0125, 0.0125] {
+        metal.add_tube(Vec3::new(x, 0.0, -0.45), 0.0125, 0.54, 18, NONE);
+        dark.add_tube(Vec3::new(x, 0.0, -0.7198), 0.0095, 0.004, 14, NONE);
+    }
+    slab(&mut metal, Vec3::new(0.0, 0.0135, -0.45), Vec3::new(0.012, 0.004, 0.54));
+    slab(&mut metal, Vec3::new(0.0, 0.0245, -0.715), Vec3::new(0.004, 0.021, 0.006));
+    // The action, with the barrels hinged into it, the top lever and two hammers.
+    slab(&mut metal, Vec3::new(0.0, 0.0, -0.1), Vec3::new(0.048, 0.068, 0.2));
+    metal.add_tube(Vec3::new(0.0, -0.024, -0.2), 0.012, 0.046, 12, Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+    slab(&mut metal, Vec3::new(0.0, 0.036, 0.0), Vec3::new(0.008, 0.006, 0.05));
+    for x in [-0.016, 0.016] {
+        tilted(&mut metal, Vec3::new(x, 0.04, 0.02), Vec3::new(0.01, 0.03, 0.012), -0.5);
+    }
+    // The fore end under the barrels.
+    slab(&mut wood, Vec3::new(0.0, -0.03, -0.3), Vec3::new(0.05, 0.036, 0.2));
+    // The guard, with its two triggers, and the stock: a straight wrist, the comb and a rubber pad.
+    slab(&mut metal, Vec3::new(0.0, -0.05, 0.0), Vec3::new(0.008, 0.006, 0.09));
+    for z in [-0.03, 0.0] {
+        slab(&mut metal, Vec3::new(0.0, -0.038, z), Vec3::new(0.006, 0.02, 0.005));
+    }
+    tilted(&mut wood, Vec3::new(0.0, -0.036, 0.1), Vec3::new(0.036, 0.07, 0.1), 0.2);
+    tilted(&mut wood, Vec3::new(0.0, -0.022, 0.31), Vec3::new(0.04, 0.09, 0.38), -0.05);
+    slab(&mut black, Vec3::new(0.0, -0.05, 0.508), Vec3::new(0.044, 0.125, 0.014));
+    let spec = ModelSpec { muzzle: Vec3::new(0.0, 0.0, -0.72), sight_x: 0.0, sight_y: 0.0345, rear_z: -0.012, front_z: -0.715, eye_relief: 0.17, right_hand: Vec3::new(0.0, -0.045, 0.07), left_hand: Vec3::new(0.0, -0.03, -0.3) };
+    finish_model(spec, vec![(Finish::Metal, metal), (Finish::Black, black), (Finish::Dark, dark), (Finish::Wood, wood)])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,7 +457,7 @@ mod tests {
             let spec = model.spec;
             assert!(!model.parts.is_empty(), "{kind:?}");
             assert!(spec.muzzle.z < spec.front_z + 0.02, "{kind:?}: muzzle {} vs front sight {}", spec.muzzle.z, spec.front_z);
-            assert!(spec.front_z < spec.rear_z - 0.25 || kind == WeaponKind::HiPower && spec.front_z < spec.rear_z - 0.15, "{kind:?}: the sights are a sight radius apart");
+            assert!(spec.front_z < spec.rear_z - 0.25 || matches!(kind, WeaponKind::HiPower | WeaponKind::Revolver) && spec.front_z < spec.rear_z - 0.15, "{kind:?}: the sights are a sight radius apart");
             // On the sights both ends of the line of sight are on the camera's axis.
             let at = |p: Vec3| p + spec.aimed_position();
             let (rear, front) = spec.sight_points();
@@ -412,6 +481,8 @@ mod tests {
             (WeaponKind::L42, 1.1, 1.25),
             (WeaponKind::Auto5, 1.0, 1.4),
             (WeaponKind::LeeEnfield, 1.05, 1.2),
+            (WeaponKind::Revolver, 0.25, 0.36),
+            (WeaponKind::DoubleBarrel, 1.0, 1.3),
         ];
         for (kind, low, high) in lengths {
             let model = build(kind);
@@ -437,7 +508,7 @@ mod tests {
 
     #[test]
     fn rifles_have_wood_and_pistols_do_not() {
-        for kind in [WeaponKind::Slr, WeaponKind::Bren, WeaponKind::L42, WeaponKind::LeeEnfield, WeaponKind::Auto5] {
+        for kind in [WeaponKind::Slr, WeaponKind::Bren, WeaponKind::L42, WeaponKind::LeeEnfield, WeaponKind::Auto5, WeaponKind::DoubleBarrel, WeaponKind::Revolver] {
             assert!(build(kind).parts.iter().any(|(f, _)| *f == Finish::Wood), "{kind:?}");
         }
         assert!(!build(WeaponKind::HiPower).parts.iter().any(|(f, _)| *f == Finish::Wood));

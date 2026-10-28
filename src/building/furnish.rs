@@ -231,8 +231,11 @@ fn scatter_loot(c: &mut Ctx, kind: RoomKind, richness: f32) {
     let wanted = boxes_for(loot_count(kind, c.clear.area()), c.rng.unit());
     for _ in 0..wanted {
         let rarity = crate::loot::Rarity::roll(c.rng.unit(), richness);
+        let size = crate::loot::BoxSize::roll(c.rng.unit());
         let on_furniture = c.rng.unit() < 0.75;
-        let suitable: Vec<usize> = (0..c.tops.len()).filter(|&i| c.tops[i].0.width() >= TOP_ROOM && c.tops[i].0.depth() >= TOP_ROOM).collect();
+        // The bigger the box, the more room it and what comes out of it want.
+        let top_room = TOP_ROOM + 0.1 * size as usize as f32;
+        let suitable: Vec<usize> = (0..c.tops.len()).filter(|&i| c.tops[i].0.width() >= top_room && c.tops[i].0.depth() >= top_room).collect();
         let spot = if on_furniture && !suitable.is_empty() {
             let i = suitable[(c.rng.unit() * suitable.len() as f32) as usize % suitable.len()];
             let (r, top) = c.tops[i];
@@ -240,7 +243,7 @@ fn scatter_loot(c: &mut Ctx, kind: RoomKind, richness: f32) {
             c.tops.retain(|(other, _)| !other.overlaps(&r.grown(0.05)));
             let m = r.centre();
             let room = Rect::new(r.x0 + 0.04, r.z0 + 0.04, r.x1 - 0.04, r.z1 - 0.04);
-            Some(LootSpot { at: Vec3::new(m.x, c.floor + top, m.y), rarity, room })
+            Some(LootSpot { at: Vec3::new(m.x, c.floor + top, m.y), rarity, size, room })
         } else {
             // On the floor, in a free spot, with the room it needs round it.
             let mut found = None;
@@ -251,7 +254,7 @@ fn scatter_loot(c: &mut Ctx, kind: RoomKind, richness: f32) {
                 let room = Rect::new(x - FLOOR_ROOM, z - FLOOR_ROOM, x + FLOOR_ROOM, z + FLOOR_ROOM);
                 if c.free(&room) {
                     c.taken.push(room);
-                    found = Some(LootSpot { at: Vec3::new(x, c.floor, z), rarity, room });
+                    found = Some(LootSpot { at: Vec3::new(x, c.floor, z), rarity, size, room });
                     break;
                 }
             }

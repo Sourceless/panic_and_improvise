@@ -129,13 +129,13 @@ fn pick_up(
     };
     if box_first {
         let Some((_, entity, (local, lootbox, parent))) = closed else { return };
-        prompt.looking_at = Some(format!("Military crate  [{}]  open", lootbox.rarity.name()));
+        prompt.looking_at = Some(format!("Military crate  [{} {}]  open", lootbox.size.name(), lootbox.rarity.name()));
         if !controls.just_pressed(Action::Interact, &keys) {
             return;
         }
         let Some(assets) = assets else { return };
         let spot = lootbox.spot;
-        let contents = roll_contents(lootbox.rarity, spot_numbers(spot.0, spot.1));
+        let contents = roll_contents(lootbox.rarity, lootbox.size, spot_numbers(spot.0, spot.1));
         // The crate's floor: it hangs from a point `LIFT` above it.
         let floor = local.translation.y - LIFT;
         let lying = lay_contents(&assets, &lootbox.room, floor, &contents);

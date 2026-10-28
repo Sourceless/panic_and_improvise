@@ -239,7 +239,7 @@ fn stream_interiors(
                             }
                             continue;
                         }
-                        spawn_crate(&mut commands, loot, Some(id), lootspot.at, lootspot.rarity, (index, spot), lootspot.room);
+                        spawn_crate(&mut commands, loot, Some(id), lootspot.at, lootspot.rarity, lootspot.size, (index, spot), lootspot.room);
                     }
                 }
                 entry.interior = Some(id);

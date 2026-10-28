@@ -144,6 +144,7 @@ pub struct LootSpot {
     /// The middle of the underside of the box.
     pub at: Vec3,
     pub rarity: crate::loot::Rarity,
+    pub size: crate::loot::BoxSize,
     /// The part of the surface it stands on that is clear for what falls out of it to lie on.
     pub room: Rect,
 }

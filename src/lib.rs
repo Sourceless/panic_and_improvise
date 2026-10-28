@@ -39,6 +39,7 @@ pub mod params;
 pub mod pickup;
 pub mod range;
 pub mod recorder;
+pub mod reload;
 pub mod recording;
 pub mod perf;
 pub mod player;

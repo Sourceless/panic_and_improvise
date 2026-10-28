@@ -19,10 +19,12 @@ pub enum Caliber {
     Britain,
     /// 12 gauge, 2 3/4 inch.
     Gauge12,
+    /// .455 Webley, the revolver round.
+    Webley,
 }
 
 impl Caliber {
-    pub const ALL: [Caliber; 4] = [Caliber::Nine, Caliber::Nato, Caliber::Britain, Caliber::Gauge12];
+    pub const ALL: [Caliber; 5] = [Caliber::Nine, Caliber::Nato, Caliber::Britain, Caliber::Gauge12, Caliber::Webley];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -30,6 +32,7 @@ impl Caliber {
             Caliber::Nato => "7.62x51mm",
             Caliber::Britain => ".303 British",
             Caliber::Gauge12 => "12 gauge",
+            Caliber::Webley => ".455 Webley",
         }
     }
 }
@@ -40,10 +43,11 @@ pub enum AmmoKind {
     NatoBall,
     BritishBall,
     Buckshot,
+    Webley455,
 }
 
 impl AmmoKind {
-    pub const ALL: [AmmoKind; 4] = [AmmoKind::NineFmj, AmmoKind::NatoBall, AmmoKind::BritishBall, AmmoKind::Buckshot];
+    pub const ALL: [AmmoKind; 5] = [AmmoKind::NineFmj, AmmoKind::NatoBall, AmmoKind::BritishBall, AmmoKind::Buckshot, AmmoKind::Webley455];
 }
 
 /// How a round is made, which decides how it hits.
@@ -100,7 +104,8 @@ impl Build {
             // Pellets stop in the body and give up all they have, where a rifle bullet goes through with half of
             // it; and a load is nine wounds in one place.
             Build::Shot => 2.2,
-            Build::Slug => 1.0,
+            // Lead, big and slow: it spends all it has in the body.
+            Build::Slug => 2.0,
         }
     }
 }
@@ -129,7 +134,7 @@ const fn cartridge(grains: f32, diameter_inches: f32, bc: f32, velocity: f32) ->
 }
 
 /// Every load there is.
-pub const AMMO: [AmmoDef; 4] = [
+pub const AMMO: [AmmoDef; 5] = [
     // One load for each calibre, for now; the Build variants (expanding, piercing, slug, shot) are there
     // for when there are more.
     // 9 x 19: the Sterling and the Hi-Power. The Sterling's barrel is longer, so it gets a little more
@@ -142,6 +147,9 @@ pub const AMMO: [AmmoDef; 4] = [
     AmmoDef { kind: AmmoKind::BritishBall, caliber: Caliber::Britain, name: ".303 British", short: ".303", cartridge: cartridge(174.0, 0.311, 0.42, 744.0), pellets: 1, pellet_spread: 0.0, build: Build::Full, tracer: false, per_stack: 20, colour: [0.6, 0.45, 0.25] },
     // 12 gauge: the Auto-5. Nine pellets of 00 buck.
     AmmoDef { kind: AmmoKind::Buckshot, caliber: Caliber::Gauge12, name: "12 gauge buckshot", short: "Buck", cartridge: cartridge(54.0, 0.33, 0.035, 400.0), pellets: 9, pellet_spread: 0.032, build: Build::Shot, tracer: false, per_stack: 10, colour: [0.7, 0.15, 0.15] },
+    // .455 Webley Mk II: a 265 grain lead bullet at 600 feet a second, from a revolver. Slow and heavy, it stops in the
+    // body and gives it all up.
+    AmmoDef { kind: AmmoKind::Webley455, caliber: Caliber::Webley, name: ".455 Webley", short: ".455", cartridge: cartridge(265.0, 0.455, 0.15, 190.0), pellets: 1, pellet_spread: 0.0, build: Build::Slug, tracer: false, per_stack: 24, colour: [0.45, 0.4, 0.35] },
 ];
 
 impl AmmoKind {

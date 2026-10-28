@@ -94,3 +94,9 @@ and are not included in this repository or in the game.
 `sounds/glass/*.wav` are cut by `tools/make_glass_sounds.py` (trimmed, faded, a high-pass and levelled; nothing is synthesised) from two CC0 recordings on OpenGameArt:
 [75 CC0 breaking / falling / hit sfx](https://opengameart.org/content/75-cc0-breaking-falling-hit-sfx) (`glass_breaking_01`, `02`, `03`, `04`, `05`, `06`, `glass_falling_01`) and
 [Glass break](https://opengameart.org/content/glass-break) (Till Behrend, uploaded by TinyWorlds; `break_4.wav`).
+
+## Loading shells and clips
+
+`sounds/gun/shell_*.wav` and `sounds/gun/clip_in.wav` are cut by `tools/make_reload_sounds.py` (trimmed, faded, a high-pass and levelled; nothing is synthesised) from two CC0 recordings on OpenGameArt:
+[Shotgun Reload Sound effects](https://opengameart.org/content/shotgun-reload-sound-effects) (zer0_sol; the four-shell recording) and
+[Gun reload sounds](https://opengameart.org/content/gun-reload-sounds) (SpringySpringo; the rifle magazine going in).

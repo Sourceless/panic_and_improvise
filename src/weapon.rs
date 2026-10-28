@@ -7,7 +7,8 @@ use crate::ballistics::{self, Cartridge, Flight};
 use crate::collision::Colliders;
 use crate::controls::{Action, Controls, Keyboard};
 use crate::gun_models::{self, Finish, ModelSpec};
-use crate::gun_state::{Bolt, State};
+use crate::gun_state::{Bolt, ReloadStyle, State};
+use crate::reload::{Press, ReloadPlan};
 use crate::inventory::{Inventory, ItemKind};
 use crate::weapons::{FireMode, Handling, WeaponDef, WeaponKind};
 use crate::impact::{segment_aabb_hit, surface_hit, Impact, Rng, Surface};
@@ -30,6 +31,10 @@ pub enum GunEvent {
     /// A bolt-action rifle has fired and its bolt is worked: lifted, drawn back, pushed home and turned down,
     /// over `cycle_time` seconds.
     BoltCycled { cycle_time: f32 },
+    /// A round (a shell, a cartridge) is pushed in by hand.
+    RoundIn,
+    /// A clip of rounds is pushed in.
+    ClipIn,
 }
 
 /// How many of each gun sound have been made (for tests).
@@ -40,6 +45,8 @@ pub struct SoundLog {
     pub dry_clicks: u32,
     pub bolt_drops: u32,
     pub bolt_cycles: u32,
+    pub rounds_in: u32,
+    pub clips_in: u32,
 }
 
 #[derive(Resource)]
@@ -49,11 +56,14 @@ pub struct GunSounds {
     pub dry_clicks: Vec<Handle<AudioSource>>,
     /// A real bolt-action rifle's bolt being worked, a few takes (`sounds/gun/bolt_cycle_N.wav`).
     pub bolt_cycles: Vec<Handle<AudioSource>>,
+    /// A shell being pushed into a gun (`sounds/gun/shell_N.wav`), and a clip going into a rifle.
+    pub shells: Vec<Handle<AudioSource>>,
+    pub clip: Handle<AudioSource>,
 }
 
 impl GunSounds {
     pub fn all(&self) -> impl Iterator<Item = &Handle<AudioSource>> {
-        [&self.reload_swap, &self.reload_charge].into_iter().chain(&self.dry_clicks).chain(&self.bolt_cycles)
+        [&self.reload_swap, &self.reload_charge, &self.clip].into_iter().chain(&self.dry_clicks).chain(&self.bolt_cycles).chain(&self.shells)
     }
 }
 
@@ -180,6 +190,12 @@ pub struct Gun {
     pub holstered: bool,
     /// What the reload now under way will put in.
     reload_with: Option<AmmoKind>,
+    /// The reload under way, as steps and the timing of them (see `reload`).
+    pub plan: Option<ReloadPlan>,
+    /// What the first shot does extra, after a perfect reload (1 when nothing).
+    pub shot_bonus: f32,
+    /// The latest press of reload during a reload, and the seconds since: what the player is told.
+    pub press_flash: Option<(Press, f32)>,
     /// Where the gun's mechanism is: ready, cycling a shot, dry, or being reloaded.
     pub state: State,
     trigger_blocked: bool,
@@ -226,6 +242,50 @@ pub struct Gun {
 }
 
 impl Gun {
+    /// A gun in hand at the start: `kind`, loaded full with what it is usually loaded with.
+    pub fn new(start: WeaponKind) -> Gun {
+        let def = start.def();
+        Gun {
+                kind: start,
+                loaded: def.default_ammo,
+                mode: def.modes[0],
+                shown: None,
+                item: None,
+                selected: def.default_ammo,
+                holstered: false,
+                reload_with: None,
+                plan: None,
+                shot_bonus: 1.0,
+                press_flash: None,
+                state: State::Ready,
+                trigger_blocked: false,
+                shots_fired: 0,
+                aiming: false,
+                last_shot_origin: None,
+                aim_blend: 0.0,
+                view_kick: Vec2::ZERO,
+                since_shot: 10.0,
+                bloom: 0.0,
+                flash_time: 0.0,
+                flash_roll: 0.0,
+                flash_size: 1.0,
+                rng: 0x9E37_79B9,
+                last_shot_error: 0.0,
+                worst_shot_error: 0.0,
+                current_spread: def.handling.hip_spread,
+                gun_kick: 0.0,
+                ammo: def.magazine,
+                reload_queued: false,
+                pending_sounds: Vec::new(),
+                dry_click_cooldown: 0.0,
+                sound_log: SoundLog::default(),
+                lowered: 0.0,
+                crowd: 0.0,
+        }
+    }
+}
+
+impl Gun {
     pub fn def(&self) -> &'static WeaponDef {
         self.kind.def()
     }
@@ -245,26 +305,84 @@ impl Gun {
         self.state = def.mechanism.resting_state(self.ammo);
         self.aiming = false;
         self.reload_queued = false;
+        self.plan = None;
+        self.shot_bonus = 1.0;
+        self.press_flash = None;
+        self.reload_with = None;
         self.bloom = 0.0;
         self.gun_kick = 0.0;
         self.view_kick = Vec2::ZERO;
     }
 
-    /// Acts on a reload request, as soon as the mechanism is free to (not mid-shot). A request the
-    /// gun can't use at all (a full magazine, a reload already going) is dropped.
+    /// Acts on a reload request, as soon as the mechanism is free to (not mid-shot). A press while a reload is
+    /// going is a press in its timing game; one the gun can't use at all (a full magazine) is dropped.
     fn try_queued_reload(&mut self, inventory: &Inventory) {
         if !self.reload_queued || matches!(self.state, State::Cycling { .. }) {
             return;
         }
         self.reload_queued = false;
+        if self.reloading() {
+            if let Some(plan) = &mut self.plan {
+                let press = plan.press();
+                if press != Press::Ignored {
+                    self.press_flash = Some((press, 0.0));
+                }
+            }
+            return;
+        }
         // Nothing to put in: no reload.
         let Some(load) = self.load_for_reload(inventory) else { return };
-        let was_reloading = self.reloading();
-        self.state = self.def().mechanism.press_reload(self.state, self.ammo, self.def().magazine);
-        if !was_reloading && self.reloading() {
-            self.reload_with = Some(load);
-            let charge = self.reload_seconds() > self.def().mechanism.reload_time + self.def().mechanism.reload_per_round * self.def().magazine.saturating_sub(self.ammo) as f32 + 0.01;
-            self.pending_sounds.push(GunEvent::ReloadStarted { charge });
+        let def = self.def();
+        // A different load than the gun has in it: the rounds that are in it come out.
+        let swaps_load = load != self.loaded && self.ammo > 0;
+        let Some(plan) = def.mechanism.plan_reload(self.state, self.ammo, def.magazine, inventory.rounds(load), swaps_load) else { return };
+        let charge = self.state == State::Dry && def.mechanism.charge_time > 0.0;
+        self.state = State::Reloading { elapsed: 0.0, total: plan.total() };
+        self.reload_with = Some(load);
+        self.plan = Some(plan);
+        self.press_flash = None;
+        self.pending_sounds.push(GunEvent::ReloadStarted { charge });
+    }
+
+    /// Ends the reload under way, leaving the rounds that have gone in in the gun.
+    fn stop_reload(&mut self) {
+        self.state = self.def().mechanism.cancel_reload(self.state, self.ammo);
+        self.plan = None;
+        self.reload_with = None;
+    }
+
+    /// Time passes in a reload: rounds go in as the steps that load them finish, and when the last does, it is over.
+    /// A magazine is changed whole at the end.
+    fn advance_reload(&mut self, dt: f32, inventory: &mut Inventory) {
+        let Some(plan) = &mut self.plan else { return };
+        let progress = plan.tick(dt);
+        let (elapsed, total, perfect) = (plan.elapsed(), plan.total(), plan.was_perfect());
+        let by_rounds = self.def().mechanism.style != ReloadStyle::Magazine;
+        if by_rounds && progress.rounds > 0 {
+            let load = self.reload_with.unwrap_or(self.loaded);
+            // The first round of another load empties the gun of the old one.
+            if load != self.loaded && self.ammo > 0 {
+                let mut item = inventory.make(ItemKind::Ammo(self.loaded), self.ammo);
+                item.loaded = 0;
+                let _ = inventory.add(item);
+                self.ammo = 0;
+            }
+            self.loaded = load;
+            self.ammo += inventory.take_rounds(load, progress.rounds.min(self.def().magazine - self.ammo));
+            self.pending_sounds.push(if matches!(self.def().mechanism.style, ReloadStyle::Clips(n) if progress.rounds >= n) { GunEvent::ClipIn } else { GunEvent::RoundIn });
+        }
+        if progress.done {
+            if !by_rounds {
+                self.finish_reload(inventory);
+            }
+            if perfect && self.def().perfect_reload_bonus > 1.0 {
+                self.shot_bonus = self.def().perfect_reload_bonus;
+            }
+            self.plan = None;
+            self.reload_with = None;
+            self.state = self.def().mechanism.resting_state(self.ammo);
+        } else {
+            self.state = State::Reloading { elapsed, total };
         }
     }
 
@@ -312,6 +430,14 @@ impl Gun {
         }
     }
 
+    /// How far the rifle is tilted for the bolt to be worked, 0 to 1: nothing but while a bolt worked by hand is going.
+    pub fn bolt_tilt(&self) -> f32 {
+        match self.state {
+            State::Cycling { left } if self.def().mechanism.manual_bolt => bolt_tilt(1.0 - left / self.def().mechanism.cycle_time),
+            _ => 0.0,
+        }
+    }
+
     /// How far down the gun is for the reload, 0 to 1.
     fn lowering(&self) -> f32 {
         match self.state {
@@ -346,6 +472,21 @@ impl Gun {
         (self.rng >> 8) as f32 / (1u32 << 24) as f32
     }
 }
+
+/// How far a rifle rolls over (radians) to have its bolt worked, and how that goes over the time the bolt takes,
+/// `progress` 0 to 1: it rolls over quickly, stays while the bolt is drawn back and pushed home, and rolls back.
+const BOLT_TILT_ANGLE: f32 = 0.5;
+
+pub fn bolt_tilt(progress: f32) -> f32 {
+    let smooth = |x: f32| {
+        let x = x.clamp(0.0, 1.0);
+        x * x * (3.0 - 2.0 * x)
+    };
+    smooth(progress / 0.2).min(smooth((1.0 - progress) / 0.25))
+}
+
+/// How long, seconds, what a press of reload did stays up on the screen.
+pub const PRESS_FLASH_TIME: f32 = 0.9;
 
 /// How fast the player runs flat out (the sprint speed), which counts as "moving fully" for
 /// accuracy purposes.
@@ -471,6 +612,8 @@ pub struct Bullet {
     in_foliage: bool,
     /// The bodies it has already gone through, which it does not hit again on the way out.
     through: Vec<Entity>,
+    /// How much more than usual it does where it hits (a perfect reload's first shot).
+    damage_scale: f32,
 }
 
 impl Bullet {
@@ -572,6 +715,8 @@ pub fn spawn_gun(
         reload_charge: asset_server.load("sounds/gun/reload_charge.wav"),
         dry_clicks: (1..=2).map(|i| asset_server.load(format!("sounds/gun/dry_click_{i}.wav"))).collect(),
         bolt_cycles: (1..=BOLT_CYCLE_TAKES).map(|i| asset_server.load(format!("sounds/gun/bolt_cycle_{i}.wav"))).collect(),
+        shells: (1..=4).map(|i| asset_server.load(format!("sounds/gun/shell_{i}.wav"))).collect(),
+        clip: asset_server.load("sounds/gun/clip_in.wav"),
     });
     commands.insert_resource(BulletAssets {
         // A thin streak along the line of flight (the bullet is turned to face the way it goes).
@@ -598,40 +743,7 @@ pub fn spawn_gun(
     commands.entity(cam).with_children(|cam_children| {
         cam_children
             .spawn((
-                Gun {
-                    kind: start,
-                    loaded: def.default_ammo,
-                    mode: def.modes[0],
-                    shown: None,
-                    item: None,
-                    selected: def.default_ammo,
-                    holstered: false,
-                    reload_with: None,
-                    state: State::Ready,
-                    trigger_blocked: false,
-                    shots_fired: 0,
-                    aiming: false,
-                    last_shot_origin: None,
-                    aim_blend: 0.0,
-                    view_kick: Vec2::ZERO,
-                    since_shot: 10.0,
-                    bloom: 0.0,
-                    flash_time: 0.0,
-                    flash_roll: 0.0,
-                    flash_size: 1.0,
-                    rng: 0x9E37_79B9,
-                    last_shot_error: 0.0,
-                    worst_shot_error: 0.0,
-                    current_spread: def.handling.hip_spread,
-                    gun_kick: 0.0,
-                    ammo: def.magazine,
-                    reload_queued: false,
-                    pending_sounds: Vec::new(),
-                    dry_click_cooldown: 0.0,
-                    sound_log: SoundLog::default(),
-                    lowered: 0.0,
-                    crowd: 0.0,
-                },
+                Gun::new(start),
                 gun_transform(&start_spec, &def.handling, 0.0),
                 Visibility::default(),
             ))
@@ -848,12 +960,12 @@ fn aim(
         *was_airborne = airborne;
         if jumped {
             gun.reload_queued = false;
-            gun.state = gun.def().mechanism.cancel_reload(gun.state, gun.ammo);
+            gun.stop_reload();
         }
         if sprinting {
             gun.reload_queued = false;
             if gun.reloading() {
-                gun.state = gun.def().mechanism.cancel_reload(gun.state, gun.ammo);
+                gun.stop_reload();
             }
         }
     }
@@ -893,6 +1005,12 @@ fn aim(
     }
     let spec = assets.spec(gun.kind);
     *transform = gun_pose_held(&spec, &gun.def().handling, gun.aim_blend, gun.gun_kick, gun.lowered, gun.crowd);
+    // Working a bolt by hand tilts the rifle over to the left, to get the handle where the hand can reach it.
+    let tilt = gun.bolt_tilt();
+    if tilt > 0.0 {
+        transform.rotation *= Quat::from_rotation_z(BOLT_TILT_ANGLE * tilt);
+        transform.translation += Vec3::new(-0.03, 0.01, 0.03) * tilt;
+    }
     blend.0 = gun.aim_blend;
     // The view narrows on the sights: a little on iron sights, a lot through a telescope.
     let narrowed = gun.def().scope.map_or(gun.def().handling.ads_fov_scale, |s| s.fov_scale);
@@ -920,13 +1038,23 @@ fn fire(
         return;
     }
     let def = gun.def();
-    // The mechanism moves on with time: a shot finishes cycling, a reload finishes.
-    let (state, reload_done) = def.mechanism.tick(gun.state, gun.ammo, mouse.pressed(MouseButton::Left), time.delta_secs());
-    gun.state = state;
-    if reload_done {
-        gun.finish_reload(&mut inventory);
+    // The mechanism moves on with time: a shot finishes cycling, a reload goes on (and finishes).
+    if gun.reloading() && gun.plan.is_some() {
+        gun.advance_reload(time.delta_secs(), &mut inventory);
+    } else {
+        let (state, reload_done) = def.mechanism.tick(gun.state, gun.ammo, mouse.pressed(MouseButton::Left), time.delta_secs());
+        gun.state = state;
+        if reload_done {
+            gun.finish_reload(&mut inventory);
+        }
     }
     gun.try_queued_reload(&inventory);
+    if let Some((_, age)) = &mut gun.press_flash {
+        *age += time.delta_secs();
+        if *age > PRESS_FLASH_TIME {
+            gun.press_flash = None;
+        }
+    }
     gun.since_shot += time.delta_secs();
     gun.dry_click_cooldown = (gun.dry_click_cooldown - time.delta_secs()).max(0.0);
 
@@ -948,6 +1076,19 @@ fn fire(
     }
     // A semi-automatic gun fires once to a pull; holding the trigger down does nothing more.
     if gun.mode == FireMode::Semi && !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    // A gun loaded a round at a time, with a round in it, is fired before it is loaded full: the reload is let go.
+    if gun.reloading() && gun.plan.is_some() && def.mechanism.style != ReloadStyle::Magazine && gun.ammo > 0 {
+        gun.stop_reload();
+    }
+    // A bolt worked by hand is worked by the next click, which fires nothing.
+    if def.mechanism.manual_bolt && gun.state == State::Unworked {
+        let (state, worked) = def.mechanism.work_bolt(gun.state);
+        gun.state = state;
+        if worked {
+            gun.pending_sounds.push(GunEvent::BoltCycled { cycle_time: def.mechanism.cycle_time });
+        }
         return;
     }
     let Ok((mut cam, mut view)) = camera.single_mut() else {
@@ -997,7 +1138,7 @@ fn fire(
     gun.shots_fired += 1;
     gun.ammo -= 1;
     // A bolt-action rifle has its bolt worked for the next round, with the sound of it.
-    if def.kind.bolt_action() {
+    if def.kind.bolt_action() && !def.mechanism.manual_bolt {
         gun.pending_sounds.push(GunEvent::BoltCycled { cycle_time: def.mechanism.cycle_time });
     }
     gun.last_shot_origin = Some(muzzle);
@@ -1015,6 +1156,8 @@ fn fire(
     gun.flash_time = crate::muzzle_flash::FLASH_TIME;
     gun.flash_roll = gun.random() * std::f32::consts::TAU;
     gun.flash_size = (0.8 + 0.4 * gun.random()) * (1.0 - 0.45 * gun.aim_blend);
+    // The first shot after a perfect reload hits harder.
+    let damage_scale = std::mem::replace(&mut gun.shot_bonus, 1.0);
     // A round throws one bullet, or a load of pellets, each scattered a little more from the shot's line.
     for pellet in 0..round.pellets {
         let heading = if round.pellets > 1 { scatter_direction(direction_shot, round.pellet_spread, gun.random(), gun.random()) } else { direction_shot };
@@ -1029,6 +1172,7 @@ fn fire(
                 in_foliage: false,
                 through: Vec::new(),
                 glows: tracer,
+                damage_scale,
             },
             Mesh3d(assets.mesh.clone()),
             MeshMaterial3d(if round.tracer { assets.tracer_material.clone() } else { assets.material.clone() }),
@@ -1107,6 +1251,17 @@ fn play_gun_sounds(mut commands: Commands, mut guns: Query<&mut Gun>, sounds: Re
                 let (delay, speed) = bolt_cycle_timing(cycle_time);
                 play_after(&mut commands, delay, sounds.bolt_cycles[pick].clone(), speed * pitch(0.97, 1.03), BOLT_CYCLE_VOLUME, None);
             }
+            GunEvent::RoundIn => {
+                gun.sound_log.rounds_in += 1;
+                let pick = (roll * sounds.shells.len() as f32) as usize % sounds.shells.len();
+                // Smaller rounds are smaller sounds.
+                let small = gun.def().caliber != crate::ammo::Caliber::Gauge12;
+                play_after(&mut commands, 0.0, sounds.shells[pick].clone(), if small { pitch(1.25, 1.4) } else { pitch(1.2, 1.3) }, 0.7, None);
+            }
+            GunEvent::ClipIn => {
+                gun.sound_log.clips_in += 1;
+                play_after(&mut commands, 0.0, sounds.clip.clone(), pitch(0.95, 1.05), 0.8, None);
+            }
             GunEvent::BoltDrop => {
                 gun.sound_log.bolt_drops += 1;
                 // The same click, lower: a heavy bolt running home.
@@ -1184,10 +1339,10 @@ pub(crate) fn move_bullets(
                 if let Some(target) = impact.target {
                     let hit_speed = impact.speed;
                     if let Ok((_, _, mut dummy)) = dummies.get_mut(target) {
-                        dummy.take_hit(bullet.ammo.def().damage_at(hit_speed));
+                        dummy.take_hit(bullet.ammo.def().damage_at(hit_speed) * bullet.damage_scale);
                     } else if let Ok((_, at, mut zombie)) = zombies.get_mut(target) {
                         let kind = zombie.kind;
-                        zombie.take_hit(hit_damage(bullet.ammo.def().damage_at(hit_speed), impact.position - at.translation, kind));
+                        zombie.take_hit(hit_damage(bullet.ammo.def().damage_at(hit_speed) * bullet.damage_scale, impact.position - at.translation, kind));
                         // Through the body and out the other side, if it has the energy left for that: slower,
                         // and so with less to give to whatever is behind.
                         if let Some(out) = ballistics::speed_after_passing(&bullet.cartridge, hit_speed, kind.body_depth(), ballistics::FLESH_RESISTANCE) {
@@ -1602,7 +1757,7 @@ mod tests {
         let bullet = app
             .world_mut()
             .spawn((
-                Bullet { cartridge: def.cartridge, ammo, velocity: Vec3::NEG_Z * def.cartridge.muzzle_velocity, age: 0.0, travelled: 0.0, glows: false, in_foliage: false, through: Vec::new() },
+                Bullet { cartridge: def.cartridge, ammo, velocity: Vec3::NEG_Z * def.cartridge.muzzle_velocity, age: 0.0, travelled: 0.0, glows: false, in_foliage: false, through: Vec::new(), damage_scale: 1.0 },
                 Transform::from_xyz(0.0, 1.1, 0.0),
                 Visibility::Hidden,
             ))
@@ -1651,5 +1806,229 @@ mod tests {
             let heard = BOLT_CYCLE_LENGTH / speed + delay;
             assert!((heard - cycle).abs() < 0.3, "{heard} s of sound for a {cycle} s action");
         }
+    }
+
+    // ---- reloading by the round, by the clip, and the timing game ---------------------------------------------------
+
+    fn carrying(kind: AmmoKind, rounds: u32) -> Inventory {
+        let mut inv = Inventory::default();
+        let item = inv.make(ItemKind::Ammo(kind), rounds);
+        inv.add(item).unwrap();
+        inv
+    }
+
+    fn press_reload(gun: &mut Gun, inv: &Inventory) {
+        gun.reload_queued = true;
+        gun.try_queued_reload(inv);
+    }
+
+    fn pass(gun: &mut Gun, inv: &mut Inventory, seconds: f32) {
+        for _ in 0..(seconds / 0.005).round() as usize {
+            if gun.reloading() {
+                gun.advance_reload(0.005, inv);
+            }
+        }
+    }
+
+    /// Presses reload whenever the step is in its sweet spot, until the reload is over. Returns how long it took.
+    fn reload_perfectly(gun: &mut Gun, inv: &mut Inventory) -> f32 {
+        let mut seconds = 0.0;
+        while gun.reloading() {
+            if gun.plan.as_ref().is_some_and(|p| p.in_sweet_spot()) {
+                press_reload(gun, inv);
+            }
+            gun.advance_reload(0.005, inv);
+            seconds += 0.005;
+        }
+        seconds
+    }
+
+    #[test]
+    fn a_shotgun_is_loaded_a_shell_at_a_time_and_an_interrupted_reload_keeps_the_shells() {
+        let mut inv = carrying(AmmoKind::Buckshot, 10);
+        let mut gun = Gun::new(WeaponKind::Auto5);
+        gun.equip(WeaponKind::Auto5, AmmoKind::Buckshot, 0);
+        press_reload(&mut gun, &inv);
+        assert!(gun.reloading());
+        let planned = gun.reload_seconds();
+        assert!((planned - (0.6 + 0.5 + 5.0 * 0.55)).abs() < 1e-3, "{planned}: opening, the slide charged, five shells");
+        assert_eq!(gun.ammo, 0, "nothing is in it till the first shell goes in");
+        // The slide is opened, then two shells go in.
+        pass(&mut gun, &mut inv, 1.1 + 2.0 * 0.55 + 0.1);
+        assert_eq!((gun.ammo, inv.rounds(AmmoKind::Buckshot)), (2, 8));
+        assert!(gun.reloading());
+        // Cut short (by a sprint or a jump): the two stay in the gun, and it is ready to fire.
+        gun.stop_reload();
+        assert!(!gun.reloading() && gun.plan.is_none());
+        assert_eq!((gun.ammo, gun.state), (2, State::Ready));
+        assert_eq!(inv.rounds(AmmoKind::Buckshot), 8);
+        // Reloading again carries on from two.
+        press_reload(&mut gun, &inv);
+        assert!((gun.reload_seconds() - (0.6 + 3.0 * 0.55)).abs() < 1e-3);
+        pass(&mut gun, &mut inv, 3.0);
+        assert_eq!((gun.ammo, inv.rounds(AmmoKind::Buckshot), gun.state), (5, 5, State::Ready));
+    }
+
+    #[test]
+    fn a_shotgun_that_has_not_the_shells_loads_what_there_is() {
+        let mut inv = carrying(AmmoKind::Buckshot, 2);
+        let mut gun = Gun::new(WeaponKind::DoubleBarrel);
+        gun.equip(WeaponKind::DoubleBarrel, AmmoKind::Buckshot, 0);
+        press_reload(&mut gun, &inv);
+        pass(&mut gun, &mut inv, 10.0);
+        assert_eq!((gun.ammo, inv.rounds(AmmoKind::Buckshot)), (2, 0));
+        let mut one = carrying(AmmoKind::Buckshot, 1);
+        gun.equip(WeaponKind::DoubleBarrel, AmmoKind::Buckshot, 0);
+        press_reload(&mut gun, &one);
+        pass(&mut gun, &mut one, 10.0);
+        assert_eq!(gun.ammo, 1, "one shell is all there was");
+    }
+
+    #[test]
+    fn a_revolver_takes_six_rounds_one_by_one() {
+        let mut inv = carrying(AmmoKind::Webley455, 24);
+        let mut gun = Gun::new(WeaponKind::Revolver);
+        gun.equip(WeaponKind::Revolver, AmmoKind::Webley455, 2);
+        press_reload(&mut gun, &inv);
+        assert!((gun.reload_seconds() - (1.1 + 4.0 * 0.45)).abs() < 1e-3, "four missing");
+        pass(&mut gun, &mut inv, 10.0);
+        assert_eq!((gun.ammo, inv.rounds(AmmoKind::Webley455)), (6, 20));
+    }
+
+    #[test]
+    fn a_rifle_that_takes_clips_loads_five_at_a_time_and_then_single_rounds() {
+        let mut inv = carrying(AmmoKind::BritishBall, 40);
+        let mut gun = Gun::new(WeaponKind::LeeEnfield);
+        gun.equip(WeaponKind::LeeEnfield, AmmoKind::BritishBall, 0);
+        press_reload(&mut gun, &inv);
+        assert!((gun.reload_seconds() - (0.5 + 2.0 * 1.3)).abs() < 1e-3, "opened, then two clips");
+        pass(&mut gun, &mut inv, 0.5 + 1.3 + 0.05);
+        assert_eq!(gun.ammo, 5, "the first clip is in as one");
+        pass(&mut gun, &mut inv, 1.3);
+        assert_eq!((gun.ammo, gun.state), (10, State::Ready));
+        // Three missing: three single rounds, no clip.
+        let mut gun = Gun::new(WeaponKind::LeeEnfield);
+        gun.equip(WeaponKind::LeeEnfield, AmmoKind::BritishBall, 7);
+        press_reload(&mut gun, &inv);
+        assert!((gun.reload_seconds() - (0.5 + 3.0 * 0.75)).abs() < 1e-3);
+        // Eight missing: a clip and three singles.
+        gun.equip(WeaponKind::LeeEnfield, AmmoKind::BritishBall, 2);
+        press_reload(&mut gun, &inv);
+        assert!((gun.reload_seconds() - (0.5 + 1.3 + 3.0 * 0.75)).abs() < 1e-3);
+        pass(&mut gun, &mut inv, 10.0);
+        assert_eq!(gun.ammo, 10);
+    }
+
+    #[test]
+    fn a_press_between_clips_loads_only_the_one() {
+        let mut inv = carrying(AmmoKind::BritishBall, 40);
+        let mut gun = Gun::new(WeaponKind::LeeEnfield);
+        gun.equip(WeaponKind::LeeEnfield, AmmoKind::BritishBall, 0);
+        press_reload(&mut gun, &inv);
+        // Early in the first clip, not in its sweet spot.
+        pass(&mut gun, &mut inv, 0.5 + 0.1);
+        press_reload(&mut gun, &inv);
+        assert_eq!(gun.press_flash.map(|f| f.0), Some(Press::Stop));
+        pass(&mut gun, &mut inv, 5.0);
+        assert_eq!((gun.ammo, gun.state, inv.rounds(AmmoKind::BritishBall)), (5, State::Ready, 35), "one clip, and the reload is over");
+        assert_eq!(gun.shot_bonus, 1.0);
+    }
+
+    #[test]
+    fn two_perfect_presses_load_both_clips_much_faster_and_the_first_shot_hits_harder() {
+        let mut inv = carrying(AmmoKind::BritishBall, 40);
+        let mut gun = Gun::new(WeaponKind::LeeEnfield);
+        gun.equip(WeaponKind::LeeEnfield, AmmoKind::BritishBall, 0);
+        press_reload(&mut gun, &inv);
+        let planned = gun.reload_seconds();
+        let took = reload_perfectly(&mut gun, &mut inv);
+        assert_eq!(gun.ammo, 10);
+        assert!(took < planned * 0.65, "{took} s against {planned}");
+        assert_eq!(gun.shot_bonus, WeaponKind::LeeEnfield.def().perfect_reload_bonus);
+        assert!(gun.shot_bonus > 1.4);
+        // A reload that missed one has none.
+        let mut gun = Gun::new(WeaponKind::LeeEnfield);
+        gun.equip(WeaponKind::LeeEnfield, AmmoKind::BritishBall, 0);
+        press_reload(&mut gun, &inv);
+        pass(&mut gun, &mut inv, 0.5 + 0.65);
+        press_reload(&mut gun, &inv);
+        assert_eq!(gun.press_flash.map(|f| f.0), Some(Press::Perfect));
+        pass(&mut gun, &mut inv, 5.0);
+        assert_eq!((gun.ammo, gun.shot_bonus), (10, 1.0));
+    }
+
+    #[test]
+    fn a_perfect_press_on_a_magazine_gun_is_faster_and_has_no_bonus() {
+        let mut inv = carrying(AmmoKind::NineFmj, 60);
+        let mut gun = Gun::new(WeaponKind::Sterling);
+        gun.equip(WeaponKind::Sterling, AmmoKind::NineFmj, 5);
+        press_reload(&mut gun, &inv);
+        let planned = gun.reload_seconds();
+        assert_eq!(planned, 2.0);
+        let took = reload_perfectly(&mut gun, &mut inv);
+        assert_eq!((gun.ammo, gun.shot_bonus), (30, 1.0));
+        assert!(took < planned * 0.7, "{took}");
+    }
+
+    #[test]
+    fn an_early_press_on_a_magazine_gun_changes_nothing() {
+        let mut inv = carrying(AmmoKind::NineFmj, 60);
+        let mut gun = Gun::new(WeaponKind::Sterling);
+        gun.equip(WeaponKind::Sterling, AmmoKind::NineFmj, 5);
+        press_reload(&mut gun, &inv);
+        pass(&mut gun, &mut inv, 0.2);
+        press_reload(&mut gun, &inv);
+        assert!(gun.press_flash.is_none());
+        pass(&mut gun, &mut inv, 2.0);
+        assert_eq!(gun.ammo, 30);
+    }
+
+    #[test]
+    fn a_bolt_worked_by_hand_is_left_till_the_next_click() {
+        let m = WeaponKind::LeeEnfield.def().mechanism;
+        let (state, fired) = m.pull_trigger(State::Ready, 10);
+        assert!(fired && state == State::Unworked);
+        assert_eq!(m.pull_trigger(state, 9), (State::Unworked, false), "the trigger does nothing till the bolt is worked");
+        assert_eq!(m.bolt(state), Some(Bolt::Forward));
+        let (cycling, worked) = m.work_bolt(state);
+        assert!(worked && matches!(cycling, State::Cycling { .. }));
+        assert_eq!(m.work_bolt(State::Ready), (State::Ready, false), "no bolt to work on a gun that is ready");
+        let (after, _) = m.tick(cycling, 9, false, m.cycle_time + 0.01);
+        assert_eq!(after, State::Ready);
+        // The last round: the bolt is worked and left open.
+        let (empty, _) = m.tick(State::Cycling { left: 0.0 }, 0, false, 0.01);
+        assert_eq!(empty, State::Dry);
+        // The other rifles are not.
+        assert!(!WeaponKind::L42.def().mechanism.manual_bolt && !WeaponKind::Slr.def().mechanism.manual_bolt);
+    }
+
+    #[test]
+    fn a_rifle_tilts_over_to_have_its_bolt_worked_and_comes_back_level() {
+        assert_eq!(bolt_tilt(0.0), 0.0);
+        assert_eq!(bolt_tilt(1.0), 0.0);
+        assert!(bolt_tilt(0.5) > 0.99, "over for the middle of it");
+        assert!(bolt_tilt(0.1) > 0.0 && bolt_tilt(0.1) < 1.0 && bolt_tilt(0.9) > 0.0 && bolt_tilt(0.9) < 1.0);
+        let mut gun = Gun::new(WeaponKind::LeeEnfield);
+        assert_eq!(gun.bolt_tilt(), 0.0);
+        let cycle = gun.def().mechanism.cycle_time;
+        gun.state = State::Cycling { left: cycle * 0.5 };
+        assert!(gun.bolt_tilt() > 0.99);
+        // A rifle with a bolt worked by itself does not tilt.
+        let mut slr = Gun::new(WeaponKind::Slr);
+        slr.state = State::Cycling { left: slr.def().mechanism.cycle_time * 0.5 };
+        assert_eq!(slr.bolt_tilt(), 0.0);
+    }
+
+    #[test]
+    fn the_new_guns_are_what_was_asked_for() {
+        let revolver = WeaponKind::Revolver.def();
+        assert_eq!((revolver.magazine, revolver.caliber), (6, crate::ammo::Caliber::Webley));
+        assert_eq!(revolver.default_ammo, AmmoKind::Webley455);
+        let double = WeaponKind::DoubleBarrel.def();
+        assert_eq!((double.magazine, double.caliber), (2, crate::ammo::Caliber::Gauge12));
+        // A .455 does more to a body than a 9 mm, from a slower round.
+        let (webley, nine) = (AmmoKind::Webley455.def(), AmmoKind::NineFmj.def());
+        assert!(webley.damage_at_muzzle() > nine.damage_at_muzzle());
+        assert!(webley.cartridge.muzzle_velocity < nine.cartridge.muzzle_velocity);
     }
 }

@@ -1154,7 +1154,7 @@ mod tests {
             let room = layout.storeys[1].rooms.iter().max_by(|a, b| a.rect.area().total_cmp(&b.rect.area())).unwrap().rect.centre();
             let floor = layout.floor_of(1);
             let mut app = App::new();
-            app.init_resource::<Time>().init_resource::<ZombieDice>().init_resource::<PlayerHealth>().insert_resource(TerrainMap::flat(0.0)).insert_resource(colliders).add_systems(Update, move_zombies);
+            app.init_resource::<Time>().insert_resource(ZombieDice::from_state((1, 0))).init_resource::<PlayerHealth>().insert_resource(TerrainMap::flat(0.0)).insert_resource(colliders).add_systems(Update, move_zombies);
             let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: crate::player::Stance::Stand, eye_height: 1.8, jump_spent_standing: false, floor, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: floor, lean: 0.0, lean_offset: Vec2::ZERO };
             app.world_mut().spawn((camera, GlobalTransform::from(Transform::from_xyz(room.x, floor + 1.8, room.y))));
             let mut zombie = Zombie::new(Walker, 0.0);

@@ -13,9 +13,13 @@
 //! - `Cycling`: a shot is going through the action.
 //! - `Dry`: out of rounds with the action in the wrong place; the trigger does nothing, and
 //!   the next reload has to charge the action as well.
-//! - `Reloading`: the magazine is being changed.
+//! - `Unworked`: a bolt-action rifle that has fired and has its bolt still to work by hand (a click of the
+//!   mouse) before it can fire again.
+//! - `Reloading`: the magazine is being changed, or rounds are being put in one by one (see `reload`).
 //!
 //! Everything here is a pure function of the state, so the rules can be tested without a game.
+
+use crate::reload::{ReloadPlan, Step};
 
 /// The kind of action.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -31,6 +35,17 @@ pub enum Bolt {
     Rear,
 }
 
+/// How a gun is loaded.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReloadStyle {
+    /// A magazine is changed for a full one (or what there is).
+    Magazine,
+    /// Rounds go in one at a time: a shotgun's tube, a revolver's cylinder.
+    Rounds,
+    /// Clips of this many rounds go in while at least that many are missing, then single rounds.
+    Clips(u32),
+}
+
 /// The mechanical details of a gun.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Mechanism {
@@ -43,11 +58,34 @@ pub struct Mechanism {
     pub charge_time: f32,
     /// For a gun loaded round by round (a shotgun's tube): the seconds each missing round adds.
     pub reload_per_round: f32,
+    pub style: ReloadStyle,
+    /// For a gun loaded by the clip: the seconds a clip takes.
+    pub clip_time: f32,
+    /// Whether the shooter works the bolt by hand, with a click, after each shot.
+    pub manual_bolt: bool,
+}
+
+impl Mechanism {
+    /// The same mechanism, loaded round by round.
+    pub const fn by_rounds(self) -> Mechanism {
+        Mechanism { style: ReloadStyle::Rounds, ..self }
+    }
+
+    /// The same mechanism, loaded by clips of `clip` rounds taking `clip_time` seconds each, and single rounds
+    /// (`reload_per_round` seconds each) after them.
+    pub const fn by_clips(self, clip: u32, clip_time: f32) -> Mechanism {
+        Mechanism { style: ReloadStyle::Clips(clip), clip_time, ..self }
+    }
+
+    /// The same mechanism, with a bolt worked by hand after each shot.
+    pub const fn with_bolt_worked_by_hand(self) -> Mechanism {
+        Mechanism { manual_bolt: true, ..self }
+    }
 }
 
 /// The Sterling: open bolt, about 500 rounds a minute. Changing a magazine takes two seconds with
 /// the bolt back, and another 0.7 s to haul the bolt back on the cocking handle if it's forward.
-pub const STERLING: Mechanism = Mechanism { bolt_type: BoltType::Open, cycle_time: 0.12, reload_time: 2.0, charge_time: 0.7, reload_per_round: 0.0 };
+pub const STERLING: Mechanism = Mechanism { bolt_type: BoltType::Open, cycle_time: 0.12, reload_time: 2.0, charge_time: 0.7, reload_per_round: 0.0, style: ReloadStyle::Magazine, clip_time: 0.0, manual_bolt: false };
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum State {
@@ -55,6 +93,8 @@ pub enum State {
     /// A shot is cycling; `left` seconds until the gun can fire again.
     Cycling { left: f32 },
     Dry,
+    /// A shot has been fired and the bolt is still to be worked by hand before the next.
+    Unworked,
     /// A reload: `elapsed` of `total` seconds done.
     Reloading { elapsed: f32, total: f32 },
 }
@@ -74,6 +114,7 @@ impl Mechanism {
         match state {
             State::Ready => Some(ready),
             State::Dry => Some(wrong),
+            State::Unworked => Some(Bolt::Forward),
             State::Cycling { .. } | State::Reloading { .. } => None,
         }
     }
@@ -81,10 +122,21 @@ impl Mechanism {
     /// The trigger is pulled. Returns the new state and whether a round was fired.
     pub fn pull_trigger(&self, state: State, ammo: u32) -> (State, bool) {
         match state {
+            // A bolt worked by hand is left until it is.
+            State::Ready if ammo > 0 && self.manual_bolt => (State::Unworked, true),
             State::Ready if ammo > 0 => (State::Cycling { left: self.cycle_time }, true),
             // An open-bolt gun with an empty magazine: the bolt is released and runs forward on
             // nothing. A closed-bolt gun never gets here (it goes dry on its last round).
             State::Ready if self.bolt_type == BoltType::Open => (State::Dry, false),
+            other => (other, false),
+        }
+    }
+
+    /// The shooter works the bolt: it takes `cycle_time`, and then the gun is ready (or, if it is empty, open).
+    /// Returns whether there was a bolt to work.
+    pub fn work_bolt(&self, state: State) -> (State, bool) {
+        match state {
+            State::Unworked => (State::Cycling { left: self.cycle_time }, true),
             other => (other, false),
         }
     }
@@ -100,12 +152,39 @@ impl Mechanism {
 
     /// The reload key is pressed. A magazine that is full needs no reload, unless the action does.
     pub fn press_reload(&self, state: State, ammo: u32, capacity: u32) -> State {
+        match self.plan_reload(state, ammo, capacity, u32::MAX, false) {
+            Some(plan) => State::Reloading { elapsed: 0.0, total: plan.total() },
+            None => state,
+        }
+    }
+
+    /// What a reload now would be, if there is one to be had: `available` rounds can go in, and `swaps_load` says the
+    /// rounds in the gun are another load than what goes in (so they come out first, and the whole magazine is filled).
+    pub fn plan_reload(&self, state: State, ammo: u32, capacity: u32, available: u32, swaps_load: bool) -> Option<ReloadPlan> {
         let charge = match state {
-            State::Ready if ammo < capacity => 0.0,
+            State::Ready | State::Unworked if ammo < capacity => 0.0,
             State::Dry => self.charge_time,
-            _ => return state,
+            _ => return None,
         };
-        State::Reloading { elapsed: 0.0, total: self.reload_time + charge + self.reload_per_round * capacity.saturating_sub(ammo) as f32 }
+        let held = if swaps_load { 0 } else { ammo };
+        let missing = capacity.saturating_sub(held).min(available);
+        let open = Step { time: self.reload_time + charge, rounds: 0, timed: false };
+        let single = Step { time: self.reload_per_round, rounds: 1, timed: true };
+        let mut plan = match self.style {
+            ReloadStyle::Magazine => ReloadPlan::new(vec![Step { time: open.time, rounds: 0, timed: true }]),
+            ReloadStyle::Rounds => ReloadPlan::new(std::iter::once(open).chain((0..missing).map(|_| single)).collect()),
+            ReloadStyle::Clips(clip) => {
+                let clips = missing / clip.max(1);
+                let singles = missing - clips * clip;
+                let steps = std::iter::once(open)
+                    .chain((0..clips).map(|_| Step { time: self.clip_time, rounds: clip, timed: true }))
+                    .chain((0..singles).map(|_| single))
+                    .collect();
+                ReloadPlan::new(steps)
+            }
+        };
+        plan.swaps_load = swaps_load;
+        Some(plan)
     }
 
     /// A reload is abandoned (the player broke into a sprint): the magazine is as it was, and the gun

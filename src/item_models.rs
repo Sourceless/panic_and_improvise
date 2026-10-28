@@ -174,6 +174,12 @@ fn ammunition(kind: AmmoKind) -> ItemModel {
             b.block(Paint::Red, 0.0, 0.0, 0.0, Vec3::new(0.122, 0.052, 0.022));
             b.block(Paint::White, 0.0, 0.052, 0.0, Vec3::new(0.05, 0.001, 0.016));
         }
+        // A small grey-brown box with a black label and a brass band.
+        AmmoKind::Webley455 => {
+            b.block(Paint::Card, 0.0, 0.0, 0.0, Vec3::new(0.085, 0.04, 0.06));
+            b.block(Paint::Black, 0.0, 0.04, 0.0, Vec3::new(0.05, 0.001, 0.03));
+            b.block(Paint::Brass, 0.0, 0.0, 0.0, Vec3::new(0.012, 0.042, 0.062));
+        }
         // A red box of shells, with a brass strip across the top.
         AmmoKind::Buckshot => {
             b.block(Paint::Red, 0.0, 0.0, 0.0, Vec3::new(0.11, 0.055, 0.075));

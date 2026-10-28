@@ -45,6 +45,8 @@ enum OnScreen {
     ThrowAndHeal,
     /// Clicks Resume in the menu.
     Resume,
+    /// Takes up a Lee-Enfield with a full magazine, and has a pocketful of rounds for it.
+    GiveRifle,
 }
 
 #[derive(Resource, Default)]
@@ -150,6 +152,13 @@ fn on_screen(script: Res<Script>, mut menu: ResMut<Menu>, mut inventory: ResMut<
                 assert!(health.heal_over_time(30.0, 12.0));
             }
             OnScreen::Resume => menu.close(),
+            OnScreen::GiveRifle => {
+                use fps_prototype::ammo::AmmoKind;
+                let rifle = inventory.make_gun(fps_prototype::weapons::WeaponKind::LeeEnfield, AmmoKind::BritishBall, 10);
+                inventory.slots[0] = Some(rifle);
+                let rounds = inventory.make(fps_prototype::inventory::ItemKind::Ammo(AmmoKind::BritishBall), 20);
+                inventory.add(rounds).unwrap();
+            }
         }
     }
 }
@@ -421,5 +430,35 @@ fn a_replay_that_has_been_put_off_course_is_put_back() {
     recording.frames[at].check = Some(pose);
     let (_, drift) = replay(recording, false);
     assert!(drift.resyncs >= 1 && drift.worst >= 4.9, "{drift:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Presses the mouse button down on frame `at` and lets it up on the next.
+fn click(steps: &mut [Step], at: usize) {
+    steps[at].left = true;
+}
+
+#[test]
+fn a_bolt_action_rifle_wants_a_click_to_work_its_bolt_between_shots_and_a_replay_does_the_same() {
+    let dir = temp("bolt");
+    let file = dir.join("play.pir");
+    let mut steps: Vec<Step> = (0..180).map(|_| Step { seconds: 0.0166, ..default() }).collect();
+    // The first shot; a click on the bolt; a click while it is still going (which does nothing); and, once it is home,
+    // the second shot.
+    for at in [10, 20, 30, 80] {
+        click(&mut steps, at);
+    }
+    let played = play_script_and_record(steps.clone(), vec![(2, OnScreen::GiveRifle)], &file);
+    assert_eq!((played.shots, played.ammo), (2, 8), "two shots, though the clicks were four");
+    // With the clicks on the bolt left out, the click for the second shot only works it, and the shot has to wait for another.
+    let mut fewer = steps;
+    fewer[20].left = false;
+    fewer[30].left = false;
+    let without = play_script_and_record(fewer, vec![(2, OnScreen::GiveRifle)], &file);
+    assert_eq!(without.shots, 1, "no bolt worked, no second shot");
+    let recording = Recording::read(&file).expect("what was recorded can be read");
+    let (replayed, drift) = replay(recording, true);
+    assert_eq!(drift.drifted, 0);
+    assert_eq!(replayed, without);
     let _ = std::fs::remove_dir_all(&dir);
 }

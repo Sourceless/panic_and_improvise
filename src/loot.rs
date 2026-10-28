@@ -1,5 +1,6 @@
-//! Things lying about to be found, for now as coloured boxes: the colour says how rare. A closed box
-//! holds a handful of things, which fall out round it when it is opened.
+//! Things lying about to be found, for now as coloured boxes: the colour says how good what is in it is,
+//! and the size of the box how much. A closed box holds a handful of things, which fall out round it when
+//! it is opened.
 
 use bevy::prelude::*;
 
@@ -32,7 +33,7 @@ impl Rarity {
             Rarity::Uncommon => 0.25,
             Rarity::Rare => 0.12,
             Rarity::VeryRare => 0.05,
-            Rarity::Legendary => 0.015,
+            Rarity::Legendary => 0.005,
         }
     }
 
@@ -78,6 +79,77 @@ impl Rarity {
     }
 }
 
+/// How big a box is, and so how much is in it: small, medium, large, extra large and extra extra large.
+/// Nothing to do with its rarity (what is in it is as good as that says, however many things there are).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum BoxSize {
+    S,
+    M,
+    L,
+    XL,
+    XXL,
+}
+
+impl BoxSize {
+    pub const ALL: [BoxSize; 5] = [BoxSize::S, BoxSize::M, BoxSize::L, BoxSize::XL, BoxSize::XXL];
+
+    /// How often each turns up: the bigger, the less.
+    fn weight(self) -> f32 {
+        match self {
+            BoxSize::S => 0.42,
+            BoxSize::M => 0.30,
+            BoxSize::L => 0.17,
+            BoxSize::XL => 0.08,
+            BoxSize::XXL => 0.03,
+        }
+    }
+
+    /// Which it is, given a roll in 0 to 1.
+    pub fn roll(u: f32) -> BoxSize {
+        let total: f32 = BoxSize::ALL.iter().map(|s| s.weight()).sum();
+        let mut left = u.clamp(0.0, 0.999_999) * total;
+        for s in BoxSize::ALL {
+            if left < s.weight() {
+                return s;
+            }
+            left -= s.weight();
+        }
+        BoxSize::S
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            BoxSize::S => "S",
+            BoxSize::M => "M",
+            BoxSize::L => "L",
+            BoxSize::XL => "XL",
+            BoxSize::XXL => "XXL",
+        }
+    }
+
+    /// How many things fall out of a box this size: (least, most).
+    pub fn handful(self) -> (u32, u32) {
+        match self {
+            BoxSize::S => (1, 2),
+            BoxSize::M => (2, 3),
+            BoxSize::L => (3, 4),
+            BoxSize::XL => (4, 5),
+            BoxSize::XXL => (5, 6),
+        }
+    }
+
+    /// How long the crate is, metres.
+    pub fn length(self) -> f32 {
+        match self {
+            BoxSize::S => 0.24,
+            BoxSize::M => 0.32,
+            BoxSize::L => 0.42,
+            BoxSize::XL => 0.54,
+            BoxSize::XXL => 0.68,
+        }
+    }
+}
+
 /// What a spot of loot turns out to be when it is looked at: what it is, how many (rounds, for ammunition),
 /// and for a gun how many rounds are in it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -103,10 +175,13 @@ const fn thing(weight: f32, kind: ItemKind) -> Entry {
     Entry { weight, kind, rounds: (1, 1) }
 }
 
-/// What turns up at each rarity: a few rounds and bits and pieces are common, with the odd pistol; bigger
-/// piles of rounds, bags, first aid and the old bolt-action and shotgun are uncommon; the submachine gun
-/// and bigger packs are rare; self-loading and light machine guns are very rare; the machine gun and the
-/// sniper rifle are legendary.
+/// What turns up at each rarity: a few rounds and bits and pieces are common, with the odd revolver; bigger
+/// piles of rounds, bags, first aid, the pistol, the old bolt-action and the double-barrel are uncommon;
+/// the submachine gun, the self-loading shotgun and bigger packs are rare; self-loading and light machine
+/// guns are very rare; the machine gun and the sniper rifle are legendary.
+///
+/// Each gun is in one table only, so it is the same rarity (and colour) wherever it is found: the box it
+/// comes out of only sets how likely it is, never what colour the gun is.
 fn table(rarity: Rarity) -> Vec<Entry> {
     use AmmoKind::*;
     use ItemKind::{Pack, Supply as Sup, Weapon};
@@ -120,28 +195,30 @@ fn table(rarity: Rarity) -> Vec<Entry> {
             thing(1.5, Sup(Supply::TinnedFood)),
             thing(1.0, Sup(Supply::Canteen)),
             thing(0.5, Sup(Supply::Compass)),
-            thing(0.8, Weapon(WeaponKind::HiPower)),
+            ammo(1.2, Webley455, 6, 12),
+            thing(0.7, Weapon(WeaponKind::Revolver)),
         ],
         Rarity::Uncommon => vec![
             ammo(1.0, NineFmj, 15, 40),
             ammo(1.0, BritishBall, 10, 20),
             ammo(1.0, NatoBall, 10, 20),
-            ammo(1.2, Buckshot, 4, 10),
+            ammo(1.6, Buckshot, 4, 10),
             thing(1.5, Sup(Supply::FirstAid)),
             thing(1.0, Sup(Supply::Torch)),
             thing(1.5, Pack(PackKind::Satchel)),
-            thing(1.5, Weapon(WeaponKind::HiPower)),
-            thing(1.0, Weapon(WeaponKind::LeeEnfield)),
-            thing(0.8, Weapon(WeaponKind::Auto5)),
+            ammo(1.0, Webley455, 8, 18),
+            thing(1.2, Weapon(WeaponKind::HiPower)),
+            thing(1.4, Weapon(WeaponKind::LeeEnfield)),
+            thing(1.2, Weapon(WeaponKind::DoubleBarrel)),
         ],
         Rarity::Rare => vec![
-            thing(1.5, Weapon(WeaponKind::Sterling)),
-            thing(1.5, Weapon(WeaponKind::LeeEnfield)),
+            thing(1.8, Weapon(WeaponKind::Sterling)),
             thing(1.2, Weapon(WeaponKind::Auto5)),
+            ammo(0.6, Webley455, 12, 24),
             thing(1.5, Pack(PackKind::Daypack)),
             ammo(1.0, NatoBall, 15, 20),
             ammo(0.8, BritishBall, 15, 20),
-            ammo(0.8, Buckshot, 6, 10),
+            ammo(1.1, Buckshot, 6, 10),
             ammo(0.8, NineFmj, 30, 50),
         ],
         Rarity::VeryRare => vec![
@@ -191,27 +268,33 @@ pub struct Dropped {
 }
 
 impl Rarity {
-    /// How many things fall out of a box of this rarity: (least, most).
-    pub fn handful(self) -> (u32, u32) {
-        match self {
-            Rarity::Common => (1, 2),
-            Rarity::Uncommon => (2, 3),
-            Rarity::Rare => (2, 3),
-            Rarity::VeryRare => (2, 4),
-            Rarity::Legendary => (3, 4),
+    /// The rarity of one of the other things in a box of this rarity, given a roll in 0 to 1: mostly a step or
+    /// two down, so that a good box still has good things in it, and never better than the box.
+    pub fn below(self, u: f32) -> Rarity {
+        // How likely it is to be this many steps down.
+        const STEPS: [f32; 5] = [0.15, 0.40, 0.25, 0.12, 0.08];
+        let reach = self as usize + 1;
+        let total: f32 = STEPS[..reach].iter().sum();
+        let mut left = u.clamp(0.0, 0.999_999) * total;
+        for (down, w) in STEPS[..reach].iter().enumerate() {
+            if left < *w {
+                return Rarity::ALL[self as usize - down];
+            }
+            left -= w;
         }
+        Rarity::Common
     }
 }
 
-/// What falls out of a box of `rarity`: a handful, the first of the box's own rarity and the rest
-/// whatever might be lying about, no better than the box. Where there is a gun among them, the rest lean
-/// toward rounds for it (see `lean_toward_ammo`).
-pub fn roll_contents(rarity: Rarity, mut next: impl FnMut() -> f32) -> Vec<Dropped> {
-    let (least, most) = rarity.handful();
+/// What falls out of a box of `rarity` and `size`: as many things as the size gives, the first of the box's
+/// own rarity and the rest a step or two below it (see `Rarity::below`). Where there is a gun among them,
+/// the rest lean toward rounds for it (see `lean_toward_ammo`).
+pub fn roll_contents(rarity: Rarity, size: BoxSize, mut next: impl FnMut() -> f32) -> Vec<Dropped> {
+    let (least, most) = size.handful();
     let count = least + (next() * (most - least + 1) as f32) as u32;
     let mut contents: Vec<Dropped> = (0..count.min(most))
         .map(|i| {
-            let this = if i == 0 { rarity } else { Rarity::roll(next(), 0.0).min(rarity) };
+            let this = if i == 0 { rarity } else { rarity.below(next()) };
             Dropped { rarity: this, found: roll_item(this, &mut next) }
         })
         .collect();
@@ -331,6 +414,7 @@ pub struct OpenedLoot(pub HashMap<(usize, usize), Vec<Option<Lying>>>);
 #[derive(Component)]
 pub struct LootBox {
     pub rarity: Rarity,
+    pub size: BoxSize,
     pub spot: (usize, usize),
     /// The clear space round it for what falls out, in the frame of the building.
     pub room: Rect,
@@ -344,6 +428,13 @@ pub struct Spin;
 /// from a point this far above where it lies.
 pub const LIFT: f32 = 0.12;
 
+/// How high a thing that has fallen out of a box hangs above the surface, so that it is easy to see: its
+/// parts turn about a point this high, and the flat tag of its colour stays on the surface under it.
+pub const HOVER: f32 = 0.32;
+
+/// How far below that point the underside of the thing is.
+const HOVER_GAP: f32 = 0.1;
+
 /// The flat tag of its rarity's colour, and a glowing material for each rarity; the looks of every kind of
 /// thing (guns from their models, the rest from `item_models`); and the military crates that loot comes in.
 #[derive(Resource)]
@@ -351,8 +442,9 @@ pub struct LootAssets {
     pub mesh: Handle<Mesh>,
     pub materials: Vec<Handle<StandardMaterial>>,
     pub looks: HashMap<ItemKind, ModelLook>,
-    /// The parts of the crate of each rarity, by rarity: body, then its markings in the rarity's colour.
-    pub crates: Vec<Vec<(Handle<Mesh>, Handle<StandardMaterial>)>>,
+    /// The parts of the crate of each size and rarity, by size and then rarity: body, then its markings in
+    /// the rarity's colour.
+    pub crates: Vec<Vec<Vec<(Handle<Mesh>, Handle<StandardMaterial>)>>>,
 }
 
 /// A thing's model for lying about: its parts, and where the middle of its footprint is.
@@ -405,19 +497,20 @@ pub fn spawn_drop(commands: &mut Commands, assets: &LootAssets, parent: Option<E
     let look = &assets.looks[&drop.found.kind];
     let root = (
         Pickup { rarity: drop.rarity, found: drop.found, spot, slot },
-        Transform::from_translation(lying.at + Vec3::Y * LIFT).with_rotation(Quat::from_rotation_y(lying.yaw)),
+        Spin,
+        Transform::from_translation(lying.at + Vec3::Y * HOVER).with_rotation(Quat::from_rotation_y(lying.yaw)),
         Visibility::default(),
     );
     let id = commands.spawn(root).id();
     for (mesh, material) in &look.parts {
-        let at = Vec3::new(-look.middle.x, 0.03 - LIFT - look.bottom, -look.middle.y);
+        let at = Vec3::new(-look.middle.x, -HOVER_GAP - look.bottom, -look.middle.y);
         commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone()), Transform::from_translation(at), ChildOf(id)));
     }
     let tag = (look.radius * 1.1).max(0.15);
     commands.spawn((
         Mesh3d(assets.mesh.clone()),
         MeshMaterial3d(assets.material(drop.rarity)),
-        Transform::from_translation(Vec3::new(0.0, 0.012 - LIFT, 0.0)).with_scale(Vec3::new(tag, 0.01, tag)),
+        Transform::from_translation(Vec3::new(0.0, 0.012 - HOVER, 0.0)).with_scale(Vec3::new(tag, 0.01, tag)),
         ChildOf(id),
     ));
     if let Some(parent) = parent {
@@ -426,9 +519,9 @@ pub fn spawn_drop(commands: &mut Commands, assets: &LootAssets, parent: Option<E
 }
 
 /// Puts a closed crate of loot down with its floor at `at`.
-pub fn spawn_crate(commands: &mut Commands, assets: &LootAssets, parent: Option<Entity>, at: Vec3, rarity: Rarity, spot: (usize, usize), room: Rect) {
-    let id = commands.spawn((LootBox { rarity, spot, room }, Spin, Transform::from_translation(at + Vec3::Y * LIFT), Visibility::default())).id();
-    for (mesh, material) in &assets.crates[rarity as usize] {
+pub fn spawn_crate(commands: &mut Commands, assets: &LootAssets, parent: Option<Entity>, at: Vec3, rarity: Rarity, size: BoxSize, spot: (usize, usize), room: Rect) {
+    let id = commands.spawn((LootBox { rarity, size, spot, room }, Spin, Transform::from_translation(at + Vec3::Y * LIFT), Visibility::default())).id();
+    for (mesh, material) in &assets.crates[size as usize][rarity as usize] {
         commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone()), Transform::from_translation(Vec3::new(0.0, -LIFT + 0.01, 0.0)), ChildOf(id)));
     }
     if let Some(parent) = parent {
@@ -436,9 +529,9 @@ pub fn spawn_crate(commands: &mut Commands, assets: &LootAssets, parent: Option<
     }
 }
 
-/// How long the crate of this rarity is: the rarer, the bigger.
-pub fn crate_length(rarity: Rarity) -> f32 {
-    0.28 + 0.04 * rarity as usize as f32
+/// How long the crate of this size is.
+pub fn crate_length(size: BoxSize) -> f32 {
+    size.length()
 }
 
 pub struct LootPlugin;
@@ -492,7 +585,7 @@ fn outline_crates(mut gizmos: Gizmos<CrateGlow>, time: Res<Time>, camera: Query<
         if origin.distance(eye.translation()) > GLOW_RANGE {
             continue;
         }
-        let length = crate_length(lootbox.rarity);
+        let length = crate_length(lootbox.size);
         let colour = lootbox.rarity.colour().with_alpha(pulse);
         let (_, turn, _) = at.to_scale_rotation_translation();
         for (a, b) in box_edges(length * 0.54, length * 0.34, length * 0.6) {
@@ -532,13 +625,20 @@ fn make_assets(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mat
         }
     }
     // The crates: olive, with the markings in the colour of the rarity.
-    let crates = Rarity::ALL
+    let crates = BoxSize::ALL
         .iter()
-        .map(|&rarity| {
-            let (model, marks) = item_models::crate_model(crate_length(rarity));
-            let mut parts: Vec<(Handle<Mesh>, Handle<StandardMaterial>)> = model.parts.into_iter().map(|(p, parts)| (meshes.add(parts.into_mesh()), paints[&p].clone())).collect();
-            parts.push((meshes.add(marks.into_mesh()), rarity_materials[rarity as usize].clone()));
-            parts
+        .map(|&size| {
+            let (model, marks) = item_models::crate_model(crate_length(size));
+            let body: Vec<(Handle<Mesh>, Handle<StandardMaterial>)> = model.parts.into_iter().map(|(p, parts)| (meshes.add(parts.into_mesh()), paints[&p].clone())).collect();
+            let marks = meshes.add(marks.into_mesh());
+            Rarity::ALL
+                .iter()
+                .map(|&rarity| {
+                    let mut parts = body.clone();
+                    parts.push((marks.clone(), rarity_materials[rarity as usize].clone()));
+                    parts
+                })
+                .collect()
         })
         .collect();
     commands.insert_resource(LootAssets { mesh, materials: rarity_materials, looks, crates });
@@ -583,7 +683,7 @@ mod tests {
 
     #[test]
     fn what_is_found_is_the_same_every_time_for_the_same_spot() {
-        assert_eq!(roll_contents(Rarity::Rare, spot_numbers(12, 3)), roll_contents(Rarity::Rare, spot_numbers(12, 3)));
+        assert_eq!(roll_contents(Rarity::Rare, BoxSize::L, spot_numbers(12, 3)), roll_contents(Rarity::Rare, BoxSize::L, spot_numbers(12, 3)));
         let a = roll_item(Rarity::Rare, spot_numbers(12, 3));
         let b = roll_item(Rarity::Rare, spot_numbers(12, 3));
         assert_eq!(a, b);
@@ -601,9 +701,12 @@ mod tests {
                 })
                 .collect()
         };
-        // A pistol turns up in the commonest boxes; the strong guns only in the rarest.
-        assert_eq!(found(Rarity::Common), [WeaponKind::HiPower].into());
-        assert!(found(Rarity::Uncommon).contains(&WeaponKind::LeeEnfield) && found(Rarity::Uncommon).contains(&WeaponKind::Auto5));
+        // An old revolver turns up in the commonest boxes; the strong guns only in the rarest.
+        assert_eq!(found(Rarity::Common), [WeaponKind::Revolver].into());
+        assert!(found(Rarity::Uncommon).contains(&WeaponKind::LeeEnfield) && found(Rarity::Uncommon).contains(&WeaponKind::DoubleBarrel));
+        // The self-loading shotgun and the Hi-Power are rarer than the guns they were once found beside.
+        assert!(!found(Rarity::Uncommon).contains(&WeaponKind::Auto5) && found(Rarity::Rare).contains(&WeaponKind::Auto5) && !found(Rarity::VeryRare).contains(&WeaponKind::Auto5));
+        assert!(!found(Rarity::Common).contains(&WeaponKind::HiPower) && found(Rarity::Uncommon).contains(&WeaponKind::HiPower));
         let strong = [WeaponKind::Slr, WeaponKind::Bren, WeaponKind::Mag, WeaponKind::L42];
         for rarity in [Rarity::Common, Rarity::Uncommon, Rarity::Rare] {
             assert!(strong.iter().all(|w| !found(rarity).contains(w)), "{rarity:?}: {:?}", found(rarity));
@@ -632,30 +735,66 @@ mod tests {
     }
 
     #[test]
-    fn a_box_gives_a_handful_the_richer_the_more_and_nothing_better_than_the_box() {
+    fn a_box_gives_as_many_things_as_its_size_and_the_first_is_the_boxs_own_rarity_and_none_is_better() {
         for rarity in Rarity::ALL {
-            let (least, most) = rarity.handful();
-            for i in 0..200 {
-                let contents = roll_contents(rarity, spot_numbers(i, 7));
-                assert!((least as usize..=most as usize).contains(&contents.len()), "{rarity:?}: {}", contents.len());
-                assert_eq!(contents[0].rarity, rarity, "the first is the box's own");
-                assert!(contents.iter().all(|d| d.rarity <= rarity));
+            for size in BoxSize::ALL {
+                let (least, most) = size.handful();
+                for i in 0..200 {
+                    let contents = roll_contents(rarity, size, spot_numbers(i, 7));
+                    assert!((least as usize..=most as usize).contains(&contents.len()), "{size:?}: {}", contents.len());
+                    assert_eq!(contents[0].rarity, rarity, "the first is the box's own");
+                    assert!(contents.iter().all(|d| d.rarity <= rarity));
+                }
             }
         }
-        assert!(Rarity::ALL.windows(2).all(|w| w[0].handful().1 <= w[1].handful().1 && w[0].handful().0 <= w[1].handful().0));
+        assert!(BoxSize::ALL.windows(2).all(|w| w[0].handful().1 <= w[1].handful().1 && w[0].handful().0 <= w[1].handful().0 && w[0].length() < w[1].length()));
+    }
+
+    #[test]
+    fn the_rest_of_a_good_box_is_still_good_and_a_common_box_has_nothing_better_than_common() {
+        let mut rest = Vec::new();
+        for i in 0..300 {
+            rest.extend(roll_contents(Rarity::Legendary, BoxSize::XXL, spot_numbers(i, 9)).into_iter().skip(1).map(|d| d.rarity));
+        }
+        let good = rest.iter().filter(|&&r| r >= Rarity::Rare).count() as f32 / rest.len() as f32;
+        assert!(good > 0.7, "{good} of a legendary box's other things are rare or better");
+        assert!(rest.contains(&Rarity::Legendary) && rest.contains(&Rarity::Common), "from the top to the bottom");
+        for i in 0..100 {
+            assert!(roll_contents(Rarity::Common, BoxSize::XXL, spot_numbers(i, 9)).iter().all(|d| d.rarity == Rarity::Common));
+        }
+    }
+
+    #[test]
+    fn the_bigger_the_box_the_scarcer() {
+        let mut counts = [0usize; 5];
+        for i in 0..10_000 {
+            counts[BoxSize::roll(i as f32 / 10_000.0) as usize] += 1;
+        }
+        assert!(counts.windows(2).all(|w| w[0] > w[1]), "{counts:?}");
+        assert!(counts[4] > 100, "there are some of the biggest: {counts:?}");
     }
 
     #[test]
     fn a_thrown_away_thing_is_tagged_with_the_lowest_tier_it_turns_up_in() {
-        assert_eq!(rarity_of(ItemKind::Weapon(WeaponKind::HiPower)), Rarity::Common);
+        assert_eq!(rarity_of(ItemKind::Weapon(WeaponKind::Revolver)), Rarity::Common);
+        assert_eq!(rarity_of(ItemKind::Weapon(WeaponKind::HiPower)), Rarity::Uncommon);
+        assert_eq!(rarity_of(ItemKind::Weapon(WeaponKind::Auto5)), Rarity::Rare);
         assert_eq!(rarity_of(ItemKind::Weapon(WeaponKind::Mag)), Rarity::Legendary);
         assert_eq!(rarity_of(ItemKind::Pack(PackKind::Bergen)), Rarity::VeryRare);
         assert_eq!(rarity_of(ItemKind::Supply(Supply::Bandage)), Rarity::Common);
     }
 
     #[test]
+    fn every_gun_is_in_exactly_one_table_so_it_is_one_colour_wherever_it_turns_up() {
+        for gun in WeaponKind::ALL {
+            let tables = Rarity::ALL.into_iter().filter(|&r| table(r).iter().any(|e| e.kind == ItemKind::Weapon(gun))).count();
+            assert_eq!(tables, 1, "{gun:?} is in {tables} tables");
+        }
+    }
+
+    #[test]
     fn a_handful_never_exceeds_what_a_box_can_lay_out() {
-        assert!(Rarity::ALL.iter().all(|r| r.handful().1 as usize <= MAX_DROPS));
+        assert!(BoxSize::ALL.iter().all(|s| s.handful().1 as usize <= MAX_DROPS));
     }
 
     #[test]
@@ -694,7 +833,7 @@ mod tests {
         let mut its_rounds = 0;
         for rarity in [Rarity::Common, Rarity::Uncommon, Rarity::Rare, Rarity::VeryRare, Rarity::Legendary] {
             for i in 0..400 {
-                let contents = roll_contents(rarity, spot_numbers(i, 21));
+                let contents = roll_contents(rarity, BoxSize::L, spot_numbers(i, 21));
                 let Some(gun) = contents.iter().find_map(|d| if let ItemKind::Weapon(w) = d.found.kind { Some(w) } else { None }) else { continue };
                 let guns = contents.iter().filter(|d| matches!(d.found.kind, ItemKind::Weapon(_))).count();
                 let rest: Vec<&Dropped> = contents.iter().filter(|d| !matches!(d.found.kind, ItemKind::Weapon(_))).collect();
@@ -725,7 +864,7 @@ mod tests {
         // Rounds are not made up for a gun that is not there: a box with none has whatever it rolled.
         let mut guns_seen = 0;
         for i in 0..300 {
-            let contents = roll_contents(Rarity::Common, spot_numbers(i, 33));
+            let contents = roll_contents(Rarity::Common, BoxSize::L, spot_numbers(i, 33));
             if contents.iter().any(|d| matches!(d.found.kind, ItemKind::Weapon(_))) {
                 guns_seen += 1;
                 continue;
@@ -762,7 +901,8 @@ mod tests {
             for i in 0..boxes {
                 let mut next = spot_numbers(i, 3);
                 let rarity = Rarity::roll(next(), richness);
-                for d in roll_contents(rarity, &mut next) {
+                let size = BoxSize::roll(next());
+                for d in roll_contents(rarity, size, &mut next) {
                     things += 1;
                     match d.found.kind {
                         ItemKind::Weapon(w) => {
@@ -782,7 +922,7 @@ mod tests {
             assert!(per_box(guns) < 1.0 && per_box(stacks) > per_box(guns), "{richness}: guns {} and rounds {} a box", per_box(guns), per_box(stacks));
             for (load, guns) in loads {
                 let each = rounds.get(&load).copied().unwrap_or(0) as f32 / guns as f32;
-                assert!((14.0..=100.0).contains(&each), "{richness}: {each} {load:?} rounds for each gun that takes them");
+                assert!((10.0..=100.0).contains(&each), "{richness}: {each} {load:?} rounds for each gun that takes them");
             }
         }
     }

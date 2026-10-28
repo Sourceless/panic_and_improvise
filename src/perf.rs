@@ -262,7 +262,7 @@ fn auto_screenshot(
             }
         }
     }
-    // FPS_GUN=sterling|hi_power|slr|bren|mag|l42|auto5|lee_enfield puts that gun, loaded, in the first slot
+    // FPS_GUN=sterling|hi_power|slr|bren|mag|l42|auto5|lee_enfield|revolver|double puts that gun, loaded, in the first slot
     // (FPS_GUN2 the second); FPS_INVENTORY=1 opens the inventory. (FPS_AIM=1, read by the gun, holds it on its sights; FPS_MENU=1 opens the menu.)
     if *frame == 100 {
         let kind_of = |name: &str| match name {
@@ -274,6 +274,8 @@ fn auto_screenshot(
             "auto5" => Some(crate::weapons::WeaponKind::Auto5),
             "lee_enfield" => Some(crate::weapons::WeaponKind::LeeEnfield),
             "sterling" => Some(crate::weapons::WeaponKind::Sterling),
+            "revolver" => Some(crate::weapons::WeaponKind::Revolver),
+            "double" => Some(crate::weapons::WeaponKind::DoubleBarrel),
             _ => None,
         };
         for (slot, var) in [(0usize, "FPS_GUN"), (1, "FPS_GUN2")] {

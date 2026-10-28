@@ -231,6 +231,8 @@ fn build_app(headed: bool, rx: Receiver<Command>) -> App {
         ));
     }
 
+    // The sounds are played (the tests look at them) but not heard.
+    app.insert_resource(bevy::audio::GlobalVolume::new(bevy::audio::Volume::Linear(0.0)));
     app.insert_resource(TerrainMap::flat(0.0))
         .add_plugins(GamePlugin)
         .insert_resource(Bridge { rx: Mutex::new(rx) })

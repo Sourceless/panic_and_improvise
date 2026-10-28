@@ -102,7 +102,15 @@ fn update_ammo_counter(guns: Query<&Gun>, inventory: Res<crate::inventory::Inven
         // Which gun, with what, and how the trigger is set; a second line under the count.
         let load = gun.selected.def().short;
         let mode = if gun.def().modes.len() > 1 { format!("  {}", gun.mode.name()) } else { String::new() };
-        let shown = format!("{}\n{}  {}{}", ammo_text(gun.ammo, reserve, gun.reloading()), gun.def().name, load, mode);
+        let count = if gun.reloading() && gun.def().mechanism.style != crate::gun_state::ReloadStyle::Magazine {
+            // Rounds going in a few at a time: how many are in the gun now, out of how many it holds.
+            format!("LOADING  {} / {}", gun.ammo, gun.def().magazine)
+        } else if gun.state == crate::gun_state::State::Unworked {
+            format!("{} / {reserve}   CLICK: BOLT", gun.ammo)
+        } else {
+            ammo_text(gun.ammo, reserve, gun.reloading())
+        };
+        let shown = format!("{count}\n{}  {}{}", gun.def().name, load, mode);
         if text.0 != shown {
             text.0 = shown;
         }
