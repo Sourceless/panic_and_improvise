@@ -10,8 +10,9 @@
 //! told only which one the bot is firing at, and works out whether it hits. Zombies go after the bot as they
 //! do the player. If it is brought down it lies where it fell until the host gets it up again.
 
-use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
-use std::time::{Duration, Instant};
+use std::net::{ToSocketAddrs, UdpSocket};
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 use bevy::prelude::*;
 
@@ -19,6 +20,7 @@ use crate::collision::Colliders;
 use crate::impact::surface_hit;
 use crate::map::TerrainMap;
 use crate::navigation::Pursuit;
+use crate::net_client::Connection;
 use crate::net::{Packet, PlayerState, ZombieSeen, CLIENT_HEALTH, EYE_HEIGHT, HOST_ID, SEND_RATE, SILENCE_LIMIT};
 use crate::walking::{stand, walk};
 
@@ -112,52 +114,31 @@ pub struct Bot {
 impl Bot {
     /// Asks the host at `server` to let it in as `name`, trying again every half second for `patience`.
     pub fn join(server: impl ToSocketAddrs, name: &str, patience: Duration) -> Result<Bot, String> {
-        let server: SocketAddr = server.to_socket_addrs().map_err(|e| format!("no such address: {e}"))?.next().ok_or("no such address")?;
-        let socket = UdpSocket::bind(if server.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" }).map_err(|e| format!("could not open a socket: {e}"))?;
-        socket.connect(server).map_err(|e| format!("could not reach {server}: {e}"))?;
-        socket.set_read_timeout(Some(Duration::from_millis(500))).map_err(|e| e.to_string())?;
-        let started = Instant::now();
-        let mut buffer = [0u8; 1500];
-        while started.elapsed() < patience {
-            socket.send(&Packet::Join { name: name.to_string() }.encode()).map_err(|e| format!("could not send to {server}: {e}"))?;
-            // Anything that is not the answer is skipped over until the half second is up.
-            let asked = Instant::now();
-            while asked.elapsed() < Duration::from_millis(500) {
-                let Ok(n) = socket.recv(&mut buffer) else { continue };
-                match Packet::decode(&buffer[..n]) {
-                    Some(Packet::Welcome { id, seed, host }) => {
-                        socket.set_nonblocking(true).map_err(|e| e.to_string())?;
-                        return Ok(Bot {
-                            socket,
-                            name: name.to_string(),
-                            id,
-                            seed,
-                            me: host,
-                            host: Some(host),
-                            mode: Mode::Waiting,
-                            stay: false,
-                            shoot: true,
-                            health: CLIENT_HEALTH,
-                            respawn_in: 0.0,
-                            zombies: Vec::new(),
-                            target: None,
-                            shots: 0,
-                            velocity: Vec2::ZERO,
-                            falling: 0.0,
-                            pursuit: Pursuit::default(),
-                            since_send: 0.0,
-                            since_shot: FIRE_EVERY,
-                            silent_for: 0.0,
-                            was_down: false,
-                            luck: 0x2545_F491 ^ seed as u32 ^ id as u32,
-                        });
-                    }
-                    Some(Packet::Refused) => return Err("the game is full, or is a different version".into()),
-                    _ => {}
-                }
-            }
-        }
-        Err(format!("nobody answered at {server}: is the game running with --host?"))
+        let Connection { socket, id, seed, host, .. } = Connection::join(server, name, patience, &AtomicBool::new(false))?;
+        Ok(Bot {
+            socket,
+            name: name.to_string(),
+            id,
+            seed,
+            me: host,
+            host: Some(host),
+            mode: Mode::Waiting,
+            stay: false,
+            shoot: true,
+            health: CLIENT_HEALTH,
+            respawn_in: 0.0,
+            zombies: Vec::new(),
+            target: None,
+            shots: 0,
+            velocity: Vec2::ZERO,
+            falling: 0.0,
+            pursuit: Pursuit::default(),
+            since_send: 0.0,
+            since_shot: FIRE_EVERY,
+            silent_for: 0.0,
+            was_down: false,
+            luck: 0x2545_F491 ^ seed as u32 ^ id as u32,
+        })
     }
 
     fn position(&self) -> Vec2 {

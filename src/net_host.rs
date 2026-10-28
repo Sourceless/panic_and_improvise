@@ -58,6 +58,14 @@ pub struct Host {
 }
 
 impl Host {
+    /// Opens a socket at `address` (like `0.0.0.0:7777`; port 0 picks a free one) to be hosted on.
+    pub fn bind(address: &str) -> Result<Host, String> {
+        let socket = UdpSocket::bind(address).and_then(|s| s.set_nonblocking(true).map(|()| s)).map_err(|e| format!("could not host on {address}: {e}"))?;
+        let host = Host { socket, lobby: Lobby::default(), since_send: 0.0, tracers: Vec::new(), luck: 0x1F2E_3D4C };
+        info!("hosting on {}: other players can join with `cargo run --bin bot -- <this machine's address>:{}`", host.local_addr(), host.local_addr().port());
+        Ok(host)
+    }
+
     pub fn local_addr(&self) -> SocketAddr {
         self.socket.local_addr().expect("a bound socket has an address")
     }
@@ -116,17 +124,18 @@ pub fn with_port(address: &str) -> String {
 
 impl Plugin for HostPlugin {
     fn build(&self, app: &mut App) {
+        // The game can be hosted from the start (as asked on the command line) or from the title screen, which
+        // puts a `Host` in the world when it is chosen; either way, the systems wait for one.
+        let hosting = resource_exists::<Host>;
+        app.add_systems(Update, (receive, broadcast, show_players).chain().run_if(hosting))
+            .add_systems(Update, draw_tracers.run_if(hosting).run_if(resource_exists::<GizmoConfigStore>));
         let Some(address) = &self.address else { return };
-        let socket = match UdpSocket::bind(address).and_then(|s| s.set_nonblocking(true).map(|()| s)) {
-            Ok(socket) => socket,
-            Err(error) => {
-                error!("could not host on {address}: {error}");
-                return;
+        match Host::bind(address) {
+            Ok(host) => {
+                app.insert_resource(host);
             }
-        };
-        let host = Host { socket, lobby: Lobby::default(), since_send: 0.0, tracers: Vec::new(), luck: 0x1F2E_3D4C };
-        info!("hosting on {}: other players can join with `cargo run --bin bot -- <this machine's address>:{}`", host.local_addr(), host.local_addr().port());
-        app.insert_resource(host).add_systems(Update, (receive, broadcast, show_players).chain()).add_systems(Update, draw_tracers.run_if(resource_exists::<GizmoConfigStore>));
+            Err(error) => error!("{error}"),
+        }
     }
 }
 
@@ -253,34 +262,46 @@ fn broadcast(mut host: ResMut<Host>, time: Res<Time>, player: Query<(&Transform,
     }
 }
 
-/// A figure for each player who has joined, moving to where they are; one for each that has gone is taken away.
-fn show_players(mut commands: Commands, host: Res<Host>, time: Res<Time>, look: Option<Res<FigureLook>>, guns: Option<Res<crate::weapon::WeaponAssets>>, mut figures: Query<(Entity, &mut Transform, &RemotePlayer)>) {
-    for (entity, _, figure) in &figures {
-        if host.lobby.clients.iter().all(|c| c.id != figure.0) {
+/// A player to be shown as a figure: who, where, and whether they are down.
+pub struct FigureWanted {
+    pub id: u8,
+    pub state: PlayerState,
+    pub down: bool,
+}
+
+/// A figure for each of `wanted`, moving to where they are; one for each that is no longer wanted is taken away.
+pub fn show_figures(commands: &mut Commands, time: &Time, look: Option<&FigureLook>, guns: Option<&crate::weapon::WeaponAssets>, figures: &mut Query<(Entity, &mut Transform, &RemotePlayer)>, wanted: &[FigureWanted]) {
+    for (entity, _, figure) in figures.iter() {
+        if wanted.iter().all(|w| w.id != figure.0) {
             commands.entity(entity).despawn();
         }
     }
     let glide = 1.0 - (-GLIDE * time.delta_secs()).exp();
-    for client in &host.lobby.clients {
+    for w in wanted {
         // One who is down lies on their back.
-        let down = !client.alive();
-        let goal = Vec3::new(client.state.x, client.state.y + if down { 0.2 } else { 0.0 }, client.state.z);
-        let turn = Quat::from_rotation_y(client.state.yaw) * if down { Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2) } else { Quat::IDENTITY };
-        match figures.iter_mut().find(|(_, _, f)| f.0 == client.id) {
+        let goal = Vec3::new(w.state.x, w.state.y + if w.down { 0.2 } else { 0.0 }, w.state.z);
+        let turn = Quat::from_rotation_y(w.state.yaw) * if w.down { Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2) } else { Quat::IDENTITY };
+        match figures.iter_mut().find(|(_, _, f)| f.0 == w.id) {
             Some((_, mut at, _)) => {
                 at.translation = at.translation.lerp(goal, glide);
                 at.rotation = at.rotation.slerp(turn, glide);
             }
             None => {
-                let mut figure = commands.spawn((RemotePlayer(client.id), Transform::from_translation(goal).with_rotation(turn), Visibility::default()));
+                let mut figure = commands.spawn((RemotePlayer(w.id), Transform::from_translation(goal).with_rotation(turn), Visibility::default()));
                 figure.insert(Gait::default());
-                if let Some(look) = &look {
-                    let carried = guns.as_ref().map(|g| crate::figure::gun_parts(g, WeaponKind::Sterling)).unwrap_or_default();
-                    figure.with_children(|f| spawn_figure(f, look, Seen::FromOutside, client.id as usize, &carried));
+                if let Some(look) = look {
+                    let carried = guns.map(|g| crate::figure::gun_parts(g, WeaponKind::Sterling)).unwrap_or_default();
+                    figure.with_children(|f| spawn_figure(f, look, Seen::FromOutside, w.id as usize, &carried));
                 }
             }
         }
     }
+}
+
+/// A figure for each player who has joined, moving to where they are; one for each that has gone is taken away.
+fn show_players(mut commands: Commands, host: Res<Host>, time: Res<Time>, look: Option<Res<FigureLook>>, guns: Option<Res<crate::weapon::WeaponAssets>>, mut figures: Query<(Entity, &mut Transform, &RemotePlayer)>) {
+    let wanted: Vec<FigureWanted> = host.lobby.clients.iter().map(|c| FigureWanted { id: c.id, state: c.state, down: !c.alive() }).collect();
+    show_figures(&mut commands, &time, look.as_deref(), guns.as_deref(), &mut figures, &wanted);
 }
 
 /// The parts of a person, standing about 1.8 m tall, facing -Z.

@@ -8,6 +8,7 @@ use fps_prototype::controls::{controls_path, Controls, Preset};
 use fps_prototype::playback::PlaybackPlugin;
 use fps_prototype::recording::{recordings_dir, Recording, EXTENSION};
 use fps_prototype::terrain::TerrainPlugin;
+use fps_prototype::title::{draw_title, playing, Request, Title, TitlePlugin};
 use fps_prototype::GamePlugin;
 
 /// A recording to play instead of playing, and whether to keep the player exactly to what it recorded.
@@ -16,12 +17,39 @@ struct Replay {
     strict: bool,
 }
 
+/// What the command line asked for besides what it did and exited for.
+struct Launch {
+    replay: Option<Replay>,
+    /// Start in a game straight away (as `--host` and `--record` do), without the title.
+    skip_title: bool,
+    /// A game to join, as `--join` says: (address, name).
+    join: Option<(String, String)>,
+}
+
 fn main() {
-    let replay = match command_line() {
-        Ok(replay) => replay,
+    let Launch { replay, skip_title, join } = match command_line() {
+        Ok(launch) => launch,
         Err(code) => std::process::exit(code),
     };
+    // The title is where a game is chosen; a replay, the benchmark and screenshot modes, the shooting range and a
+    // game hosted from the start all know what they are and go straight to it.
+    let with_title = replay.is_none() && !skip_title && ["FPS_BENCH", "FPS_SCREENSHOT", "FPS_RANGE", "FPS_HOST", "FPS_RECORD", "FPS_NO_TITLE"].iter().all(|v| std::env::var_os(v).is_none());
     let mut app = App::new();
+    if with_title {
+        let mut title = Title::default();
+        if let Some((address, name)) = join {
+            let name = if name.is_empty() { title.name.clone() } else { name };
+            title.request = Some(Request::Join(address, name));
+        }
+        // For trying it without the mouse: `FPS_TITLE_REQUEST=single` (or `host`) chooses on the title's behalf.
+        match std::env::var("FPS_TITLE_REQUEST").as_deref() {
+            Ok("single") => title.request = Some(Request::Single),
+            Ok("host") => title.request = Some(Request::Host("0.0.0.0:7777".to_string())),
+            _ => {}
+        }
+        // Before the game, which makes no map for it to be there.
+        app.insert_resource(title);
+    }
     app
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -32,12 +60,20 @@ fn main() {
             ..default()
         }))
         .add_plugins((GamePlugin, TerrainPlugin, EguiPlugin::default()))
-        .add_plugins((fps_prototype::crosshair::CrosshairPlugin, fps_prototype::health::HealthPlugin, fps_prototype::zombie::ZombiePlugin, fps_prototype::net_host::HostPlugin::from_env()))
-        // The menu Escape opens.
-        .add_systems(EguiPrimaryContextPass, (fps_prototype::menu::draw_menu, fps_prototype::inventory_ui::draw_inventory, fps_prototype::hud::draw_hud, fps_prototype::playback::draw_playback));
+        .add_plugins((fps_prototype::crosshair::CrosshairPlugin, fps_prototype::health::HealthPlugin, fps_prototype::zombie::ZombiePlugin, fps_prototype::net_host::HostPlugin::from_env(), fps_prototype::net_client::ClientPlugin))
+        // The menu Escape opens, and the rest of what is drawn over the game (none of it before the game is on).
+        .add_systems(
+            EguiPrimaryContextPass,
+            (fps_prototype::menu::draw_menu, fps_prototype::inventory_ui::draw_inventory, fps_prototype::hud::draw_hud, fps_prototype::playback::draw_playback, fps_prototype::net_client::draw_client_status).run_if(playing),
+        )
+        .add_systems(EguiPrimaryContextPass, draw_title);
     // Last, to have the last word on what the game starts with.
     if let Some(replay) = replay {
         app.add_plugins(PlaybackPlugin { recording: replay.recording, strict: replay.strict });
+    }
+    // Last of all: it takes the game's startup and update schedules out of the way until a game is chosen.
+    if with_title {
+        app.add_plugins(TitlePlugin);
     }
     app.run();
 }
@@ -54,11 +90,13 @@ fn window_size() -> (u32, u32) {
 
 /// The flags that do something and exit, instead of starting the game, return the exit code. A recording to play is
 /// returned for the game to be started with.
-fn command_line() -> Result<Option<Replay>, i32> {
+fn command_line() -> Result<Launch, i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut replay_file = None;
     let mut strict = false;
     let mut record = None;
+    let mut skip_title = false;
+    let mut join = None;
     let mut rest = args.iter().peekable();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -85,6 +123,18 @@ fn command_line() -> Result<Option<Replay>, i32> {
                 // Safe here: nothing else is running yet.
                 unsafe { std::env::set_var("FPS_RANGE", "1") };
             }
+            "--play" => skip_title = true,
+            "--join" => {
+                // Straight to joining a game: the title does it, and says if it cannot.
+                let address = rest.next_if(|a| !a.starts_with("--")).cloned().unwrap_or_else(|| "127.0.0.1".to_string());
+                let name = if rest.peek().is_some_and(|a| *a == "--name") {
+                    rest.next();
+                    rest.next().cloned().unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                join = Some((address, name));
+            }
             "--host" => {
                 // Hosting is switched on by the environment too, for the plugin to see.
                 let address = rest.next_if(|a| !a.starts_with("--") && !a.ends_with(&format!(".{EXTENSION}"))).cloned().unwrap_or_else(|| "0.0.0.0".to_string());
@@ -103,7 +153,9 @@ fn command_line() -> Result<Option<Replay>, i32> {
             },
             "--strict" => strict = true,
             "--help" | "-h" => {
-                println!("fps_prototype                        play");
+                println!("fps_prototype                        the title: singleplayer, host or join a game (Multiplayer), watch a replay");
+                println!("fps_prototype --play                  play alone straight away, without the title");
+                println!("fps_prototype --join [address[:port]] [--name NAME]  join a hosted game straight away (default port 7777)");
                 println!("fps_prototype <recording.{EXTENSION}>        play a recording again (also --replay <file>); --strict never puts the player back on course");
                 println!("fps_prototype --record [file]         play, recording from the start (the menu can also start and stop one)");
                 println!("fps_prototype --range                  play on a shooting range: every gun and load lying out, dummies to 300 m");
@@ -129,10 +181,10 @@ fn command_line() -> Result<Option<Replay>, i32> {
         })?;
         // The map and what the game starts with are the recording's.
         unsafe { std::env::set_var("FPS_SEED", recording.header.seed.to_string()) };
-        return Ok(Some(Replay { recording, strict }));
+        return Ok(Launch { replay: Some(Replay { recording, strict }), skip_title: true, join: None });
     }
     if let Some(file) = record {
         unsafe { std::env::set_var("FPS_RECORD", if file.is_empty() { "1".to_string() } else { file }) };
     }
-    Ok(None)
+    Ok(Launch { replay: None, skip_title, join })
 }

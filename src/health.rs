@@ -191,7 +191,9 @@ impl Plugin for HealthPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PlayerHealth>()
             .add_systems(Startup, load_cries)
-            .add_systems(Update, (tick_health, cry_when_hurt, die_and_restart).chain())
+            .add_systems(Update, (tick_health, cry_when_hurt).chain())
+            // (In a game that has been joined, whether the player is down is the host's to say.)
+            .add_systems(Update, die_and_restart.after(cry_when_hurt).run_if(crate::net_client::not_a_client))
             .add_systems(PostUpdate, shake_view.before(TransformSystems::Propagate));
     }
 }

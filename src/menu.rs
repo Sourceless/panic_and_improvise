@@ -123,7 +123,7 @@ pub fn draw_menu(
     }
     let ctx = contexts.ctx_mut()?;
     let mut state = (menu.rebinding, menu.message.clone());
-    let (mut choose, mut rebind, mut save, mut reset, mut resume, mut quit) = (None, None, false, false, false, false);
+    let (mut choose, mut rebind, mut save, mut reset, mut resume, mut quit, mut to_title) = (None, None, false, false, false, false, false);
     let unsaved = menu.has_unsaved_changes(&controls);
     egui::Window::new(format!("Panic and Improvise v{}", crate::VERSION))
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -177,11 +177,22 @@ pub fn draw_menu(
             }
             });
             ui.separator();
+            if ui.add_sized([ui.available_width(), 28.0], egui::Button::new("Main menu")).on_hover_text("Leaves this game and starts the program again at the title").clicked() {
+                to_title = true;
+            }
             if ui.add_sized([ui.available_width(), 28.0], egui::Button::new("Exit game")).clicked() {
                 quit = true;
             }
             ui.label("Escape closes this menu.");
         });
+    if to_title {
+        // The title is where the program starts, so it is started again; this one leaves as it would for Exit
+        // (a game that was joined says goodbye, a recording is closed).
+        match std::env::current_exe().and_then(|exe| std::process::Command::new(exe).spawn()) {
+            Ok(_) => quit = true,
+            Err(error) => menu.message = format!("Could not go back to the title: {error}"),
+        }
+    }
     if quit {
         // A recording being made is closed properly as the game leaves.
         exit.write(AppExit::Success);

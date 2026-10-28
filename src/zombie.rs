@@ -156,6 +156,11 @@ impl ZombieKind {
     fn index(self) -> usize {
         self as usize
     }
+
+    /// The kind the network numbers `index` (see `ZombieSeen::kind`), if it is one.
+    pub fn from_index(index: usize) -> Option<ZombieKind> {
+        ZombieKind::ALL.get(index).copied()
+    }
 }
 
 /// What `Zombie::chasing` is when it is after the player at the keyboard.
@@ -447,10 +452,10 @@ impl ZombieDice {
 }
 
 #[derive(Resource)]
-struct ZombieAssets {
+pub struct ZombieAssets {
     /// The skin and the rags of each kind, by kind.
-    looks: Vec<(Handle<StandardMaterial>, Handle<StandardMaterial>)>,
-    cuboid: Handle<Mesh>,
+    pub(crate) looks: Vec<(Handle<StandardMaterial>, Handle<StandardMaterial>)>,
+    pub(crate) cuboid: Handle<Mesh>,
 }
 
 /// The recordings of groans (`sounds/zombie/groan_N.wav`) and of the snarl of the fast kind.
@@ -474,10 +479,12 @@ impl Plugin for ZombiePlugin {
             .init_resource::<Drops>()
             .init_resource::<PlayerHealth>()
             .add_systems(Startup, (make_assets, load_voices))
-            .add_systems(Update, (move_zombies, fall_and_drop, groan, zombie_footsteps));
-        // A shooting range is for shooting at the dummies, not at these.
+            .add_systems(Update, (move_zombies, fall_and_drop).run_if(crate::net_client::not_a_client))
+            .add_systems(Update, (groan, zombie_footsteps));
+        // A shooting range is for shooting at the dummies, not at these. (A game that has been joined has the
+        // host's zombies, shown for it; it has none of its own.)
         if std::env::var_os("FPS_RANGE").is_none() {
-            app.add_systems(Update, (spawn_zombies, retire_zombies));
+            app.add_systems(Update, (spawn_zombies, retire_zombies).run_if(crate::net_client::not_a_client));
         }
     }
 }
@@ -501,7 +508,7 @@ fn load_voices(mut commands: Commands, assets: Option<Res<AssetServer>>) {
 }
 
 /// Puts a zombie down with its feet at `base`, facing `yaw`: a stooped figure with its arms out in front.
-fn spawn_zombie(commands: &mut Commands, assets: &ZombieAssets, kind: ZombieKind, base: Vec3, yaw: f32, id: u32) {
+pub fn spawn_zombie(commands: &mut Commands, assets: &ZombieAssets, kind: ZombieKind, base: Vec3, yaw: f32, id: u32) -> Entity {
     let t = kind.traits();
     let (skin, rags) = &assets.looks[kind.index()];
     let part = |centre: Vec3, size: Vec3, material: &Handle<StandardMaterial>| (Mesh3d(assets.cuboid.clone()), MeshMaterial3d(material.clone()), Transform::from_translation(centre).with_scale(size));
@@ -514,7 +521,8 @@ fn spawn_zombie(commands: &mut Commands, assets: &ZombieAssets, kind: ZombieKind
                 z.spawn(part(Vec3::new(side * 0.12, 0.38, 0.0), Vec3::new(0.18, 0.76, 0.2), rags));
                 z.spawn(part(Vec3::new(side * 0.33, 1.3, -0.35), Vec3::new(0.12, 0.12, 0.7), skin));
             }
-        });
+        })
+        .id()
 }
 
 #[allow(clippy::too_many_arguments)]

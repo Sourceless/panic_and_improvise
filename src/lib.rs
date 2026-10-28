@@ -32,6 +32,7 @@ pub mod meshbake;
 pub mod menu;
 pub mod mipmaps;
 pub mod muzzle_flash;
+pub mod net_client;
 pub mod net_host;
 pub mod net;
 pub mod navigation;
@@ -52,6 +53,7 @@ pub mod settlement_plan;
 pub mod target;
 pub mod vegetation;
 pub mod terrain;
+pub mod title;
 pub mod water_material;
 pub mod wind;
 pub mod weapon;
@@ -116,7 +118,11 @@ pub struct GamePlugin;
 
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
-        if !app.world().contains_resource::<TerrainMap>() {
+        if app.world().contains_resource::<title::Title>() {
+            // The title makes the map when a game is chosen; until then there is only somewhere flat for the
+            // systems that want a map to look at.
+            app.insert_resource(TerrainMap::flat(0.0));
+        } else if !app.world().contains_resource::<TerrainMap>() {
             let seed = game_seed();
             info!("map seed {seed} (run with FPS_SEED={seed} to get this map again)");
             app.insert_resource(TerrainMap::generate(seed, &params::GenParams::default()));
