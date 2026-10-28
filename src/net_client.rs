@@ -21,10 +21,9 @@ use bevy::prelude::*;
 use crate::figure::FigureLook;
 use crate::health::PlayerHealth;
 use crate::map::TerrainMap;
-use crate::net::{Packet, PlayerState, ZombieSeen, HOST_ID, SEND_RATE, SILENCE_LIMIT};
+use crate::net::{Packet, PlayerState, Request, ShotInfo, WorldEvent, ZombieSeen, HOST_ID, SEND_RATE, SILENCE_LIMIT};
 use crate::net_host::{show_figures, FigureWanted};
 use crate::player::FpsCamera;
-use crate::weapon::Gun;
 use crate::zombie::Zombie;
 
 /// How often, seconds, the host is told the player is still there while the world is being made.
@@ -36,12 +35,11 @@ const ASK_EVERY: Duration = Duration::from_millis(500);
 /// How quickly, per second, a figure closes on the place it was last told it is at.
 const GLIDE: f32 = 14.0;
 
-/// How far off the line of fire, metres, a zombie can be and still be the one a shot was aimed at (a body is
-/// about half a metre across).
-const AIM_SLACK: f32 = 0.9;
+/// How often, seconds, what has been asked of the host and not yet answered is asked again.
+const ASK_AGAIN: f32 = 0.25;
 
-/// How far a shot reaches, metres: the same as the host's rule, so as not to ask about what it would turn down.
-const REACH: f32 = crate::net_host::SHOT_RANGE;
+/// The most requests sent again in one go.
+const MOST_ASKED_AGAIN: usize = 8;
 
 /// A game that has let this player in: the way to it, who this player is there, the map to make and where
 /// the host's player was when it did.
@@ -138,10 +136,17 @@ pub struct NetClient {
     placed: bool,
     fell_at: Option<Vec3>,
     since_send: f32,
-    /// The number of shots the gun had fired when last looked, to tell when it has fired.
-    shots_seen: u32,
-    /// How many have been fired at zombies, for the screen and for tests.
+    /// How many shots have been told to the host, for tests.
     pub shots_sent: u32,
+    /// How many world events have been had (they are had in order, each once), and those not yet seen to.
+    pub applied: u32,
+    pub inbox: Vec<WorldEvent>,
+    /// What has been asked of the host and not yet answered, numbered from one, and how long since it was asked.
+    pending: Vec<(u32, Request)>,
+    next_ask: u32,
+    since_asked: f32,
+    /// Shots that others have fired, to be shown.
+    pub heard: Vec<(u8, ShotInfo)>,
 }
 
 impl NetClient {
@@ -156,8 +161,13 @@ impl NetClient {
             placed: false,
             fell_at: None,
             since_send: 0.0,
-            shots_seen: 0,
             shots_sent: 0,
+            applied: 0,
+            inbox: Vec::new(),
+            pending: Vec::new(),
+            next_ask: 1,
+            since_asked: 0.0,
+            heard: Vec::new(),
         }
     }
 
@@ -183,9 +193,21 @@ impl NetClient {
                     self.silent_for = 0.0;
                 }
                 Some(Packet::Zombies(list)) => self.zombies = list,
-                Some(Packet::Status { health, respawn_in }) => {
+                Some(Packet::Status { health, respawn_in, acked }) => {
                     self.health = health;
                     self.respawn_in = respawn_in;
+                    self.pending.retain(|(seq, _)| *seq > acked);
+                }
+                Some(Packet::Fired { player, shot }) => self.heard.push((player, shot)),
+                // The world events, in order, each once: what is ahead of what has been had waits to be sent again,
+                // and what has been had already is skipped.
+                Some(Packet::Events { first, events }) if first <= self.applied => {
+                    let seen = (self.applied - first) as usize;
+                    for event in events.into_iter().skip(seen) {
+                        self.inbox.push(event);
+                        self.applied += 1;
+                    }
+                    self.say(&Packet::Ack { upto: self.applied });
                 }
                 _ => {}
             }
@@ -194,6 +216,26 @@ impl NetClient {
 
     fn say(&self, packet: &Packet) {
         let _ = self.connection.socket.send(&packet.encode());
+    }
+
+    /// Asks the host to do something: it is asked again until the host says it has seen to it.
+    pub fn ask(&mut self, request: Request) {
+        let seq = self.next_ask;
+        self.next_ask += 1;
+        self.pending.push((seq, request));
+        self.say(&Packet::Ask { seq, request });
+    }
+
+    /// Asks again what has not been answered (in order, the oldest first, so that the host does them in order).
+    fn ask_again(&mut self, dt: f32) {
+        self.since_asked += dt;
+        if self.since_asked < ASK_AGAIN {
+            return;
+        }
+        self.since_asked = 0.0;
+        for (seq, request) in self.pending.iter().take(MOST_ASKED_AGAIN) {
+            self.say(&Packet::Ask { seq: *seq, request: *request });
+        }
     }
 
     /// Tells the host this player is going.
@@ -211,8 +253,10 @@ pub struct ClientPlugin;
 impl Plugin for ClientPlugin {
     fn build(&self, app: &mut App) {
         let joined = resource_exists::<NetClient>;
-        app.add_systems(PreUpdate, hear_the_host.run_if(joined))
-            .add_systems(Update, (place_at_the_start, tell_the_host, show_other_players, show_zombies, follow_status, fire_at_zombies).chain().run_if(joined))
+        app.add_message::<crate::weapon::ShotFired>()
+            .add_message::<crate::sync::WorldChange>()
+            .add_systems(PreUpdate, hear_the_host.run_if(joined))
+            .add_systems(Update, (place_at_the_start, tell_the_host, show_other_players, show_zombies, follow_status, tell_of_my_shots, show_their_shots, apply_events, forward_glass).chain().run_if(joined))
             .add_systems(Last, say_goodbye.run_if(joined));
     }
 }
@@ -226,6 +270,7 @@ pub fn not_a_client(client: Option<Res<NetClient>>) -> bool {
 fn hear_the_host(mut client: ResMut<NetClient>, time: Res<Time>) {
     client.silent_for += time.delta_secs();
     client.listen();
+    client.ask_again(time.delta_secs());
 }
 
 /// Where the player stands: their feet and which way they face.
@@ -287,6 +332,7 @@ fn show_zombies(mut commands: Commands, client: Res<NetClient>, time: Res<Time>,
             commands.entity(entity).despawn();
         }
     }
+    let health_of = |kind: crate::zombie::ZombieKind, seen: &ZombieSeen| if seen.health == 0 { 0.0 } else { kind.traits().health };
     let glide = 1.0 - (-GLIDE * time.delta_secs()).exp();
     for seen in &client.zombies {
         let goal = Vec3::new(seen.x, seen.y, seen.z);
@@ -298,18 +344,23 @@ fn show_zombies(mut commands: Commands, client: Res<NetClient>, time: Res<Time>,
                     let yaw = (-step.x).atan2(-step.z);
                     at.rotation = at.rotation.slerp(Quat::from_rotation_y(yaw), glide);
                 }
-                at.translation += step * glide;
-                // Whatever a shot here did, it is the host that says what the zombie is now.
-                zombie.health = zombie.kind.traits().health;
+                // One that is down falls where it is (the same as it does for the host) and is not moved; whatever a
+                // shot here did, it is the host that says how it is.
+                if seen.health > 0 {
+                    at.translation += step * glide;
+                }
+                zombie.health = health_of(zombie.kind, seen);
             }
-            None => {
+            // One that has been seen for the first time, if it is not already down.
+            None if seen.health > 0 => {
                 if let Some(assets) = &assets {
                     if let Some(kind) = crate::zombie::ZombieKind::from_index(seen.kind as usize) {
-                        let id = crate::zombie::spawn_zombie(&mut commands, assets, kind, goal, 0.0, seen.id);
+                        let id = crate::zombie::spawn_puppet(&mut commands, assets, kind, goal, seen.id);
                         commands.entity(id).insert(Puppet);
                     }
                 }
             }
+            None => {}
         }
     }
 }
@@ -335,30 +386,106 @@ fn follow_status(mut client: ResMut<NetClient>, mut health: ResMut<PlayerHealth>
     }
 }
 
-/// When the gun has been fired, tells the host which zombie the shot was aimed at, if it was aimed at one.
-fn fire_at_zombies(mut client: ResMut<NetClient>, guns: Query<&Gun>, eye: Query<&GlobalTransform, With<FpsCamera>>, puppets: Query<(&Transform, &Zombie), With<Puppet>>) {
-    let (Ok(gun), Ok(eye)) = (guns.single(), eye.single()) else { return };
-    let fired = gun.shots_fired > client.shots_seen;
-    client.shots_seen = gun.shots_fired;
-    if !fired || client.down() {
+/// Tells the host of each shot the player fires: what was fired, from where and which way. It is the host that sends
+/// the bullets on their way and says what they hit; the ones that fly here are for the look of it.
+fn tell_of_my_shots(mut client: ResMut<NetClient>, mut shots: MessageReader<crate::weapon::ShotFired>) {
+    for shot in shots.read() {
+        if client.down() {
+            continue;
+        }
+        client.say(&Packet::Shot(ShotInfo { weapon: shot.weapon.code(), ammo: shot.ammo.code(), origin: shot.origin.to_array(), direction: shot.direction.to_array(), scale: shot.scale }));
+        client.shots_sent += 1;
+    }
+}
+
+/// Shows (and lets be heard) the shots that other players have fired.
+fn show_their_shots(mut commands: Commands, mut client: ResMut<NetClient>, bullets: Option<Res<crate::weapon::BulletAssets>>, mut luck: Local<u32>) {
+    let heard = std::mem::take(&mut client.heard);
+    let Some(bullets) = bullets else { return };
+    for (_, shot) in heard {
+        let (Some(weapon), Some(ammo)) = (crate::weapons::WeaponKind::from_code(shot.weapon), crate::ammo::AmmoKind::from_code(shot.ammo)) else { continue };
+        let Some(direction) = Vec3::from_array(shot.direction).try_normalize() else { continue };
+        let fired = crate::weapon::ShotFired { weapon, ammo, origin: Vec3::from_array(shot.origin), direction, scale: 1.0 };
+        if *luck == 0 {
+            *luck = 0x2F6E_2B1;
+        }
+        let mut roll = || {
+            *luck ^= *luck << 13;
+            *luck ^= *luck >> 17;
+            *luck ^= *luck << 5;
+            (*luck >> 8) as f32 / (1u32 << 24) as f32
+        };
+        crate::weapon::launch(&mut commands, &bullets, &fired, &mut roll);
+        crate::weapon::shot_heard(&mut commands, &bullets, &fired, &mut roll);
+    }
+}
+
+/// Sees to what the host has said has happened in the world: a box opened, something dropped or taken, a pane broken.
+#[allow(clippy::too_many_arguments)]
+fn apply_events(
+    mut commands: Commands,
+    mut client: ResMut<NetClient>,
+    buildings: Option<ResMut<crate::settlement::Buildings>>,
+    loot: Option<Res<crate::loot::LootAssets>>,
+    mut opened: ResMut<crate::loot::OpenedLoot>,
+    crates: Query<(Entity, &crate::loot::LootBox)>,
+    mut pickups: Query<(Entity, &GlobalTransform, &mut crate::loot::Pickup)>,
+    mut inventory: ResMut<crate::inventory::Inventory>,
+    mut thrown: ResMut<crate::inventory_ui::DropQueue>,
+    mut prompt: ResMut<crate::pickup::PickupPrompt>,
+    colliders: Option<ResMut<crate::collision::Colliders>>,
+    meshes: Option<ResMut<Assets<Mesh>>>,
+    sounds: Option<Res<crate::windows::GlassSounds>>,
+    camera: Query<&GlobalTransform, With<Camera3d>>,
+) {
+    // Not before there is a world to do it to.
+    let (Some(mut buildings), Some(loot)) = (buildings, loot) else { return };
+    if client.inbox.is_empty() {
         return;
     }
-    let (origin, aim) = (eye.translation(), eye.forward().as_vec3());
-    let target = puppets
-        .iter()
-        .filter(|(_, z)| z.alive())
-        .filter_map(|(at, z)| {
-            let chest = at.translation + Vec3::Y * 1.1 * z.kind.traits().scale;
-            let to = chest - origin;
-            let along = to.dot(aim);
-            // Ahead of the player, within reach, and near the line of fire.
-            let off = (to - aim * along).length();
-            (along > 0.0 && along <= REACH && off <= AIM_SLACK).then_some((off, z.net_id))
-        })
-        .min_by(|a, b| a.0.total_cmp(&b.0));
-    if let Some((_, id)) = target {
-        client.say(&Packet::Fire { target: id });
-        client.shots_sent += 1;
+    let (mut colliders, mut meshes) = (colliders, meshes);
+    let ear = camera.single().ok().map(|c| c.translation());
+    let me = client.id();
+    // Things that are put down are not there to be taken until the frame is over (what is done to the world waits
+    // for it): an event that takes one waits for the next frame, with all that comes after it.
+    let mut put_down = false;
+    let mut events = std::mem::take(&mut client.inbox).into_iter();
+    while let Some(event) = events.next() {
+        if put_down && matches!(event, WorldEvent::Taken { .. }) {
+            client.inbox.push(event);
+            client.inbox.extend(events.by_ref());
+            break;
+        }
+        match event {
+            WorldEvent::Opened { building, spot } => {
+                put_down |= crate::sync::open_box(&mut commands, &buildings, &loot, &mut opened, &crates, building as usize, spot as usize).is_some();
+            }
+            WorldEvent::Dropped { .. } => {
+                crate::sync::put_down(&mut commands, &loot, &event);
+                put_down = true;
+            }
+            WorldEvent::Taken { key, by, took } => {
+                let found = crate::sync::remove_item(&mut commands, &mut opened, &mut pickups, key, took as u32);
+                if let (true, Some(found)) = (by == me, found) {
+                    crate::pickup::give(&mut inventory, &found, &mut thrown, &mut prompt);
+                }
+            }
+            WorldEvent::Glass { building, pane } => {
+                if let (Some(colliders), Some(meshes)) = (colliders.as_deref_mut(), meshes.as_deref_mut()) {
+                    crate::windows::break_pane_at(building as usize, pane as usize, &mut commands, colliders, &mut buildings, meshes, sounds.as_deref(), ear);
+                }
+            }
+        }
+    }
+}
+
+/// A pane that the player broke by going through it is a thing for the host to know: it is asked to break it too, and
+/// tells everyone.
+fn forward_glass(mut client: ResMut<NetClient>, mut changes: MessageReader<crate::sync::WorldChange>) {
+    for crate::sync::WorldChange(event) in changes.read() {
+        if let WorldEvent::Glass { building, pane } = *event {
+            client.ask(Request::Glass { building, pane });
+        }
     }
 }
 
@@ -400,9 +527,14 @@ pub fn draw_client_status(mut contexts: bevy_egui::EguiContexts, client: Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collision::Colliders;
+    use crate::inventory::{Inventory, ItemKind};
+    use crate::loot::{Drops, LootAssets, OpenedLoot, Pickup};
+    use crate::net::ItemKey;
     use crate::net_host::{Host, HostPlugin, RemotePlayer};
+    use crate::weapon::{Bullet, BulletAssets, ShotFired};
     use crate::weapons::WeaponKind;
-    use crate::zombie::{ZombieAssets, ZombieKind};
+    use crate::zombie::{ZombieAssets, ZombieDice, ZombieKind};
 
     fn camera_at(x: f32, z: f32) -> impl Bundle {
         let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: crate::player::Stance::Stand, eye_height: 1.6, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 0.0, lean: 0.0, lean_offset: Vec2::ZERO };
@@ -414,33 +546,65 @@ mod tests {
         app.update();
     }
 
-    /// A hosted game whose player stands at (20, -5) with a walker, numbered 7, ten metres north of where the client
-    /// will be put; and a client that has joined it, standing nowhere in particular.
-    fn game() -> (App, App) {
+    fn bullet_assets() -> BulletAssets {
+        BulletAssets { mesh: Handle::default(), material: Handle::default(), tracer_material: Handle::default(), shot_sound: Handle::default(), shot_sounds: Vec::new() }
+    }
+
+    /// What both ends have of the world: a flat map, a building with a window and a box of loot in it, and what is
+    /// needed to put things down and send bullets.
+    fn world(app: &mut App) {
+        app.init_resource::<Time>()
+            .insert_resource(TerrainMap::flat(0.0))
+            .init_resource::<Colliders>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<OpenedLoot>()
+            .init_resource::<Drops>()
+            .init_resource::<crate::wind::Wind>()
+            .init_resource::<ZombieDice>()
+            .init_resource::<Inventory>()
+            .init_resource::<crate::inventory_ui::DropQueue>()
+            .init_resource::<crate::pickup::PickupPrompt>()
+            .init_resource::<PlayerHealth>()
+            .add_message::<crate::impact::Impact>()
+            .add_message::<ShotFired>()
+            .add_message::<crate::sync::WorldChange>()
+            .insert_resource(LootAssets::for_tests())
+            .insert_resource(bullet_assets())
+            .insert_resource(ZombieAssets { looks: vec![(Handle::default(), Handle::default()); 3], cuboid: Handle::default() });
+        crate::settlement::Buildings::add_one_window_and_box(app.world_mut());
+    }
+
+    /// A hosted game whose player stands at (20, -5), with a walker, numbered 7, twelve metres north of where the
+    /// client will be.
+    fn hosted() -> App {
         let mut host = App::new();
-        host.init_resource::<Time>().insert_resource(TerrainMap::flat(0.0)).add_plugins(HostPlugin::at("127.0.0.1:0"));
+        world(&mut host);
+        host.add_plugins(HostPlugin::at("127.0.0.1:0")).add_systems(Update, (crate::weapon::move_bullets, crate::zombie::fall_and_drop));
         host.world_mut().spawn(camera_at(20.0, -5.0));
-        host.world_mut().spawn((Zombie::numbered(ZombieKind::Walker, 0.0, 7), Transform::from_xyz(20.0, 0.0, -17.0)));
+        host.world_mut().spawn((Zombie::numbered(ZombieKind::Brute, 0.0, 7), Transform::from_xyz(20.0, 0.0, -17.0)));
+        host
+    }
+
+    /// A client that has joined the game `host` is hosting, in a world of its own like it.
+    fn joined(host: &mut App, name: &'static str) -> App {
         let server = host.world().resource::<Host>().local_addr();
         // The handshake blocks until the host answers, so the host is kept going meanwhile.
-        let joining = std::thread::spawn(move || Connection::join(server, "Rex", Duration::from_secs(5), &AtomicBool::new(false)));
+        let joining = std::thread::spawn(move || Connection::join(server, name, Duration::from_secs(5), &AtomicBool::new(false)));
         while !joining.is_finished() {
-            tick(&mut host);
+            tick(host);
             std::thread::sleep(Duration::from_millis(5));
         }
         let connection = joining.join().unwrap().expect("let in");
-        assert_eq!((connection.id, connection.seed), (1, 0));
-        assert!((connection.host.x - 20.0).abs() < 1e-3);
         let mut client = App::new();
-        client
-            .init_resource::<Time>()
-            .insert_resource(TerrainMap::flat(0.0))
-            .init_resource::<PlayerHealth>()
-            .insert_resource(NetClient::new(connection))
-            .insert_resource(ZombieAssets { looks: vec![(Handle::default(), Handle::default()); 3], cuboid: Handle::default() })
-            .add_plugins(ClientPlugin);
+        world(&mut client);
+        client.insert_resource(NetClient::new(connection)).add_plugins(ClientPlugin).add_systems(Update, crate::zombie::fall_and_drop);
         client.world_mut().spawn(camera_at(0.0, 0.0));
-        client.world_mut().spawn(Gun::new(WeaponKind::Sterling));
+        client
+    }
+
+    fn game() -> (App, App) {
+        let mut host = hosted();
+        let client = joined(&mut host, "Rex");
         (host, client)
     }
 
@@ -450,6 +614,30 @@ mod tests {
             tick(client);
             tick(host);
         }
+    }
+
+    /// Puts the client's player at `x`, `z`.
+    fn stand_at(client: &mut App, x: f32, z: f32) {
+        let mut me = client.world_mut().query::<(&mut Transform, &mut GlobalTransform, &FpsCamera)>();
+        let (mut at, mut global, _) = me.single_mut(client.world_mut()).unwrap();
+        at.translation = Vec3::new(x, 1.6, z);
+        *global = GlobalTransform::from(*at);
+    }
+
+    fn zombie_health(app: &mut App) -> f32 {
+        app.world_mut().query::<&Zombie>().iter(app.world()).next().unwrap().health
+    }
+
+    fn things_lying(app: &mut App) -> Vec<(ItemKey, ItemKind, u32)> {
+        let mut found: Vec<_> = app.world_mut().query::<&Pickup>().iter(app.world()).map(|p| (crate::sync::key_of(p.spot, p.slot), p.found.kind, p.found.count)).collect();
+        found.sort_by_key(|(key, ..)| (key.a, key.b, key.slot));
+        found
+    }
+
+    fn opened(app: &App) -> Vec<((usize, usize), Vec<Option<(ItemKind, u32)>>)> {
+        let mut all: Vec<_> = app.world().resource::<OpenedLoot>().0.iter().map(|(spot, things)| (*spot, things.iter().map(|t| t.map(|l| (l.drop.found.kind, l.drop.found.count))).collect())).collect();
+        all.sort_by_key(|(spot, _)| *spot);
+        all
     }
 
     #[test]
@@ -475,46 +663,172 @@ mod tests {
     }
 
     #[test]
-    fn a_shot_aimed_at_a_zombie_is_told_to_the_host_which_decides_whether_it_hits() {
-        let (mut host, mut client) = game();
-        run_both(&mut host, &mut client, 60);
-        // Face the zombie, which is straight ahead (north is -z), and fire until it has been hurt.
-        let mut me = client.world_mut().query::<(&mut Transform, &mut GlobalTransform, &FpsCamera)>();
-        {
-            let (mut at, mut global, _) = me.single_mut(client.world_mut()).unwrap();
-            at.translation = Vec3::new(20.0, 1.6, -3.0);
-            *global = GlobalTransform::from(*at);
-        }
-        run_both(&mut host, &mut client, 5);
-        let health = |host: &mut App| host.world_mut().query::<&Zombie>().single(host.world()).unwrap().health;
-        let before = health(&mut host);
-        for _ in 0..12 {
-            client.world_mut().query::<&mut Gun>().single_mut(client.world_mut()).unwrap().shots_fired += 1;
-            // Let the host hear that it was fired, and its shot cool down.
-            for _ in 0..8 {
-                run_both(&mut host, &mut client, 1);
-                std::thread::sleep(Duration::from_millis(40));
-            }
-        }
-        // (Told of until the zombie is dead, and then there is nothing to aim at.)
-        assert!(client.world().resource::<NetClient>().shots_sent >= 3, "{} told", client.world().resource::<NetClient>().shots_sent);
-        assert!(health(&mut host) < before, "the host's zombie took a hit");
+    fn a_shot_a_client_fires_is_sent_on_its_way_by_the_host_as_the_real_bullet_and_does_what_it_does() {
+        let hurt_by = |weapon: WeaponKind, ammo: crate::ammo::AmmoKind| {
+            let (mut host, mut client) = game();
+            run_both(&mut host, &mut client, 40);
+            stand_at(&mut client, 20.0, -3.0);
+            run_both(&mut host, &mut client, 5);
+            let before = zombie_health(&mut host);
+            client.world_mut().write_message(ShotFired { weapon, ammo, origin: Vec3::new(20.0, 1.6, -3.5), direction: Vec3::NEG_Z, scale: 1.0 });
+            run_both(&mut host, &mut client, 6);
+            assert_eq!(client.world().resource::<NetClient>().shots_sent, 1);
+            before - zombie_health(&mut host)
+        };
+        let nine = hurt_by(WeaponKind::Sterling, crate::ammo::AmmoKind::NineFmj);
+        let buck = hurt_by(WeaponKind::Auto5, crate::ammo::AmmoKind::Buckshot);
+        // A real bullet: the damage is the bullet's own, and a load of pellets does what a load of pellets does.
+        assert!(nine > 15.0 && nine < 80.0, "a 9mm round did {nine}");
+        assert!(buck > nine * 2.0, "buckshot did {buck} against {nine}");
     }
 
     #[test]
-    fn a_shot_at_nothing_in_particular_is_not_told() {
+    fn a_shot_that_makes_no_sense_does_nothing_and_one_made_for_a_load_the_gun_does_not_take_is_refused() {
         let (mut host, mut client) = game();
-        run_both(&mut host, &mut client, 60);
-        // Facing the way with nothing in it (the zombie is to the north; this is looking south).
-        let mut me = client.world_mut().query::<(&mut Transform, &mut GlobalTransform, &FpsCamera)>();
-        {
-            let (mut at, mut global, _) = me.single_mut(client.world_mut()).unwrap();
-            at.rotation = Quat::from_rotation_y(std::f32::consts::PI);
-            *global = GlobalTransform::from(*at);
-        }
-        client.world_mut().query::<&mut Gun>().single_mut(client.world_mut()).unwrap().shots_fired += 1;
+        run_both(&mut host, &mut client, 40);
+        stand_at(&mut client, 20.0, -3.0);
         run_both(&mut host, &mut client, 5);
-        assert_eq!(client.world().resource::<NetClient>().shots_sent, 0);
+        let before = zombie_health(&mut host);
+        let socket = client.world().resource::<NetClient>().connection.socket.try_clone().unwrap();
+        let shot = |weapon: u8, ammo: u8, scale: f32| Packet::Shot(ShotInfo { weapon, ammo, origin: [20.0, 1.6, -3.5], direction: [0.0, 0.0, -1.0], scale });
+        // No such gun; the load of a rifle in a pistol; and an absurd amount of damage.
+        for packet in [shot(99, 0, 1.0), shot(WeaponKind::Sterling.code(), crate::ammo::AmmoKind::NatoBall.code(), 1.0), shot(WeaponKind::Sterling.code(), 0, 1000.0)] {
+            socket.send(&packet.encode()).unwrap();
+            std::thread::sleep(Duration::from_millis(40));
+            run_both(&mut host, &mut client, 3);
+        }
+        assert_eq!(zombie_health(&mut host), before);
+    }
+
+    #[test]
+    fn the_shots_of_the_others_are_shown_to_a_client_the_hosts_and_those_of_another_client() {
+        let mut host = hosted();
+        let mut one = joined(&mut host, "One");
+        let mut two = joined(&mut host, "Two");
+        let bullets = |app: &mut App| app.world_mut().query::<&Bullet>().iter(app.world()).count();
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_millis(3));
+            tick(&mut one);
+            tick(&mut two);
+            tick(&mut host);
+        }
+        stand_at(&mut one, 20.0, -3.0);
+        // The host's own shot: both see a load of pellets.
+        host.world_mut().write_message(ShotFired { weapon: WeaponKind::Auto5, ammo: crate::ammo::AmmoKind::Buckshot, origin: Vec3::new(20.0, 1.6, -5.0), direction: Vec3::X, scale: 1.0 });
+        for _ in 0..4 {
+            std::thread::sleep(Duration::from_millis(5));
+            tick(&mut host);
+            tick(&mut one);
+            tick(&mut two);
+        }
+        assert_eq!((bullets(&mut one), bullets(&mut two)), (9, 9), "nine pellets each");
+        // One's shot is shown to Two (and not again to One, which fired it).
+        let before = bullets(&mut one);
+        one.world_mut().write_message(ShotFired { weapon: WeaponKind::Sterling, ammo: crate::ammo::AmmoKind::NineFmj, origin: Vec3::new(20.0, 1.6, -3.5), direction: Vec3::X, scale: 1.0 });
+        for _ in 0..6 {
+            std::thread::sleep(Duration::from_millis(5));
+            tick(&mut one);
+            tick(&mut two);
+            tick(&mut host);
+        }
+        assert_eq!(bullets(&mut two), 9 + 1);
+        assert_eq!(bullets(&mut one), before, "not shown to the one who fired it");
+    }
+
+    #[test]
+    fn a_zombie_that_is_shot_dead_falls_over_for_a_client_too_and_what_it_drops_is_where_the_host_says() {
+        let (mut host, mut client) = game();
+        run_both(&mut host, &mut client, 40);
+        // It is up, and then it is not.
+        assert!(client.world_mut().query::<&Puppet>().iter(client.world()).count() == 1);
+        host.world_mut().query::<&mut Zombie>().single_mut(host.world_mut()).unwrap().health = 0.0;
+        run_both(&mut host, &mut client, 12);
+        let mut puppets = client.world_mut().query::<(&Transform, &Zombie, &Puppet)>();
+        let (at, zombie, _) = puppets.single(client.world()).expect("the body is still there");
+        assert!(!zombie.alive());
+        // It has gone over on its back: its up is no longer up.
+        assert!((at.rotation * Vec3::Y).y < 0.5, "{:?}", at.rotation);
+        // Whatever it dropped (a brute always leaves something) lies in the same places on both, once.
+        let theirs = things_lying(&mut host);
+        assert!(!theirs.is_empty(), "the host's brute left something");
+        assert_eq!(things_lying(&mut client), theirs);
+    }
+
+    #[test]
+    fn a_client_opens_a_box_and_takes_what_is_in_it_and_the_host_and_the_client_agree_about_all_of_it() {
+        let (mut host, mut client) = game();
+        run_both(&mut host, &mut client, 20);
+        assert!(opened(&host).is_empty() && opened(&client).is_empty());
+        client.world_mut().resource_mut::<NetClient>().ask(Request::Open { building: 0, spot: 0 });
+        run_both(&mut host, &mut client, 20);
+        // Both have it open, with the same things in it, lying in the same places.
+        assert_eq!(opened(&host).len(), 1);
+        assert_eq!(opened(&host), opened(&client));
+        let lying = things_lying(&mut host);
+        assert!(!lying.is_empty());
+        assert_eq!(things_lying(&mut client), lying);
+        assert!(client.world().resource::<NetClient>().pending.is_empty(), "the host has said it has seen to it");
+        // Asking again changes nothing.
+        client.world_mut().resource_mut::<NetClient>().ask(Request::Open { building: 0, spot: 0 });
+        run_both(&mut host, &mut client, 10);
+        assert_eq!(things_lying(&mut host), lying);
+        // The client takes one: it is gone from both and it is in the client's hands.
+        let (key, kind, count) = lying.iter().find(|(_, kind, _)| matches!(kind, ItemKind::Ammo(_))).or(lying.first()).copied().unwrap();
+        let before = format!("{:?}", client.world().resource::<Inventory>());
+        client.world_mut().resource_mut::<NetClient>().ask(Request::Take { key, took: count as u16 });
+        run_both(&mut host, &mut client, 20);
+        assert!(things_lying(&mut host).iter().all(|(k, ..)| *k != key), "gone from the host's world");
+        assert!(things_lying(&mut client).iter().all(|(k, ..)| *k != key), "and the client's");
+        assert_eq!(opened(&host), opened(&client));
+        assert_ne!(format!("{:?}", client.world().resource::<Inventory>()), before, "{kind:?} is in the client's inventory");
+        // Somebody else cannot take it again.
+        let mut other = joined(&mut host, "Other");
+        other.world_mut().resource_mut::<NetClient>().ask(Request::Take { key, took: count as u16 });
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_millis(3));
+            tick(&mut other);
+            tick(&mut host);
+        }
+        assert_eq!(format!("{:?}", other.world().resource::<Inventory>()), format!("{:?}", Inventory::default()));
+    }
+
+    #[test]
+    fn a_client_that_joins_late_ends_up_with_the_world_as_it_has_become() {
+        let (mut host, mut client) = game();
+        run_both(&mut host, &mut client, 20);
+        // Things happen: a box is opened, something is taken, something is thrown down, a pane is broken.
+        client.world_mut().resource_mut::<NetClient>().ask(Request::Open { building: 0, spot: 0 });
+        run_both(&mut host, &mut client, 20);
+        let (key, _, count) = things_lying(&mut host)[0];
+        client.world_mut().resource_mut::<NetClient>().ask(Request::Take { key, took: count as u16 });
+        client.world_mut().resource_mut::<NetClient>().ask(Request::Throw { item: ItemKind::Supply(crate::inventory::Supply::Torch).code(), count: 1, loaded: 0, at: [20.0, 0.0, -4.0] });
+        client.world_mut().resource_mut::<NetClient>().ask(Request::Glass { building: 0, pane: 0 });
+        run_both(&mut host, &mut client, 30);
+        assert!(host.world().resource::<Host>().lobby.log.len() >= 4, "{:?}", host.world().resource::<Host>().lobby.log);
+        // Someone arrives, long after.
+        let mut late = joined(&mut host, "Late");
+        for _ in 0..80 {
+            std::thread::sleep(Duration::from_millis(3));
+            tick(&mut late);
+            tick(&mut host);
+        }
+        assert_eq!(opened(&late), opened(&host));
+        assert_eq!(things_lying(&mut late), things_lying(&mut host));
+        assert!(things_lying(&mut late).iter().any(|(_, kind, _)| *kind == ItemKind::Supply(crate::inventory::Supply::Torch)), "what was thrown down is there");
+        assert!(late.world().resource::<crate::settlement::Buildings>().whole_pane(0, 0).is_none(), "the broken window is broken");
+        assert!(host.world().resource::<crate::settlement::Buildings>().whole_pane(0, 0).is_none());
+        // And a client that was there all along has the same.
+        assert_eq!(things_lying(&mut client), things_lying(&mut host));
+    }
+
+    #[test]
+    fn a_pane_the_host_breaks_is_broken_for_the_clients() {
+        let (mut host, mut client) = game();
+        run_both(&mut host, &mut client, 20);
+        // The host's player goes through the window (the host says so as any pane broken there is).
+        host.world_mut().write_message(crate::sync::WorldChange(WorldEvent::Glass { building: 0, pane: 0 }));
+        run_both(&mut host, &mut client, 20);
+        assert!(client.world().resource::<crate::settlement::Buildings>().whole_pane(0, 0).is_none());
     }
 
     #[test]

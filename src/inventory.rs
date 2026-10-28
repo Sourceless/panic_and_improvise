@@ -113,6 +113,28 @@ pub enum ItemKind {
 }
 
 impl ItemKind {
+    /// The number the network knows it by: what sort in the high byte, which of them in the low.
+    pub fn code(self) -> u16 {
+        let (group, index) = match self {
+            ItemKind::Weapon(w) => (0u16, w.code() as u16),
+            ItemKind::Ammo(a) => (1, a.code() as u16),
+            ItemKind::Pack(p) => (2, PackKind::ALL.iter().position(|&k| k == p).unwrap_or(0) as u16),
+            ItemKind::Supply(s) => (3, Supply::ALL.iter().position(|&k| k == s).unwrap_or(0) as u16),
+        };
+        group << 8 | index
+    }
+
+    pub fn from_code(code: u16) -> Option<ItemKind> {
+        let index = (code & 0xFF) as usize;
+        match code >> 8 {
+            0 => WeaponKind::from_code(index as u8).map(ItemKind::Weapon),
+            1 => AmmoKind::from_code(index as u8).map(ItemKind::Ammo),
+            2 => PackKind::ALL.get(index).copied().map(ItemKind::Pack),
+            3 => Supply::ALL.get(index).copied().map(ItemKind::Supply),
+            _ => None,
+        }
+    }
+
     /// How many squares across and down it covers, standing as it is.
     pub fn size(self) -> (u32, u32) {
         match self {
@@ -665,6 +687,21 @@ impl Inventory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_kind_of_item_reads_back_from_its_code_and_a_made_up_code_is_nothing() {
+        let mut all: Vec<ItemKind> = WeaponKind::ALL.iter().map(|&w| ItemKind::Weapon(w)).collect();
+        all.extend(AmmoKind::ALL.iter().map(|&a| ItemKind::Ammo(a)));
+        all.extend(PackKind::ALL.iter().map(|&p| ItemKind::Pack(p)));
+        all.extend(Supply::ALL.iter().map(|&s| ItemKind::Supply(s)));
+        let mut seen = std::collections::HashSet::new();
+        for kind in all {
+            assert_eq!(ItemKind::from_code(kind.code()), Some(kind), "{kind:?}");
+            assert!(seen.insert(kind.code()), "{kind:?} shares a code");
+        }
+        assert_eq!(ItemKind::from_code(0x0900), None);
+        assert_eq!(ItemKind::from_code(0x00FF), None);
+    }
 
     fn with_items() -> Inventory {
         Inventory::default()

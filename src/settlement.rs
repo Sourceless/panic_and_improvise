@@ -126,6 +126,23 @@ pub fn spawn_settlements(
 }
 
 impl Buildings {
+    /// Box `spot` of building `index`, and the insides of the building if they are there at the moment.
+    pub fn loot_spot(&self, index: usize, spot: usize) -> Option<(&crate::building::geom::LootSpot, Option<Entity>)> {
+        let entry = self.entries.get(index)?;
+        entry.model.loot.get(spot).map(|lootspot| (lootspot, entry.interior))
+    }
+
+    /// Which pane the collider `solid` is: the building's number, and the pane's in it.
+    pub fn locate(&self, solid: u32) -> Option<(usize, usize)> {
+        self.entries.iter().enumerate().find_map(|(index, entry)| entry.glass.as_ref()?.solids.iter().position(|&s| s == solid).map(|pane| (index, pane)))
+    }
+
+    /// The collider of pane `pane` of building `index`, if there is such a pane and it is whole.
+    pub fn whole_pane(&self, index: usize, pane: usize) -> Option<u32> {
+        let glass = self.entries.get(index)?.glass.as_ref()?;
+        (!*glass.broken.get(pane)?).then(|| glass.solids[pane])
+    }
+
     /// Breaks the pane whose collider is `solid`, if it is one: the glass stops being drawn. Says where the
     /// pane was (its middle, and which way it faces) if it was still whole.
     pub fn break_pane(&mut self, solid: u32, meshes: &mut Assets<Mesh>, commands: &mut Commands) -> Option<(Vec3, Vec3)> {
@@ -164,6 +181,22 @@ impl Buildings {
         let entry = Entry { origin: Vec3::ZERO, yaw: 0.0, model: Arc::new(model), interior: None, lamps: Vec::new(), glass: Some(glass) };
         world.insert_resource(Buildings { entries: vec![entry], material: Handle::default(), since_look: 0.0 });
         solid
+    }
+
+    /// As `add_one_window`, with a box of loot in it too (a rare one, of the middle size, on the floor), and its
+    /// insides there. Returns the pane's collider and the entity the insides hang from.
+    pub(crate) fn add_one_window_and_box(world: &mut World) -> (u32, Entity) {
+        let mut model = Model::default();
+        model.pane(Vec3::new(0.0, 1.5, 0.0), true, 1.2, 1.2, [0.5; 3]);
+        model.loot.push(crate::building::geom::LootSpot { at: Vec3::new(0.0, 0.0, 3.0), rarity: crate::loot::Rarity::Rare, size: crate::loot::BoxSize::M, room: crate::building::geom::Rect::new(-1.0, 2.0, 1.0, 4.0) });
+        let solid = world.resource_mut::<Colliders>().add(model.pane_solids(Vec3::ZERO, 0.0).remove(0));
+        let mesh = world.resource_mut::<Assets<Mesh>>().add(model.bake(Layer::Glass));
+        let entity = world.spawn(SettlementRoot).id();
+        let interior = world.spawn(SettlementRoot).id();
+        let glass = Glass { entity, mesh, solids: vec![solid], broken: vec![false] };
+        let entry = Entry { origin: Vec3::ZERO, yaw: 0.0, model: Arc::new(model), interior: Some(interior), lamps: Vec::new(), glass: Some(glass) };
+        world.insert_resource(Buildings { entries: vec![entry], material: Handle::default(), since_look: 0.0 });
+        (solid, interior)
     }
 }
 

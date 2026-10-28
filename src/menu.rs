@@ -125,7 +125,7 @@ pub fn draw_menu(
     let mut state = (menu.rebinding, menu.message.clone());
     let (mut choose, mut rebind, mut save, mut reset, mut resume, mut quit, mut to_title) = (None, None, false, false, false, false, false);
     let unsaved = menu.has_unsaved_changes(&controls);
-    egui::Window::new(format!("Panic and Improvise v{}", crate::VERSION))
+    egui::Window::new(format!("Panic and Improvise {}", crate::version_label()))
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .collapsible(false)
         .resizable(false)

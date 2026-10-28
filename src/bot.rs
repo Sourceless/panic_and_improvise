@@ -21,7 +21,9 @@ use crate::impact::surface_hit;
 use crate::map::TerrainMap;
 use crate::navigation::Pursuit;
 use crate::net_client::Connection;
-use crate::net::{Packet, PlayerState, ZombieSeen, CLIENT_HEALTH, EYE_HEIGHT, HOST_ID, SEND_RATE, SILENCE_LIMIT};
+use crate::ammo::AmmoKind;
+use crate::weapons::WeaponKind;
+use crate::net::{Packet, PlayerState, ShotInfo, ZombieSeen, CLIENT_HEALTH, EYE_HEIGHT, HOST_ID, SEND_RATE, SILENCE_LIMIT};
 use crate::walking::{stand, walk};
 
 /// How fast it walks and how fast it runs, metres a second: a little under the player's own, so that a player
@@ -196,7 +198,7 @@ impl Bot {
                     }
                 }
                 Some(Packet::Zombies(list)) => self.zombies = list,
-                Some(Packet::Status { health, respawn_in }) => {
+                Some(Packet::Status { health, respawn_in, .. }) => {
                     self.health = health;
                     self.respawn_in = respawn_in;
                 }
@@ -210,6 +212,8 @@ impl Bot {
         let eye = self.feet() + Vec3::Y * EYE_HEIGHT;
         self.zombies
             .iter()
+            // (Those that are down are told of too, so that they are seen to fall; they are not shot at.)
+            .filter(|z| z.health > 0)
             .filter_map(|z| {
                 let chest = Vec3::new(z.x, z.y + AIM_HEIGHT, z.z);
                 let distance = eye.distance(chest);
@@ -291,7 +295,11 @@ impl Bot {
             if aimed && self.since_shot >= FIRE_EVERY {
                 self.since_shot = 0.0;
                 self.shots += 1;
-                let _ = self.socket.send(&Packet::Fire { target: z.id }.encode());
+                // A Sterling's shot at the middle of its chest, from its eyes: the host works out what it hits.
+                let eye = self.feet() + Vec3::Y * EYE_HEIGHT;
+                let aim = Vec3::new(z.x, z.y + AIM_HEIGHT, z.z) - eye;
+                let shot = ShotInfo { weapon: WeaponKind::Sterling.code(), ammo: AmmoKind::NineFmj.code(), origin: eye.to_array(), direction: aim.normalize_or(Vec3::NEG_Z).to_array(), scale: 1.0 };
+                let _ = self.socket.send(&Packet::Shot(shot).encode());
             }
         }
         self.say(dt);
@@ -365,8 +373,12 @@ mod tests {
             .init_resource::<PlayerHealth>()
             .insert_resource(TerrainMap::flat(0.0))
             .insert_resource(colliders)
+            // What the bot's shots are made of: the host sends them on their way as it would anyone's.
+            .init_resource::<crate::wind::Wind>()
+            .add_message::<crate::impact::Impact>()
+            .insert_resource(crate::weapon::BulletAssets { mesh: Handle::default(), material: Handle::default(), tracer_material: Handle::default(), shot_sound: Handle::default(), shot_sounds: Vec::new() })
             .add_plugins(HostPlugin::at("127.0.0.1:0"))
-            .add_systems(Update, move_zombies);
+            .add_systems(Update, (move_zombies, crate::weapon::move_bullets));
         let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: crate::player::Stance::Stand, eye_height: 1.8, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 0.0, lean: 0.0, lean_offset: Vec2::ZERO };
         app.world_mut().spawn((camera, GlobalTransform::from(Transform::from_xyz(player.x, 1.8, player.y)), Transform::from_xyz(player.x, 1.8, player.y)));
         app

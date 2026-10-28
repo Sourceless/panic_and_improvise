@@ -164,6 +164,7 @@ impl Plugin for WeaponPlugin {
     fn build(&self, app: &mut App) {
         // The wind that bullets drift in (the terrain plugin's, when that is loaded too).
         app.init_resource::<Wind>()
+            .add_message::<ShotFired>()
             .init_resource::<Captured>()
             .init_resource::<AimZoom>()
             .insert_resource(Inventory::starting())
@@ -594,6 +595,60 @@ pub fn scatter_direction(aim: Vec3, half_angle: f32, u: f32, v: f32) -> Vec3 {
     // sqrt(u) spreads the shots evenly over the disc rather than bunching them in the middle.
     let (radius, theta) = (half_angle.tan() * u.sqrt(), v * std::f32::consts::TAU);
     (aim + right * (radius * theta.cos()) + up * (radius * theta.sin())).normalize()
+}
+
+/// A shot has been fired by the player at the keyboard: what, from where, which way (before the pellets of a load of
+/// them are scattered) and how much more than usual it does. For whatever tells others of it.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct ShotFired {
+    pub weapon: WeaponKind,
+    pub ammo: AmmoKind,
+    pub origin: Vec3,
+    pub direction: Vec3,
+    pub scale: f32,
+}
+
+/// Sends the bullet, or the load of pellets, of `shot` on its way, `random` giving numbers in 0..1 for how the
+/// pellets scatter. The shot is the same wherever it is fired from: the player's, or one that somebody else's gun
+/// fired, which the host works out for itself.
+pub fn launch(commands: &mut Commands, assets: &BulletAssets, shot: &ShotFired, mut random: impl FnMut() -> f32) {
+    let round = shot.ammo.def();
+    let def = shot.weapon.def();
+    let cartridge = Cartridge { muzzle_velocity: round.cartridge.muzzle_velocity * def.velocity_scale, ..round.cartridge };
+    for _ in 0..round.pellets {
+        let heading = if round.pellets > 1 { scatter_direction(shot.direction, round.pellet_spread, random(), random()) } else { shot.direction };
+        let tracer = round.pellets == 1;
+        commands.spawn((
+            Bullet {
+                cartridge,
+                ammo: round.kind,
+                velocity: heading * cartridge.muzzle_velocity,
+                age: 0.0,
+                travelled: 0.0,
+                in_foliage: false,
+                through: Vec::new(),
+                glows: tracer,
+                damage_scale: shot.scale,
+            },
+            Mesh3d(assets.mesh.clone()),
+            MeshMaterial3d(if round.tracer { assets.tracer_material.clone() } else { assets.material.clone() }),
+            bevy::light::NotShadowCaster,
+            // Hidden until it has flown a way (see `tracer_visible`).
+            Visibility::Hidden,
+            Transform::from_translation(shot.origin).looking_to(heading, Vec3::Y),
+        ));
+    }
+}
+
+/// The sound of somebody else's shot, heard from where it was fired.
+pub fn shot_heard(commands: &mut Commands, assets: &BulletAssets, shot: &ShotFired, mut random: impl FnMut() -> f32) {
+    if assets.shot_sounds.is_empty() {
+        return;
+    }
+    let def = shot.weapon.def();
+    let take = (random() * assets.shot_sounds.len() as f32) as usize % assets.shot_sounds.len();
+    let pitch = (0.97 + 0.06 * random()) * def.shot_pitch;
+    crate::sound::play_after(commands, 0.0, assets.shot_sounds[take].clone(), pitch, (0.9 + 0.1 * random()) * def.shot_volume * SHOT_LOUDNESS, Some(shot.origin));
 }
 
 #[derive(Component)]
@@ -1030,6 +1085,7 @@ fn fire(
     assets: Res<BulletAssets>,
     weapons: Res<WeaponAssets>,
     mut inventory: ResMut<Inventory>,
+    mut fired: MessageWriter<ShotFired>,
 ) {
     let Ok(mut gun) = guns.single_mut() else {
         return;
@@ -1159,30 +1215,10 @@ fn fire(
     // The first shot after a perfect reload hits harder.
     let damage_scale = std::mem::replace(&mut gun.shot_bonus, 1.0);
     // A round throws one bullet, or a load of pellets, each scattered a little more from the shot's line.
-    for pellet in 0..round.pellets {
-        let heading = if round.pellets > 1 { scatter_direction(direction_shot, round.pellet_spread, gun.random(), gun.random()) } else { direction_shot };
-        let tracer = round.pellets == 1;
-        commands.spawn((
-            Bullet {
-                cartridge,
-                ammo: round.kind,
-                velocity: heading * cartridge.muzzle_velocity,
-                age: 0.0,
-                travelled: 0.0,
-                in_foliage: false,
-                through: Vec::new(),
-                glows: tracer,
-                damage_scale,
-            },
-            Mesh3d(assets.mesh.clone()),
-            MeshMaterial3d(if round.tracer { assets.tracer_material.clone() } else { assets.material.clone() }),
-            bevy::light::NotShadowCaster,
-            // Hidden until it has flown a way (see `tracer_visible`).
-            Visibility::Hidden,
-            Transform::from_translation(muzzle).looking_to(heading, Vec3::Y),
-        ));
-        let _ = pellet;
-    }
+    let shot = ShotFired { weapon: def.kind, ammo: round.kind, origin: muzzle, direction: direction_shot, scale: damage_scale };
+    launch(&mut commands, &assets, &shot, || gun.random());
+    // Whoever is told of shots (the network) is told of this one.
+    fired.write(shot);
 
     // Recoil: the shot has left; now the gun jolts and the view climbs.
     let kick = recoil_kick(&def.handling, gun.shots_fired, gun.aiming);

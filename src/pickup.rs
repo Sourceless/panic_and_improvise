@@ -7,7 +7,10 @@ use bevy::prelude::*;
 use crate::controls::{Action, Controls, Keyboard};
 use crate::inventory::{Inventory, Item, ItemKind};
 use crate::inventory_ui::{DropQueue, InventoryScreen};
-use crate::loot::{lay_contents, rarity_of, Dropped, Lying, LIFT, roll_contents, spawn_drop, spot_numbers, Found, LootAssets, LootBox, OpenedLoot, Pickup};
+use crate::loot::{lay_contents, rarity_of, Dropped, Drops, Lying, LIFT, LOOSE, roll_contents, spawn_drop, spot_numbers, Found, LootAssets, LootBox, OpenedLoot, Pickup};
+use crate::net::{Request, WorldEvent};
+use crate::net_client::NetClient;
+use crate::sync::{dropped_event, key_of, WorldChange};
 use crate::menu::Menu;
 use crate::player::FpsCamera;
 
@@ -27,13 +30,25 @@ pub struct PickupPlugin;
 
 impl Plugin for PickupPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PickupPrompt>().add_systems(Update, (pick_up, put_down_thrown));
+        app.init_resource::<PickupPrompt>().add_message::<WorldChange>().init_resource::<Drops>().add_systems(Update, (pick_up, put_down_thrown));
     }
 }
 
-/// Puts what was thrown out of the inventory on the ground just in front of the player, side by side.
-fn put_down_thrown(mut commands: Commands, mut queue: ResMut<DropQueue>, assets: Option<Res<LootAssets>>, camera: Query<(&GlobalTransform, &FpsCamera)>, mut thrown: Local<usize>) {
+/// Puts what was thrown out of the inventory on the ground just in front of the player, side by side. (In a game
+/// that has been joined it is the host that puts it there, and says so; it is asked to.)
+#[allow(clippy::too_many_arguments)]
+fn put_down_thrown(
+    mut commands: Commands,
+    mut queue: ResMut<DropQueue>,
+    assets: Option<Res<LootAssets>>,
+    camera: Query<(&GlobalTransform, &FpsCamera)>,
+    mut thrown: Local<usize>,
+    mut drops: ResMut<Drops>,
+    mut changes: MessageWriter<WorldChange>,
+    client: Option<ResMut<NetClient>>,
+) {
     let (Some(assets), Ok((eye, cam))) = (assets, camera.single()) else { return };
+    let mut client = client;
     for item in queue.0.drain(..) {
         let mut ahead = eye.forward().as_vec3();
         ahead.y = 0.0;
@@ -41,11 +56,42 @@ fn put_down_thrown(mut commands: Commands, mut queue: ResMut<DropQueue>, assets:
         let across = ahead.cross(Vec3::Y);
         let side = (*thrown % 5) as f32 - 2.0;
         let at = Vec3::new(eye.translation().x, cam.floor, eye.translation().z) + ahead * 0.9 + across * side * 0.2;
+        *thrown += 1;
+        if let Some(client) = client.as_deref_mut() {
+            client.ask(Request::Throw { item: item.kind.code(), count: item.count.min(u16::MAX as u32) as u16, loaded: item.loaded.min(u8::MAX as u32) as u8, at: at.to_array() });
+            continue;
+        }
         let found = Found { kind: item.kind, count: item.count, loaded: item.loaded };
         let lying = Lying { drop: Dropped { rarity: rarity_of(item.kind), found }, at, yaw: 0.0 };
-        spawn_drop(&mut commands, &assets, None, &lying, (usize::MAX - 1, *thrown), 0);
-        *thrown += 1;
+        let spot = (LOOSE, drops.0);
+        drops.0 += 1;
+        spawn_drop(&mut commands, &assets, None, &lying, spot, 0);
+        changes.write(WorldChange(dropped_event(&lying, spot, 0)));
     }
+}
+
+/// Puts what the host has said was taken into the inventory, as a pick-up does: a pack goes on, a gun is taken
+/// up, the rest goes in the grids; what will not fit (the inventory changed since the host was asked) is put down.
+pub fn give(inventory: &mut Inventory, found: &Found, thrown: &mut DropQueue, prompt: &mut PickupPrompt) {
+    let item = make_item(inventory, found);
+    match receive(inventory, item) {
+        Ok(displaced) => {
+            prompt.message = match (item.kind, &displaced) {
+                (ItemKind::Weapon(_), Some(old)) => format!("Took the {} and put down the {}.", item.kind.name(), old.kind.name()),
+                (ItemKind::Weapon(_), None) => format!("Took the {}.", item.kind.name()),
+                (ItemKind::Pack(_), _) => format!("Put on the {}.", item.kind.name()),
+                _ => format!("Picked up {}.", describe(found)),
+            };
+            if let Some(old) = displaced {
+                thrown.0.push(old);
+            }
+        }
+        Err(left) => {
+            prompt.message = format!("No room for {}: put it down.", describe(found));
+            thrown.0.push(left);
+        }
+    }
+    prompt.message_time = 3.0;
 }
 
 /// The words for something found: "9mm x32", "L1A1 SLR".
@@ -67,7 +113,7 @@ pub fn make_item(inventory: &mut Inventory, found: &Found) -> Item {
 /// Takes what has been picked up: a pack goes on the back at once, a weapon is taken up ready (putting down
 /// the gun in hand if both slots are full, which comes back as the `Ok`), and the rest goes in the grids.
 /// Gives back what could not be taken, less any part that was.
-fn receive(inventory: &mut Inventory, item: Item) -> Result<Option<Item>, Item> {
+pub(crate) fn receive(inventory: &mut Inventory, item: Item) -> Result<Option<Item>, Item> {
     match item.kind {
         ItemKind::Pack(_) => match inventory.put_on(item) {
             Ok(()) => Ok(None),
@@ -93,6 +139,7 @@ fn most_looked_at<'a, T>(items: impl Iterator<Item = (Entity, &'a GlobalTransfor
         .max_by(|a, b| a.0.total_cmp(&b.0))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pick_up(
     mut commands: Commands,
     time: Res<Time>,
@@ -108,6 +155,8 @@ fn pick_up(
     camera: Query<&GlobalTransform, With<FpsCamera>>,
     mut pickups: Query<(Entity, &GlobalTransform, &mut Pickup)>,
     boxes: Query<(Entity, &GlobalTransform, &Transform, &LootBox, Option<&ChildOf>)>,
+    mut changes: MessageWriter<WorldChange>,
+    mut client: Option<ResMut<NetClient>>,
 ) {
     prompt.message_time = (prompt.message_time - time.delta_secs()).max(0.0);
     if prompt.message_time == 0.0 {
@@ -133,8 +182,15 @@ fn pick_up(
         if !controls.just_pressed(Action::Interact, &keys) {
             return;
         }
-        let Some(assets) = assets else { return };
         let spot = lootbox.spot;
+        // In a game that has been joined, the host opens it, and everyone sees it open.
+        if let Some(client) = client.as_deref_mut() {
+            client.ask(Request::Open { building: spot.0 as u16, spot: spot.1 as u8 });
+            prompt.message = "Opening the crate...".to_string();
+            prompt.message_time = 2.0;
+            return;
+        }
+        let Some(assets) = assets else { return };
         let contents = roll_contents(lootbox.rarity, lootbox.size, spot_numbers(spot.0, spot.1));
         // The crate's floor: it hangs from a point `LIFT` above it.
         let floor = local.translation.y - LIFT;
@@ -146,11 +202,26 @@ fn pick_up(
         prompt.message_time = 3.0;
         opened.0.insert(spot, lying.into_iter().map(Some).collect());
         commands.entity(entity).despawn();
+        changes.write(WorldChange(WorldEvent::Opened { building: spot.0 as u16, spot: spot.1 as u8 }));
         return;
     }
     let Some((_, entity, mut pickup)) = thing else { return };
     prompt.looking_at = Some(format!("{}  [{}]", describe(&pickup.found), pickup.rarity.name()));
     if !controls.just_pressed(Action::Interact, &keys) {
+        return;
+    }
+    let key = key_of(pickup.spot, pickup.slot);
+    // In a game that has been joined, what is taken is the host's to give: it is asked for what would fit, and what
+    // is taken is added when the host says it has been.
+    if let Some(client) = client.as_deref_mut() {
+        let fits = crate::sync::would_fit(&inventory, &pickup.found);
+        if fits == 0 {
+            prompt.message = format!("No room for {}.", describe(&pickup.found));
+        } else {
+            client.ask(Request::Take { key, took: fits.min(u16::MAX as u32) as u16 });
+            prompt.message = "Taking it...".to_string();
+        }
+        prompt.message_time = 2.0;
         return;
     }
     let item = make_item(&mut inventory, &pickup.found);
@@ -160,6 +231,7 @@ fn pick_up(
                 *slot = None;
             }
             commands.entity(entity).despawn();
+            changes.write(WorldChange(WorldEvent::Taken { key, by: crate::net::HOST_ID, took: pickup.found.count.min(u16::MAX as u32) as u16 }));
             prompt.message = match (item.kind, &displaced) {
                 (ItemKind::Weapon(_), Some(old)) => format!("Took the {} and put down the {}.", item.kind.name(), old.kind.name()),
                 (ItemKind::Weapon(_), None) => format!("Took the {}.", item.kind.name()),
@@ -173,6 +245,7 @@ fn pick_up(
         Err(left) if left.count < item.count && matches!(item.kind, ItemKind::Ammo(_)) => {
             // Some of the rounds fitted: the rest stay where they are.
             prompt.message = format!("Took some; no room for the other {} rounds.", left.count);
+            changes.write(WorldChange(WorldEvent::Taken { key, by: crate::net::HOST_ID, took: (item.count - left.count).min(u16::MAX as u32) as u16 }));
             pickup.found.count = left.count;
             if let Some(Some(lying)) = opened.0.get_mut(&pickup.spot).and_then(|d| d.get_mut(pickup.slot)) {
                 lying.drop.found.count = left.count;
@@ -225,7 +298,7 @@ mod tests {
         app.insert_resource(LootAssets { mesh: Handle::default(), materials: vec![Handle::default(); 5], looks: HashMap::from([(kind, look)]), crates: Vec::new() });
         let mut inv = Inventory::default();
         let item = inv.make(kind, 1);
-        app.insert_resource(DropQueue(vec![item]));
+        app.insert_resource(DropQueue(vec![item])).init_resource::<Drops>().add_message::<WorldChange>();
         let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: crate::player::Stance::Stand, eye_height: 1.7, jump_spent_standing: false, floor: 3.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 3.0, lean: 0.0, lean_offset: Vec2::ZERO };
         app.world_mut().spawn((camera, GlobalTransform::from(Transform::from_xyz(10.0, 4.7, 20.0).looking_to(Vec3::NEG_Z, Vec3::Y))));
         app.add_systems(Update, put_down_thrown);

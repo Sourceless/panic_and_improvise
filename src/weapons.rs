@@ -35,6 +35,15 @@ impl WeaponKind {
         WeaponKind::DoubleBarrel,
     ];
 
+    /// The number the network knows it by.
+    pub fn code(self) -> u8 {
+        WeaponKind::ALL.iter().position(|&k| k == self).unwrap_or(0) as u8
+    }
+
+    pub fn from_code(code: u8) -> Option<WeaponKind> {
+        WeaponKind::ALL.get(code as usize).copied()
+    }
+
     pub fn def(self) -> &'static WeaponDef {
         &WEAPONS[self as usize]
     }

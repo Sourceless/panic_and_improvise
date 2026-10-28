@@ -387,7 +387,15 @@ pub fn draw_title(mut contexts: EguiContexts, mut title: ResMut<Title>, time: Re
         return Ok(());
     }
     let ctx = contexts.ctx_mut()?;
-    let t = time.elapsed_secs();
+    let request = show_title(ctx, &mut title, time.elapsed_secs());
+    if request.is_some() {
+        title.request = request;
+    }
+    Ok(())
+}
+
+/// Draws the screen on `ctx`, and says what was chosen on it, if anything was.
+pub fn show_title(ctx: &egui::Context, title: &mut Title, t: f32) -> Option<Request> {
     let mut request = None;
     let rect = ctx.content_rect();
     egui::Area::new(egui::Id::new("title")).order(egui::Order::Background).fixed_pos(rect.min).constrain(false).show(ctx, |ui| {
@@ -404,9 +412,9 @@ pub fn draw_title(mut contexts: EguiContexts, mut title: ResMut<Title>, time: Re
                 ui.add_space(36.0);
                 match title.phase {
                     Phase::Title => match title.screen {
-                        Screen::Main => main_screen(ui, &mut title, &mut request),
-                        Screen::Multiplayer => multiplayer_screen(ui, &mut title, &mut request),
-                        Screen::Replays => replays_screen(ui, &mut title, &mut request),
+                        Screen::Main => main_screen(ui, title, &mut request),
+                        Screen::Multiplayer => multiplayer_screen(ui, title, &mut request),
+                        Screen::Replays => replays_screen(ui, title, &mut request),
                     },
                     Phase::Connecting => {
                         ui.label(egui::RichText::new(&title.message).size(18.0).color(TEXT));
@@ -417,7 +425,7 @@ pub fn draw_title(mut contexts: EguiContexts, mut title: ResMut<Title>, time: Re
                             request = Some(Request::Cancel);
                         }
                     }
-                    Phase::Loading => loading_screen(ui, &title, t),
+                    Phase::Loading => loading_screen(ui, title, t),
                     Phase::Playing => {}
                 }
                 if !title.message.is_empty() && title.phase == Phase::Title {
@@ -426,12 +434,9 @@ pub fn draw_title(mut contexts: EguiContexts, mut title: ResMut<Title>, time: Re
                 }
             });
         });
-        ui.painter().text(egui::pos2(rect.left() + 16.0, rect.bottom() - 14.0), egui::Align2::LEFT_BOTTOM, format!("v{}", crate::VERSION), egui::FontId::proportional(14.0), DIM);
+        ui.painter().text(egui::pos2(rect.left() + 16.0, rect.bottom() - 14.0), egui::Align2::LEFT_BOTTOM, crate::version_label(), egui::FontId::proportional(14.0), DIM);
     });
-    if request.is_some() {
-        title.request = request;
-    }
-    Ok(())
+    request
 }
 
 /// A button as wide as the column.
@@ -663,6 +668,54 @@ mod tests {
         let title = app.world().resource::<Title>();
         assert_eq!(title.phase, Phase::Title);
         assert!(title.asking.is_none());
+    }
+
+    /// Runs the title for a frame with `events` arriving, and says what was chosen on it.
+    fn frame(ctx: &egui::Context, title: &mut Title, events: Vec<egui::Event>) -> Option<Request> {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0));
+        ctx.begin_pass(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() });
+        let chosen = show_title(ctx, title, 0.0);
+        ctx.end_pass().textures_delta.clear();
+        chosen
+    }
+
+    /// Clicks at `at`, a frame to move there, one to press and one to let go.
+    fn click(ctx: &egui::Context, title: &mut Title, at: egui::Pos2) -> Option<Request> {
+        let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame(ctx, title, vec![egui::Event::PointerMoved(at)]);
+        let pressed = frame(ctx, title, vec![button(true)]);
+        let released = frame(ctx, title, vec![button(false)]);
+        pressed.or(released)
+    }
+
+    #[test]
+    fn a_click_on_the_singleplayer_button_chooses_singleplayer_and_one_on_multiplayer_opens_that_screen() {
+        let ctx = egui::Context::default();
+        let mut title = Title::default();
+        // The first frames lay it out.
+        for _ in 0..3 {
+            frame(&ctx, &mut title, vec![]);
+        }
+        // Down the middle of the screen, until something is clicked: the first button is the first thing there.
+        let mut got = None;
+        for y in (150..700).step_by(5) {
+            if let Some(request) = click(&ctx, &mut title, egui::pos2(640.0, y as f32)) {
+                got = Some((y, request));
+                break;
+            }
+        }
+        let (y, request) = got.expect("some button took a click");
+        assert_eq!(request, Request::Single, "at {y}");
+        // The second one opens the multiplayer screen.
+        let mut opened = false;
+        for y in (150..700).step_by(5) {
+            click(&ctx, &mut title, egui::pos2(640.0, y as f32));
+            if title.screen == Screen::Multiplayer {
+                opened = true;
+                break;
+            }
+        }
+        assert!(opened);
     }
 
     #[test]

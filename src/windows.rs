@@ -37,7 +37,7 @@ pub struct Pushed {
 }
 
 #[derive(Resource)]
-struct GlassSounds {
+pub struct GlassSounds {
     crashes: Vec<Handle<AudioSource>>,
     cracks: Vec<Handle<AudioSource>>,
     tinkle: Handle<AudioSource>,
@@ -47,10 +47,11 @@ pub struct WindowsPlugin;
 
 impl Plugin for WindowsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Bump>().add_systems(Startup, load_sounds).add_systems(
+        // (The bullets that fly in a game that has been joined are only for show: the host's break the glass, and say so.)
+        app.add_message::<crate::sync::WorldChange>().init_resource::<Bump>().add_systems(Startup, load_sounds).add_systems(
             Update,
             (
-                break_by_bullets.after(crate::weapon::move_bullets),
+                break_by_bullets.after(crate::weapon::move_bullets).run_if(crate::net_client::not_a_client),
                 break_by_bodies.after(crate::player::player_movement),
             ),
         );
@@ -95,10 +96,19 @@ fn shatter(
     Some((centre, normal))
 }
 
+/// Breaks pane `pane` of building `index`, which is somebody else's doing (the host's word, or a client's request):
+/// the same as if it had been broken here, but nothing is said of it. Whether it was whole to be broken.
+#[allow(clippy::too_many_arguments)]
+pub fn break_pane_at(index: usize, pane: usize, commands: &mut Commands, colliders: &mut Colliders, buildings: &mut Buildings, meshes: &mut Assets<Mesh>, sounds: Option<&GlassSounds>, ear: Option<Vec3>) -> bool {
+    let Some(id) = buildings.whole_pane(index, pane) else { return false };
+    shatter(id, false, commands, colliders, buildings, meshes, sounds, ear).is_some()
+}
+
 /// A bullet that hit a pane breaks it (the bullet goes on; see the weapon's flight).
 #[allow(clippy::too_many_arguments)]
 fn break_by_bullets(
     mut commands: Commands,
+    mut changes: MessageWriter<crate::sync::WorldChange>,
     mut impacts: MessageReader<Impact>,
     colliders: Option<ResMut<Colliders>>,
     buildings: Option<ResMut<Buildings>>,
@@ -113,8 +123,18 @@ fn break_by_bullets(
             continue;
         }
         if let Some(id) = colliders.glass_near(impact.position, BULLET_REACH, None) {
-            shatter(id, true, &mut commands, &mut colliders, &mut buildings, &mut meshes, sounds.as_deref(), ear);
+            let pane = buildings.locate(id);
+            if shatter(id, true, &mut commands, &mut colliders, &mut buildings, &mut meshes, sounds.as_deref(), ear).is_some() {
+                announce(&mut changes, pane);
+            }
         }
+    }
+}
+
+/// Says that a pane was broken here (see `sync`): the host tells its players, a client asks the host to.
+fn announce(changes: &mut MessageWriter<crate::sync::WorldChange>, pane: Option<(usize, usize)>) {
+    if let Some((building, pane)) = pane {
+        changes.write(crate::sync::WorldChange(crate::net::WorldEvent::Glass { building: building as u16, pane: pane as u16 }));
     }
 }
 
@@ -122,6 +142,7 @@ fn break_by_bullets(
 #[allow(clippy::too_many_arguments)]
 fn break_by_bodies(
     mut commands: Commands,
+    mut changes: MessageWriter<crate::sync::WorldChange>,
     mut bump: ResMut<Bump>,
     mut impacts: MessageWriter<Impact>,
     colliders: Option<ResMut<Colliders>>,
@@ -138,7 +159,9 @@ fn break_by_bodies(
     let waist = Vec3::new(pushed.at.x, pushed.feet + WAIST, pushed.at.y);
     let Some(id) = colliders.glass_near(waist, PLAYER_RADIUS + TOUCH, Some(pushed.into)) else { return };
     let ear = camera.single().ok().map(|c| c.translation());
+    let pane = buildings.locate(id);
     let Some((centre, _)) = shatter(id, false, &mut commands, &mut colliders, &mut buildings, &mut meshes, sounds.as_deref(), ear) else { return };
+    announce(&mut changes, pane);
     // The shards go on the way the body was going.
     impacts.write(Impact { position: centre, normal: Vec3::new(pushed.into.x, 0.0, pushed.into.y), surface: Surface::Solid(Material::Glass), speed: SHARD_SPEED, target: None });
 }

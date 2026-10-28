@@ -53,6 +53,15 @@ impl Rarity {
         0.2 + 0.035 * self as usize as f32
     }
 
+    /// The number the network knows it by.
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_code(code: u8) -> Option<Rarity> {
+        Rarity::ALL.get(code as usize).copied()
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Rarity::Common => "common",
@@ -387,6 +396,14 @@ pub fn spot_numbers(building: usize, index: usize) -> impl FnMut() -> f32 {
     move || rng.unit()
 }
 
+/// How many groups of things have been put down loose in the world (dropped by a zombie, or thrown out of an
+/// inventory): each group has the number that says where it lies, `(LOOSE, group)`.
+#[derive(Resource, Default)]
+pub struct Drops(pub usize);
+
+/// What the first of the pair that says where a loose thing lies is.
+pub const LOOSE: usize = usize::MAX - 2;
+
 /// A thing lying on the ground to be picked up.
 #[derive(Component)]
 pub struct Pickup {
@@ -648,6 +665,18 @@ fn make_assets(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mat
 fn spin(time: Res<Time>, mut boxes: Query<&mut Transform, With<Spin>>) {
     for mut t in &mut boxes {
         t.rotate_y(time.delta_secs() * 0.9);
+    }
+}
+
+#[cfg(test)]
+impl LootAssets {
+    /// Looks for every kind of thing (with no parts, for nothing to be drawn), so that things can be put down in a
+    /// test that has no renderer.
+    pub(crate) fn for_tests() -> LootAssets {
+        let mut kinds: Vec<ItemKind> = WeaponKind::ALL.iter().map(|&w| ItemKind::Weapon(w)).collect();
+        kinds.extend(item_models::kinds());
+        let looks = kinds.into_iter().map(|kind| (kind, ModelLook { parts: Vec::new(), middle: Vec2::ZERO, bottom: 0.0, radius: 0.1, long_in_z: true })).collect();
+        LootAssets { mesh: Handle::default(), materials: vec![Handle::default(); 5], looks, crates: Vec::new() }
     }
 }
 

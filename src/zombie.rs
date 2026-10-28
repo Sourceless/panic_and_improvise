@@ -467,20 +467,17 @@ struct ZombieVoices {
 
 const GROANS: usize = 5;
 
-/// How many have dropped something, so that each drop has a spot of its own.
-#[derive(Resource, Default)]
-struct Drops(usize);
-
 pub struct ZombiePlugin;
 
 impl Plugin for ZombiePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ZombieDice>()
-            .init_resource::<Drops>()
+            .init_resource::<crate::loot::Drops>()
             .init_resource::<PlayerHealth>()
             .add_systems(Startup, (make_assets, load_voices))
-            .add_systems(Update, (move_zombies, fall_and_drop).run_if(crate::net_client::not_a_client))
-            .add_systems(Update, (groan, zombie_footsteps));
+            .add_systems(Update, move_zombies.run_if(crate::net_client::not_a_client))
+            // (Those that fall are the same in a game that has been joined: they are shown falling.)
+            .add_systems(Update, (fall_and_drop, groan, zombie_footsteps));
         // A shooting range is for shooting at the dummies, not at these. (A game that has been joined has the
         // host's zombies, shown for it; it has none of its own.)
         if std::env::var_os("FPS_RANGE").is_none() {
@@ -509,11 +506,22 @@ fn load_voices(mut commands: Commands, assets: Option<Res<AssetServer>>) {
 
 /// Puts a zombie down with its feet at `base`, facing `yaw`: a stooped figure with its arms out in front.
 pub fn spawn_zombie(commands: &mut Commands, assets: &ZombieAssets, kind: ZombieKind, base: Vec3, yaw: f32, id: u32) -> Entity {
+    spawn_body(commands, assets, Zombie::numbered(kind, yaw, id), base)
+}
+
+/// A zombie that is only shown (in a game that has been joined): the host has the real one. It does not drop anything
+/// when it falls, for the host says what is dropped.
+pub fn spawn_puppet(commands: &mut Commands, assets: &ZombieAssets, kind: ZombieKind, base: Vec3, id: u32) -> Entity {
+    spawn_body(commands, assets, Zombie { looted: true, ..Zombie::numbered(kind, 0.0, id) }, base)
+}
+
+fn spawn_body(commands: &mut Commands, assets: &ZombieAssets, zombie: Zombie, base: Vec3) -> Entity {
+    let (kind, yaw) = (zombie.kind, zombie.yaw);
     let t = kind.traits();
     let (skin, rags) = &assets.looks[kind.index()];
     let part = |centre: Vec3, size: Vec3, material: &Handle<StandardMaterial>| (Mesh3d(assets.cuboid.clone()), MeshMaterial3d(material.clone()), Transform::from_translation(centre).with_scale(size));
     commands
-        .spawn((Zombie::numbered(kind, yaw, id), Transform::from_translation(base).with_rotation(Quat::from_rotation_y(yaw)).with_scale(Vec3::new(t.girth, t.scale, t.girth)), Visibility::default()))
+        .spawn((zombie, Transform::from_translation(base).with_rotation(Quat::from_rotation_y(yaw)).with_scale(Vec3::new(t.girth, t.scale, t.girth)), Visibility::default()))
         .with_children(|z| {
             z.spawn(part(Vec3::new(0.0, 1.1, 0.0), Vec3::new(0.5, 0.65, 0.28), rags));
             z.spawn(part(Vec3::new(0.0, 1.6, -0.08), Vec3::new(0.24, 0.26, 0.24), skin));
@@ -796,11 +804,12 @@ fn zombie_footsteps(
 }
 
 /// The dead go over backward and drop what they had; the body lies a while, then is gone.
-fn fall_and_drop(
+pub(crate) fn fall_and_drop(
     mut commands: Commands,
     time: Res<Time>,
     mut dice: ResMut<ZombieDice>,
-    mut drops: ResMut<Drops>,
+    mut drops: ResMut<crate::loot::Drops>,
+    mut changes: MessageWriter<crate::sync::WorldChange>,
     loot: Option<Res<LootAssets>>,
     mut zombies: Query<(Entity, &mut Transform, &mut Zombie)>,
 ) {
@@ -817,7 +826,9 @@ fn fall_and_drop(
             if !found.is_empty() {
                 let room = Rect::new(at.x - 0.6, at.z - 0.6, at.x + 0.6, at.z + 0.6);
                 for (slot, lying) in lay_contents(loot, &room, at.y, &found).iter().enumerate() {
-                    crate::loot::spawn_drop(&mut commands, loot, None, lying, (usize::MAX - 2, drops.0), slot);
+                    crate::loot::spawn_drop(&mut commands, loot, None, lying, (crate::loot::LOOSE, drops.0), slot);
+                    // In a game that is hosted, everyone is told it is there.
+                    changes.write(crate::sync::WorldChange(crate::sync::dropped_event(lying, (crate::loot::LOOSE, drops.0), slot)));
                 }
                 drops.0 += 1;
             }

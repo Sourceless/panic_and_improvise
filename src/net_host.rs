@@ -12,12 +12,14 @@ use bevy::prelude::*;
 
 use crate::collision::Colliders;
 use crate::figure::{spawn_figure, FigureLook, Gait, Seen};
-use crate::impact::surface_hit;
+use crate::inventory::ItemKind;
+use crate::loot::{spawn_drop, Drops, Dropped, Found, LootAssets, LootBox, Lying, OpenedLoot, Pickup, LOOSE};
 use crate::map::TerrainMap;
-use crate::net::{Heard, Lobby, Packet, Passed, PlayerState, ZombieSeen, DEFAULT_PORT, EYE_HEIGHT, MAX_ZOMBIES_SEEN, SEND_RATE};
+use crate::net::{Heard, Lobby, Packet, Passed, PlayerState, Request, ShotInfo, WorldEvent, ZombieSeen, DEFAULT_PORT, MAX_ZOMBIES_SEEN, SEND_RATE};
 use crate::player::FpsCamera;
-use crate::sound::play_after;
-use crate::weapon::BulletAssets;
+use crate::settlement::Buildings;
+use crate::sync::{dropped_event, open_box, remove_item, WorldChange};
+use crate::weapon::{launch, shot_heard, BulletAssets, ShotFired};
 use crate::weapons::WeaponKind;
 use crate::zombie::Zombie;
 
@@ -27,25 +29,8 @@ const MOST_PER_FRAME: usize = 512;
 /// How quickly, per second, a figure closes on the place it was last told it is at.
 const GLIDE: f32 = 14.0;
 
-/// What a joined player's gun does: how much a hit takes off a zombie, how far it carries (metres), and
-/// the odds of a hit at point blank, falling away with distance to the least that is left at the limit.
-pub const SHOT_DAMAGE: f32 = 30.0;
-pub const SHOT_RANGE: f32 = 60.0;
-const HIT_NEAR: f32 = 0.9;
-const HIT_FAR: f32 = 0.3;
-/// How often a hit is in the head, and what that does to the damage.
-const HEAD_CHANCE: f32 = 0.12;
-const HEAD_DAMAGE: f32 = 2.0;
-/// Where on a zombie a shot is aimed, as a share of its height, and how long its streak shows, seconds.
-const CHEST: f32 = 0.6;
-const TRACER_TIME: f32 = 0.07;
-
-/// The streak of a shot, to be drawn for a moment.
-struct Tracer {
-    from: Vec3,
-    to: Vec3,
-    left: f32,
-}
+/// How far from a joined player, metres, the zombies it is told of are.
+pub const SEEN_RANGE: f32 = 90.0;
 
 /// The game's end of the wire.
 #[derive(Resource)]
@@ -53,15 +38,17 @@ pub struct Host {
     socket: UdpSocket,
     pub lobby: Lobby,
     since_send: f32,
-    tracers: Vec<Tracer>,
     luck: u32,
+    /// Shots heard, and what clients have asked for, waiting to be seen to by the systems that have what is needed.
+    shots: Vec<(u8, crate::net::ShotInfo)>,
+    asked: Vec<(u8, crate::net::Request)>,
 }
 
 impl Host {
     /// Opens a socket at `address` (like `0.0.0.0:7777`; port 0 picks a free one) to be hosted on.
     pub fn bind(address: &str) -> Result<Host, String> {
         let socket = UdpSocket::bind(address).and_then(|s| s.set_nonblocking(true).map(|()| s)).map_err(|e| format!("could not host on {address}: {e}"))?;
-        let host = Host { socket, lobby: Lobby::default(), since_send: 0.0, tracers: Vec::new(), luck: 0x1F2E_3D4C };
+        let host = Host { socket, lobby: Lobby::default(), since_send: 0.0, luck: 0x1F2E_3D4C, shots: Vec::new(), asked: Vec::new() };
         info!("hosting on {}: other players can join with `cargo run --bin bot -- <this machine's address>:{}`", host.local_addr(), host.local_addr().port());
         Ok(host)
     }
@@ -127,8 +114,8 @@ impl Plugin for HostPlugin {
         // The game can be hosted from the start (as asked on the command line) or from the title screen, which
         // puts a `Host` in the world when it is chosen; either way, the systems wait for one.
         let hosting = resource_exists::<Host>;
-        app.add_systems(Update, (receive, broadcast, show_players).chain().run_if(hosting))
-            .add_systems(Update, draw_tracers.run_if(hosting).run_if(resource_exists::<GizmoConfigStore>));
+        app.add_message::<WorldChange>().add_message::<ShotFired>().init_resource::<OpenedLoot>().init_resource::<Drops>()
+            .add_systems(Update, (receive, collect_changes, fire_shots, answer_requests, tell_of_my_shots, broadcast, show_players).chain().run_if(hosting));
         let Some(address) = &self.address else { return };
         match Host::bind(address) {
             Ok(host) => {
@@ -148,16 +135,7 @@ fn host_state(player: &Query<(&Transform, &FpsCamera)>) -> PlayerState {
 }
 
 /// Reads whatever has arrived and deals with it.
-#[allow(clippy::too_many_arguments)]
-fn receive(
-    mut commands: Commands,
-    mut host: ResMut<Host>,
-    map: Option<Res<TerrainMap>>,
-    colliders: Option<Res<Colliders>>,
-    bullets: Option<Res<BulletAssets>>,
-    player: Query<(&Transform, &FpsCamera)>,
-    mut zombies: Query<(&Transform, &mut Zombie)>,
-) {
+fn receive(mut host: ResMut<Host>, map: Option<Res<TerrainMap>>, player: Query<(&Transform, &FpsCamera)>) {
     let me = host_state(&player);
     let seed = map.as_ref().map_or(0, |m| m.seed);
     let mut buffer = [0u8; 1500];
@@ -172,64 +150,128 @@ fn receive(
         for heard in host.lobby.hear(from, packet, seed, me) {
             match heard {
                 Heard::Reply(reply) => host.send(from, &reply),
-                Heard::Joined(id, name) => info!("{name} joined as player {id}, from {from}"),
+                Heard::Joined(id, name) => info!("{name} joined as player {id}, from {from} ({} things have happened in the world since the start)", host.lobby.log.len()),
                 Heard::Left(id) => info!("player {id} left"),
-                Heard::Fired(id, target) => shoot(&mut commands, &mut host, id, target, map.as_deref(), colliders.as_deref(), bullets.as_deref(), &mut zombies),
+                Heard::Shot(id, shot) => {
+                    // Everyone else sees and hears it, and the host sends it on its way.
+                    let told = Packet::Fired { player: id, shot };
+                    for client in host.lobby.clients.iter().filter(|c| c.id != id) {
+                        host.send(client.addr, &told);
+                    }
+                    host.shots.push((id, shot));
+                }
+                Heard::Asked(id, request) => host.asked.push((id, request)),
                 Heard::Nothing => {}
             }
         }
     }
 }
 
-/// What a joined player's shot at the zombie numbered `target` comes to: a streak, a bang, and, if it hits, a
-/// wound. The host decides everything but who shot at what: the zombie must be in range and in the shooter's
-/// line of sight, and how likely a hit is falls with distance.
-#[allow(clippy::too_many_arguments)]
-fn shoot(commands: &mut Commands, host: &mut Host, shooter: u8, target: u32, map: Option<&TerrainMap>, colliders: Option<&Colliders>, bullets: Option<&BulletAssets>, zombies: &mut Query<(&Transform, &mut Zombie)>) {
-    let Some(client) = host.lobby.clients.iter().find(|c| c.id == shooter && c.alive()) else { return };
-    let (name, feet) = (client.name.clone(), Vec3::new(client.state.x, client.state.y, client.state.z));
-    let muzzle = feet + Vec3::Y * EYE_HEIGHT;
-    let Some((at, mut zombie)) = zombies.iter_mut().find(|(_, z)| z.net_id == target && z.alive()) else { return };
-    let chest = at.translation + Vec3::Y * CHEST * 1.8 * zombie.kind.traits().scale;
-    let distance = muzzle.distance(chest);
-    if distance > SHOT_RANGE {
-        return;
-    }
-    // Anything in the way: the land, or something solid.
-    let blocked = map.is_some_and(|m| surface_hit(m, muzzle, chest).is_some()) || colliders.is_some_and(|c| c.sight_hit(muzzle, chest).is_some());
-    let hit_chance = HIT_NEAR + (HIT_FAR - HIT_NEAR) * (distance / SHOT_RANGE).clamp(0.0, 1.0);
-    let hit = !blocked && host.roll() < hit_chance;
-    let mut end = chest;
-    if blocked {
-        // The streak stops short of what is in the way.
-        end = muzzle.lerp(chest, 0.5);
-    } else if hit {
-        let damage = if host.roll() < HEAD_CHANCE { SHOT_DAMAGE * HEAD_DAMAGE } else { SHOT_DAMAGE };
-        let was_alive = zombie.alive();
-        zombie.take_hit(damage);
-        if was_alive && !zombie.alive() {
-            info!("{name} shot a {:?}", zombie.kind);
-        }
-    } else {
-        // A miss goes wide, past it.
-        let wide = Vec3::new(host.roll() - 0.5, host.roll() - 0.5, host.roll() - 0.5) * 1.2;
-        end = muzzle + (chest + wide - muzzle) * 1.3;
-    }
-    host.tracers.push(Tracer { from: muzzle, to: end, left: TRACER_TIME });
-    if let Some(bullets) = bullets.filter(|b| !b.shot_sounds.is_empty()) {
-        let pick = (host.roll() * bullets.shot_sounds.len() as f32) as usize % bullets.shot_sounds.len();
-        play_after(commands, 0.0, bullets.shot_sounds[pick].clone(), 0.95 + 0.1 * host.roll(), 1.4, Some(muzzle));
+/// What is written down as having happened in the world (by what the host's player did) goes in the book that every
+/// client is told from.
+fn collect_changes(mut host: ResMut<Host>, mut changes: MessageReader<WorldChange>) {
+    for WorldChange(event) in changes.read() {
+        host.lobby.push_event(*event);
     }
 }
 
-/// Draws the streaks of the shots for as long as they last.
-fn draw_tracers(mut gizmos: Gizmos, mut host: ResMut<Host>, time: Res<Time>) {
-    let dt = time.delta_secs();
-    for tracer in &mut host.tracers {
-        gizmos.line(tracer.from + Vec3::new(0.0, -0.1, 0.0), tracer.to, Color::srgb(1.0, 0.85, 0.4));
-        tracer.left -= dt;
+/// Sends the shots that clients have fired on their way, as the host's own would be: the same bullets, flying the
+/// same, hitting what they hit and doing what they do. What is claimed is only believed as far as it makes sense.
+fn fire_shots(mut commands: Commands, mut host: ResMut<Host>, bullets: Option<Res<BulletAssets>>) {
+    for (_, shot) in std::mem::take(&mut host.shots) {
+        let (Some(weapon), Some(ammo)) = (WeaponKind::from_code(shot.weapon), crate::ammo::AmmoKind::from_code(shot.ammo)) else { continue };
+        // The load must be one the gun takes.
+        if ammo.def().caliber != weapon.def().default_ammo.def().caliber {
+            continue;
+        }
+        let Some(direction) = Vec3::from_array(shot.direction).try_normalize() else { continue };
+        let fired = ShotFired { weapon, ammo, origin: Vec3::from_array(shot.origin), direction, scale: shot.scale.max(1.0) };
+        let Some(bullets) = bullets.as_deref() else { continue };
+        launch(&mut commands, bullets, &fired, || host.roll());
+        shot_heard(&mut commands, bullets, &fired, || host.roll());
     }
-    host.tracers.retain(|t| t.left > 0.0);
+}
+
+/// Tells the clients of the shots that the host's own player fires, for them to see and hear.
+fn tell_of_my_shots(host: Res<Host>, mut shots: MessageReader<ShotFired>) {
+    for shot in shots.read() {
+        let told = Packet::Fired { player: crate::net::HOST_ID, shot: ShotInfo { weapon: shot.weapon.code(), ammo: shot.ammo.code(), origin: shot.origin.to_array(), direction: shot.direction.to_array(), scale: shot.scale } };
+        for client in &host.lobby.clients {
+            host.send(client.addr, &told);
+        }
+    }
+}
+
+/// Does what clients have asked for, if it can be done: each thing is done in the world as it would be for the host's
+/// own player, and written down, for everybody to be told. (The host believes what it is asked as far as it
+/// makes sense; this is for playing with friends, not strangers.)
+#[allow(clippy::too_many_arguments)]
+fn answer_requests(
+    mut commands: Commands,
+    mut host: ResMut<Host>,
+    buildings: Option<ResMut<Buildings>>,
+    loot: Option<Res<LootAssets>>,
+    mut opened: ResMut<OpenedLoot>,
+    crates: Query<(Entity, &LootBox)>,
+    mut pickups: Query<(Entity, &GlobalTransform, &mut Pickup)>,
+    mut drops: ResMut<Drops>,
+    colliders: Option<ResMut<Colliders>>,
+    meshes: Option<ResMut<Assets<Mesh>>>,
+    sounds: Option<Res<crate::windows::GlassSounds>>,
+    camera: Query<&GlobalTransform, With<Camera3d>>,
+) {
+    if host.asked.is_empty() {
+        return;
+    }
+    let (Some(mut buildings), Some(loot)) = (buildings, loot) else { return };
+    let (mut colliders, mut meshes) = (colliders, meshes);
+    let ear = camera.single().ok().map(|c| c.translation());
+    // Things that are put down (a box opened, a thing thrown) are not there to be taken until the frame is over; a
+    // request to take one waits for the next.
+    let mut put_down = false;
+    let mut asked = std::mem::take(&mut host.asked).into_iter();
+    while let Some((id, request)) = asked.next() {
+        if put_down && matches!(request, Request::Take { .. }) {
+            host.asked.push((id, request));
+            host.asked.extend(asked.by_ref());
+            break;
+        }
+        let Some(client) = host.lobby.clients.iter().find(|c| c.id == id) else { continue };
+        let feet = Vec3::new(client.state.x, client.state.y, client.state.z);
+        match request {
+            Request::Open { building, spot } => {
+                if open_box(&mut commands, &buildings, &loot, &mut opened, &crates, building as usize, spot as usize).is_some() {
+                    host.lobby.push_event(WorldEvent::Opened { building, spot });
+                    put_down = true;
+                }
+            }
+            Request::Take { key, took } => {
+                if let Some(found) = remove_item(&mut commands, &mut opened, &mut pickups, key, took as u32) {
+                    host.lobby.push_event(WorldEvent::Taken { key, by: id, took: found.count.min(u16::MAX as u32) as u16 });
+                }
+            }
+            Request::Throw { item, count, loaded, at } => {
+                let Some(kind) = ItemKind::from_code(item) else { continue };
+                // It is put down near whoever threw it, wherever they say.
+                let at = Vec3::from_array(at);
+                let at = if at.distance(feet) <= 6.0 { at } else { feet };
+                let found = Found { kind, count: (count as u32).clamp(1, 999), loaded: loaded as u32 };
+                let lying = Lying { drop: Dropped { rarity: crate::loot::rarity_of(kind), found }, at, yaw: 0.0 };
+                let spot = (LOOSE, drops.0);
+                drops.0 += 1;
+                spawn_drop(&mut commands, &loot, None, &lying, spot, 0);
+                host.lobby.push_event(dropped_event(&lying, spot, 0));
+                put_down = true;
+            }
+            Request::Glass { building, pane } => {
+                if let (Some(colliders), Some(meshes)) = (colliders.as_deref_mut(), meshes.as_deref_mut()) {
+                    if crate::windows::break_pane_at(building as usize, pane as usize, &mut commands, colliders, &mut buildings, meshes, sounds.as_deref(), ear) {
+                        host.lobby.push_event(WorldEvent::Glass { building, pane });
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Tells everybody where everybody is (and each of them which zombies are about and how they are), and drops
@@ -247,15 +289,25 @@ fn broadcast(mut host: ResMut<Host>, time: Res<Time>, player: Query<(&Transform,
         }
     }
     let snapshot = host.lobby.snapshot(host_state(&player));
-    let alive: Vec<ZombieSeen> = zombies.iter().filter(|(_, z)| z.alive()).map(|(t, z)| ZombieSeen { id: z.net_id, kind: z.kind as u8, x: t.translation.x, y: t.translation.y, z: t.translation.z }).collect();
+    // Those that are down, and not yet gone, as well: so that they are seen to fall.
+    let seen: Vec<ZombieSeen> = zombies
+        .iter()
+        .map(|(t, z)| {
+            let health = if z.alive() { (100.0 * z.health / z.kind.traits().health).ceil().clamp(1.0, 100.0) as u8 } else { 0 };
+            ZombieSeen { id: z.net_id, kind: z.kind as u8, health, x: t.translation.x, y: t.translation.y, z: t.translation.z }
+        })
+        .collect();
     for client in &host.lobby.clients {
         host.send(client.addr, &snapshot);
         // The nearest of the living, as many as a packet holds.
         let here = Vec3::new(client.state.x, client.state.y, client.state.z);
-        let mut near: Vec<&ZombieSeen> = alive.iter().filter(|z| Vec3::new(z.x, z.y, z.z).distance(here) <= SHOT_RANGE * 1.5).collect();
+        let mut near: Vec<&ZombieSeen> = seen.iter().filter(|z| Vec3::new(z.x, z.y, z.z).distance(here) <= SEEN_RANGE).collect();
         near.sort_by(|a, b| Vec3::new(a.x, a.y, a.z).distance_squared(here).total_cmp(&Vec3::new(b.x, b.y, b.z).distance_squared(here)));
         near.truncate(MAX_ZOMBIES_SEEN);
         host.send(client.addr, &Packet::Zombies(near.into_iter().copied().collect()));
+        if let Some(events) = host.lobby.events_for(client.id) {
+            host.send(client.addr, &events);
+        }
         if let Some(status) = host.lobby.status(client.id) {
             host.send(client.addr, &status);
         }

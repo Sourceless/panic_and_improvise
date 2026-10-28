@@ -48,6 +48,7 @@ pub mod playback;
 pub mod road_material;
 pub mod roads;
 pub mod sound;
+pub mod sync;
 pub mod settlement;
 pub mod settlement_plan;
 pub mod target;
@@ -76,12 +77,18 @@ pub const MAP_SEED: u64 = 2026;
 /// any other way.
 pub const VERSION: &str = match option_env!("PANIC_AND_IMPROVISE_VERSION") {
     Some(version) => version,
-    None => env!("CARGO_PKG_VERSION"),
+    // Any other build is `dev` and the commit it was made from (see build.rs).
+    None => env!("PANIC_AND_IMPROVISE_DEV_VERSION"),
 };
+
+/// How the version is shown: `v0.1.101` for a release, `dev-7684b83` for a build of anything else.
+pub fn version_label() -> String {
+    if VERSION.starts_with(|c: char| c.is_ascii_digit()) { format!("v{VERSION}") } else { VERSION.to_string() }
+}
 
 /// What the game's window is called.
 pub fn window_title() -> String {
-    format!("Panic and Improvise v{VERSION}")
+    format!("Panic and Improvise {}", version_label())
 }
 
 #[cfg(test)]
@@ -89,8 +96,20 @@ mod version_tests {
     #[test]
     fn the_window_is_named_for_the_game_and_its_version() {
         let title = super::window_title();
-        assert!(title.starts_with("Panic and Improvise v"), "{title}");
-        assert!(title.ends_with(super::VERSION) && super::VERSION.chars().next().unwrap().is_ascii_digit(), "{title}");
+        assert!(title.starts_with("Panic and Improvise "), "{title}");
+        assert!(title.ends_with(super::VERSION), "{title}");
+        // Not a release (these tests are not built as one): it says so, and from which commit, and has no `v`.
+        assert!(super::VERSION.starts_with("dev") && !title.contains(" v"), "{title}");
+        assert_eq!(super::version_label(), super::VERSION);
+    }
+
+    #[test]
+    fn a_release_is_shown_as_its_number_with_a_v_and_anything_else_as_it_is() {
+        // (The label's rule, tried on what it is given: the real version is fixed when the program is built.)
+        let label = |v: &str| if v.starts_with(|c: char| c.is_ascii_digit()) { format!("v{v}") } else { v.to_string() };
+        assert_eq!(label("0.1.101"), "v0.1.101");
+        assert_eq!(label("dev-7684b83"), "dev-7684b83");
+        assert_eq!(label("dev"), "dev");
     }
 }
 
@@ -142,6 +161,7 @@ impl Plugin for GamePlugin {
             figure::FigurePlugin,
             body::BodyPlugin,
             recorder::RecorderPlugin,
+            sync::SyncPlugin,
         ));
     }
 }

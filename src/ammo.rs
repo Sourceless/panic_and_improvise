@@ -48,6 +48,15 @@ pub enum AmmoKind {
 
 impl AmmoKind {
     pub const ALL: [AmmoKind; 5] = [AmmoKind::NineFmj, AmmoKind::NatoBall, AmmoKind::BritishBall, AmmoKind::Buckshot, AmmoKind::Webley455];
+
+    /// The number the network knows it by.
+    pub fn code(self) -> u8 {
+        AmmoKind::ALL.iter().position(|&k| k == self).unwrap_or(0) as u8
+    }
+
+    pub fn from_code(code: u8) -> Option<AmmoKind> {
+        AmmoKind::ALL.get(code as usize).copied()
+    }
 }
 
 /// How a round is made, which decides how it hits.
