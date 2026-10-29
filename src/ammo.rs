@@ -113,8 +113,9 @@ impl Build {
             // Pellets stop in the body and give up all they have, where a rifle bullet goes through with half of
             // it; and a load is nine wounds in one place.
             Build::Shot => 2.2,
-            // Lead, big and slow: it spends all it has in the body.
-            Build::Slug => 2.0,
+            // Lead, big and slow: it spends all it has in the body, and makes a wound a rifle bullet going through
+            // does not. A .455 hits like a hand cannon: two of them put a walker down.
+            Build::Slug => 4.6,
         }
     }
 }

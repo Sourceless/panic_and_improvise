@@ -6,6 +6,7 @@ use bevy::prelude::*;
 
 use crate::ammo::{AmmoKind, Caliber};
 use crate::gun_state::{BoltType, Mechanism, ReloadStyle};
+use crate::reload::SWEET_SPOT;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub enum WeaponKind {
@@ -146,7 +147,7 @@ impl WeaponDef {
 }
 
 const fn mech(bolt_type: BoltType, cycle_time: f32, reload_time: f32, charge_time: f32, reload_per_round: f32) -> Mechanism {
-    Mechanism { bolt_type, cycle_time, reload_time, charge_time, reload_per_round, style: ReloadStyle::Magazine, clip_time: 0.0, manual_bolt: false }
+    Mechanism { bolt_type, cycle_time, reload_time, charge_time, reload_per_round, style: ReloadStyle::Magazine, clip_time: 0.0, manual_bolt: false, sweet_spot: SWEET_SPOT }
 }
 
 const fn handling(
@@ -200,7 +201,7 @@ pub const WEAPONS: [WeaponDef; 10] = [
         kind: WeaponKind::HiPower,
         name: "Browning Hi-Power",
         caliber: Caliber::Nine,
-        mechanism: mech(BoltType::Closed, 0.13, 1.9, 0.35, 0.0),
+        mechanism: mech(BoltType::Closed, 0.13, 1.9, 0.35, 0.0).with_sweet_spot(0.25, 0.75),
         modes: &[FireMode::Semi],
         magazine: 13,
         zero: 25.0,
@@ -255,7 +256,7 @@ pub const WEAPONS: [WeaponDef; 10] = [
         kind: WeaponKind::Mag,
         name: "FN MAG",
         caliber: Caliber::Nato,
-        mechanism: mech(BoltType::Open, 0.08, 7.5, 1.2, 0.0),
+        mechanism: mech(BoltType::Open, 0.08, 7.5, 1.2, 0.0).with_sweet_spot(0.45, 0.6),
         modes: &[FireMode::Auto],
         magazine: 100,
         zero: 100.0,
@@ -274,7 +275,7 @@ pub const WEAPONS: [WeaponDef; 10] = [
         kind: WeaponKind::L42,
         name: "L42A1",
         caliber: Caliber::Nato,
-        mechanism: mech(BoltType::Closed, 1.3, 3.2, 0.5, 0.0),
+        mechanism: mech(BoltType::Closed, 1.3, 3.2, 0.5, 0.0).with_sweet_spot(0.4, 0.6),
         modes: &[FireMode::Semi],
         magazine: 10,
         zero: 200.0,
@@ -312,7 +313,7 @@ pub const WEAPONS: [WeaponDef; 10] = [
         caliber: Caliber::Britain,
         // The bolt is worked by hand after each shot, and the magazine is filled from clips of five (1.3 s each), with the
         // action opened first (0.5 s) and any odd rounds put in one by one (0.75 s each).
-        mechanism: mech(BoltType::Closed, 0.7, 0.5, 0.0, 0.75).by_clips(5, 1.3).with_bolt_worked_by_hand(),
+        mechanism: mech(BoltType::Closed, 0.7, 0.5, 0.0, 0.75).by_clips(5, 1.3).with_bolt_worked_by_hand().with_sweet_spot(0.4, 0.65),
         modes: &[FireMode::Semi],
         magazine: 10,
         zero: 100.0,
@@ -331,7 +332,7 @@ pub const WEAPONS: [WeaponDef; 10] = [
         kind: WeaponKind::Revolver,
         name: "Webley Mk VI",
         caliber: Caliber::Webley,
-        mechanism: mech(BoltType::Closed, 0.32, 1.1, 0.0, 0.45).by_rounds(),
+        mechanism: mech(BoltType::Closed, 0.32, 1.1, 0.0, 0.55).by_rounds().with_sweet_spot(0.2, 0.8),
         modes: &[FireMode::Semi],
         magazine: 6,
         zero: 20.0,
@@ -350,7 +351,7 @@ pub const WEAPONS: [WeaponDef; 10] = [
         kind: WeaponKind::DoubleBarrel,
         name: "Double-barrel",
         caliber: Caliber::Gauge12,
-        mechanism: mech(BoltType::Closed, 0.22, 0.9, 0.0, 0.7).by_rounds(),
+        mechanism: mech(BoltType::Closed, 0.22, 0.9, 0.0, 0.7).by_rounds().with_sweet_spot(0.25, 0.75),
         modes: &[FireMode::Semi],
         magazine: 2,
         zero: 35.0,
@@ -409,6 +410,33 @@ mod tests {
         assert!(rate(WeaponKind::Mag) > rate(WeaponKind::Bren) && rate(WeaponKind::Bren) > rate(WeaponKind::Slr));
         assert!(WEAPONS.iter().filter(|w| w.scope.is_some()).count() == 1 && WeaponKind::L42.def().scope.is_some());
         assert!(WeaponKind::Mag.def().is_automatic() && !WeaponKind::Slr.def().is_automatic());
+    }
+
+    #[test]
+    fn the_reload_game_is_easy_on_a_gun_that_is_easy_to_load_and_hard_on_one_that_is_not() {
+        let seconds = |k: WeaponKind| {
+            let def = k.def();
+            let step = if def.mechanism.style == ReloadStyle::Magazine { def.mechanism.reload_time } else if matches!(def.mechanism.style, ReloadStyle::Clips(_)) { def.mechanism.clip_time } else { def.mechanism.reload_per_round };
+            (def.mechanism.sweet_spot.1 - def.mechanism.sweet_spot.0) * step
+        };
+        // The Webley's is wide enough for a person to hit, as it is a round at a time.
+        assert!(seconds(WeaponKind::Revolver) >= 0.3, "{}", seconds(WeaponKind::Revolver));
+        assert!(seconds(WeaponKind::Revolver) > seconds(WeaponKind::Auto5));
+        // The gun that earns a bonus is harder than the one that does not.
+        assert!(seconds(WeaponKind::LeeEnfield) < seconds(WeaponKind::Slr));
+        for def in &WEAPONS {
+            let (from, to) = def.mechanism.sweet_spot;
+            assert!(0.0 <= from && from < to && to <= 1.0, "{}", def.name);
+        }
+    }
+
+    #[test]
+    fn the_webley_hits_hard_enough_for_how_slowly_it_fires() {
+        let walker = crate::zombie::ZombieKind::Walker.traits().health;
+        let webley = AmmoKind::Webley455.def().damage_at_muzzle();
+        assert!(walker / webley <= 2.0, "two shots put a walker down, not {}", walker / webley);
+        // And it still has less of a rate of fire than the 9mm pistol does.
+        assert!(WeaponKind::Revolver.def().mechanism.cycle_time > WeaponKind::HiPower.def().mechanism.cycle_time);
     }
 
     #[test]

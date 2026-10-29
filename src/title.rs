@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use bevy::app::AppExit;
 use bevy::ecs::schedule::{ScheduleLabel, Schedules};
 use bevy::prelude::*;
-use bevy_egui::{egui, EguiContexts};
+use bevy_egui::{egui, EguiContext, EguiContexts, PrimaryEguiContext};
 
 use crate::map::TerrainMap;
 use crate::net::DEFAULT_PORT;
@@ -358,6 +358,12 @@ fn begin_world(world: &mut World, title: &mut Title) {
     }
     info!("world begun in {:.1} s", started.elapsed().as_secs_f32());
     if let Some(camera) = title.camera.take() {
+        // Egui draws on the first camera there ever was, which was this one: the game's own must have it now.
+        let mut cameras = world.query_filtered::<Entity, (With<Camera>, Without<PrimaryEguiContext>)>();
+        let game_camera = cameras.iter(world).filter(|&e| e != camera).min();
+        if let Some(game_camera) = game_camera {
+            world.entity_mut(game_camera).insert((EguiContext::default(), PrimaryEguiContext));
+        }
         world.despawn(camera);
     }
     if let Some(host) = host {
@@ -382,7 +388,9 @@ const DIM: egui::Color32 = egui::Color32::from_rgb(150, 144, 132);
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(214, 150, 60);
 
 /// Draws the screen the title is on: the title, the multiplayer choices, the recordings, "Connecting" or "Loading".
-pub fn draw_title(mut contexts: EguiContexts, mut title: ResMut<Title>, time: Res<Time>) -> Result {
+pub fn draw_title(mut contexts: EguiContexts, title: Option<ResMut<Title>>, time: Res<Time>) -> Result {
+    // There is no title when the game is started straight into a world.
+    let Some(mut title) = title else { return Ok(()) };
     if title.phase == Phase::Playing {
         return Ok(());
     }
@@ -601,6 +609,24 @@ mod tests {
             }
         }
         panic!("it did not get there: {:?}", app.world().resource::<Title>().phase);
+    }
+
+    #[test]
+    fn egui_is_drawn_on_the_games_camera_once_the_title_camera_is_gone() {
+        let mut app = app();
+        app.add_systems(Startup, |mut commands: Commands| {
+            commands.spawn(Camera3d::default());
+        });
+        app.update();
+        // As bevy_egui does it: the first camera there is.
+        let title_camera = app.world().resource::<Title>().camera.expect("the title has a camera");
+        app.world_mut().entity_mut(title_camera).insert((EguiContext::default(), PrimaryEguiContext));
+        app.world_mut().resource_mut::<Title>().request = Some(Request::Single);
+        run(&mut app, |t| t.phase == Phase::Playing);
+        let mut primary = app.world_mut().query_filtered::<Entity, With<PrimaryEguiContext>>();
+        let found: Vec<Entity> = primary.iter(app.world()).collect();
+        assert_eq!(found.len(), 1, "exactly one camera has the context");
+        assert!(app.world().get::<Camera3d>(found[0]).is_some(), "and it is the game's");
     }
 
     #[test]

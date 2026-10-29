@@ -19,7 +19,7 @@
 //!
 //! Everything here is a pure function of the state, so the rules can be tested without a game.
 
-use crate::reload::{ReloadPlan, Step};
+use crate::reload::{ReloadPlan, Step, SWEET_SPOT};
 
 /// The kind of action.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -63,6 +63,8 @@ pub struct Mechanism {
     pub clip_time: f32,
     /// Whether the shooter works the bolt by hand, with a click, after each shot.
     pub manual_bolt: bool,
+    /// Where in a loading step of a reload the sweet spot of the timing game is, as fractions of the step.
+    pub sweet_spot: (f32, f32),
 }
 
 impl Mechanism {
@@ -77,6 +79,12 @@ impl Mechanism {
         Mechanism { style: ReloadStyle::Clips(clip), clip_time, ..self }
     }
 
+    /// The same mechanism, with the sweet spot of its reload at `from` to `to` of a step: wide for a gun that is easy to
+    /// load, narrow for one that is not.
+    pub const fn with_sweet_spot(self, from: f32, to: f32) -> Mechanism {
+        Mechanism { sweet_spot: (from, to), ..self }
+    }
+
     /// The same mechanism, with a bolt worked by hand after each shot.
     pub const fn with_bolt_worked_by_hand(self) -> Mechanism {
         Mechanism { manual_bolt: true, ..self }
@@ -85,7 +93,7 @@ impl Mechanism {
 
 /// The Sterling: open bolt, about 500 rounds a minute. Changing a magazine takes two seconds with
 /// the bolt back, and another 0.7 s to haul the bolt back on the cocking handle if it's forward.
-pub const STERLING: Mechanism = Mechanism { bolt_type: BoltType::Open, cycle_time: 0.12, reload_time: 2.0, charge_time: 0.7, reload_per_round: 0.0, style: ReloadStyle::Magazine, clip_time: 0.0, manual_bolt: false };
+pub const STERLING: Mechanism = Mechanism { bolt_type: BoltType::Open, cycle_time: 0.12, reload_time: 2.0, charge_time: 0.7, reload_per_round: 0.0, style: ReloadStyle::Magazine, clip_time: 0.0, manual_bolt: false, sweet_spot: SWEET_SPOT };
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum State {
@@ -184,7 +192,7 @@ impl Mechanism {
             }
         };
         plan.swaps_load = swaps_load;
-        Some(plan)
+        Some(plan.with_sweet_spot(self.sweet_spot))
     }
 
     /// A reload is abandoned (the player broke into a sprint): the magazine is as it was, and the gun

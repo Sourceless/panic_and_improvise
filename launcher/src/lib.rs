@@ -290,13 +290,41 @@ pub fn install(install: &Install, release: &Release, progress: &mut dyn FnMut(u6
     Ok(())
 }
 
+/// Removes `dir` and all that is in it, if it is there. A release built by Nix is packed with its folders
+/// read-only, and nothing can be taken out of a folder like that until it is made writable.
 fn remove_dir(dir: &Path) -> Result<()> {
     match fs::remove_dir_all(dir) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+            make_writable(dir);
+            match fs::remove_dir_all(dir) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e.into()),
+                _ => Ok(()),
+            }
+        }
         Err(e) => Err(e.into()),
     }
 }
+
+/// Lets the owner write in `dir` and in every folder under it.
+#[cfg(unix)]
+fn make_writable(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = fs::symlink_metadata(dir) else { return };
+    if !meta.is_dir() {
+        return;
+    }
+    let _ = fs::set_permissions(dir, fs::Permissions::from_mode(meta.permissions().mode() | 0o700));
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            make_writable(&entry.path());
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn make_writable(_: &Path) {}
 
 /// Looks up the newest release and installs it unless it is the one installed already.
 pub fn update(installation: &Install, api: &str, repository: &str, progress: &mut dyn FnMut(u64, u64)) -> Result<Outcome> {
@@ -571,6 +599,22 @@ mod tests {
         let to = scratch.0.join("out");
         let _ = extract(Kind::TarGz, &file, &to);
         assert!(!scratch.0.join("escaped.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_game_packed_with_read_only_folders_can_still_be_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = Scratch::new("read-only");
+        let old = scratch.0.join("game.old");
+        let inside = old.join("assets").join("sounds");
+        fs::create_dir_all(&inside).unwrap();
+        fs::write(inside.join("a.wav"), "x").unwrap();
+        for dir in [&inside, &old.join("assets"), &old] {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        remove_dir(&old).unwrap();
+        assert!(!old.exists());
     }
 
     #[test]

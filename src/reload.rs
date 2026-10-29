@@ -11,7 +11,7 @@
 
 /// How much faster a step goes by after a perfect press.
 pub const PERFECT_SPEED: f32 = 4.0;
-/// Where in a step, as fractions of its time, the sweet spot is.
+/// Where in a step, as fractions of its time, the sweet spot is, unless a gun has its own.
 pub const SWEET_SPOT: (f32, f32) = (0.3, 0.7);
 
 /// One part of a reload.
@@ -58,11 +58,19 @@ pub struct ReloadPlan {
     results: Vec<bool>,
     /// Whether the load that will go in is a different one: the magazine's old rounds come out.
     pub swaps_load: bool,
+    /// Where in a timed step the sweet spot is, as fractions of it: a gun that is fiddly to load has a narrow one.
+    spot: (f32, f32),
 }
 
 impl ReloadPlan {
     pub fn new(steps: Vec<Step>) -> ReloadPlan {
-        ReloadPlan { steps, index: 0, in_step: 0.0, done_time: 0.0, hurried: false, results: Vec::new(), swaps_load: false }
+        ReloadPlan { steps, index: 0, in_step: 0.0, done_time: 0.0, hurried: false, results: Vec::new(), swaps_load: false, spot: SWEET_SPOT }
+    }
+
+    /// The same plan, with the sweet spot of each timed step at `spot`.
+    pub fn with_sweet_spot(mut self, spot: (f32, f32)) -> ReloadPlan {
+        self.spot = spot;
+        self
     }
 
     /// Seconds the whole reload takes, as it now stands.
@@ -92,7 +100,7 @@ impl ReloadPlan {
     /// The sweet spot of the step in progress, as fractions of it, if there is one to be hit (it has one, and
     /// has not been hurried already).
     pub fn sweet_spot(&self) -> Option<(f32, f32)> {
-        self.current().filter(|s| s.timed && !self.hurried).map(|_| SWEET_SPOT)
+        self.current().filter(|s| s.timed && !self.hurried).map(|_| self.spot)
     }
 
     pub fn in_sweet_spot(&self) -> bool {

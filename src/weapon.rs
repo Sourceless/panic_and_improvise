@@ -1926,7 +1926,7 @@ mod tests {
         let mut gun = Gun::new(WeaponKind::Revolver);
         gun.equip(WeaponKind::Revolver, AmmoKind::Webley455, 2);
         press_reload(&mut gun, &inv);
-        assert!((gun.reload_seconds() - (1.1 + 4.0 * 0.45)).abs() < 1e-3, "four missing");
+        assert!((gun.reload_seconds() - (1.1 + 4.0 * 0.55)).abs() < 1e-3, "four missing");
         pass(&mut gun, &mut inv, 10.0);
         assert_eq!((gun.ammo, inv.rounds(AmmoKind::Webley455)), (6, 20));
     }
