@@ -606,6 +606,20 @@ fn reaches_up_to(below_eye: f32, scale: f32, perched: bool) -> bool {
     (STRIKE_BELOW_EYE.0..=most + scale - 1.0).contains(&below_eye)
 }
 
+/// How high up a walker's arm is when it strikes, as a fraction of its size.
+const ARM_HEIGHT: f32 = 1.1;
+
+/// Whether nothing solid is between the arm of a zombie with its feet at `feet`, `scale` times a walker's size, and
+/// `target`: a blow does not go through a wall (a bullet does not, either, though a gap in it, a doorway or a
+/// broken pane, lets it by). Someone perched on a hedge is hit from below, so what the hedge is made of is no bar.
+fn blow_is_clear(colliders: &Colliders, feet: Vec3, scale: f32, target: &Target) -> bool {
+    if target.perched {
+        return true;
+    }
+    let height = feet.y + ARM_HEIGHT * scale;
+    colliders.segment_hit(Vec3::new(feet.x, height, feet.z), Vec3::new(target.feet.x, height, target.feet.z)).is_none()
+}
+
 /// How much nearer than another a target has to be for a zombie to give up the one it is after for it.
 const STICKINESS: f32 = 0.75;
 
@@ -677,7 +691,7 @@ pub(crate) fn move_zombies(
         let velocity = velocity(&mut zombie, at, goal, aim, dt, || dice.unit());
         // Close enough, and not far above or below them, it hits them.
         let below_eye = target.eye.y - feet.y;
-        let within_reach = zombie.following && at.distance(goal) <= STRIKE_REACH * t.girth.max(1.0) && reaches_up_to(below_eye, t.scale, target.perched);
+        let within_reach = zombie.following && at.distance(goal) <= STRIKE_REACH * t.girth.max(1.0) && reaches_up_to(below_eye, t.scale, target.perched) && blow_is_clear(&colliders, feet, t.scale, &target);
         if strikes(&mut zombie, within_reach, dt) {
             if target.who == THE_PLAYER {
                 health.hurt(t.strike_damage);
@@ -1105,6 +1119,22 @@ mod tests {
         app.update();
         let taken = before - app.world().resource::<PlayerHealth>().current;
         assert!(taken >= Brute.traits().strike_damage, "{taken}");
+    }
+
+    #[test]
+    fn a_zombie_does_not_hit_the_player_through_a_wall() {
+        let mut app = App::new();
+        app.init_resource::<Time>().init_resource::<ZombieDice>().init_resource::<PlayerHealth>().insert_resource(TerrainMap::flat(0.0)).init_resource::<Colliders>().add_systems(Update, move_zombies);
+        let camera = FpsCamera { yaw: 0.0, pitch: 0.0, velocity: Vec2::ZERO, air_height: 0.0, vertical_speed: 0.0, stance: crate::player::Stance::Stand, eye_height: 1.8, jump_spent_standing: false, floor: 0.0, mantle: None, mantles: 0, sprint_suppressed: false, sliding: false, view_feet: 0.0, lean: 0.0, lean_offset: Vec2::ZERO };
+        app.world_mut().spawn((camera, GlobalTransform::from(Transform::from_xyz(0.0, 1.8, 0.0))));
+        // A wall of a tall building, a hand's breadth thick, between the two of them.
+        app.world_mut().resource_mut::<Colliders>().add(crate::collision::Solid::wall(Vec2::new(-4.0, 0.7), Vec2::new(4.0, 0.7), 0.1, 3.0, 3.0));
+        let mut behind = Zombie::new(Walker, 0.0);
+        behind.following = true;
+        behind.strike_in = 0.0;
+        app.world_mut().spawn((behind, Transform::from_xyz(0.0, 0.0, 1.2)));
+        app.update();
+        assert_eq!(app.world().resource::<PlayerHealth>().current, crate::health::MAX_HEALTH, "the wall is in the way");
     }
 
     /// A zombie 12 m from the player with a wall between, a doorway in it: how near it got, whether it came by the

@@ -67,6 +67,7 @@ pub fn surface_under(p: Vec2, feet: f32, map: &TerrainMap, zones: Option<&ZoneMa
         Some(RoadKind::Major | RoadKind::Lane) => return Surface::Tarmac,
         Some(RoadKind::Minor) => return Surface::Gravel,
         Some(RoadKind::Path) => return Surface::Dirt,
+        Some(RoadKind::Pavement | RoadKind::Walkway) => return Surface::Stone,
         None => {}
     }
     let Some(zones) = zones else { return Surface::Grass };

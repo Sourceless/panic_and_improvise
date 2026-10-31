@@ -5,6 +5,7 @@ use std::collections::BinaryHeap;
 use bevy::prelude::*;
 
 use crate::params::GenParams;
+use crate::sketch::Sketch;
 
 pub const MAP_SIZE: f32 = 5000.0;
 pub const HALF_SIZE: f32 = MAP_SIZE / 2.0;
@@ -16,6 +17,11 @@ pub const CELLS: usize = (MAP_SIZE / CELL) as usize;
 const VERTS: usize = CELLS + 1;
 const COUNT: usize = VERTS * VERTS;
 
+/// How much of the whole job of making a world, as a share of the loading bar, the map is. The rest is what is
+/// planned on it.
+pub const MAP_JOB: f32 = 0.45;
+/// How many times the erosion says how far it has got (and shows the land).
+const ERODE_REPORTS: u32 = 12;
 const RIVER_MIN_SPAN: f32 = 3500.0;
 const NONE: u32 = u32::MAX;
 const RIVER_ELEVATION_SCALE: f32 = 12.0;
@@ -72,7 +78,14 @@ pub struct TerrainMap {
 
 impl TerrainMap {
     pub fn generate(seed: u64, params: &GenParams) -> Self {
+        Self::generate_sketched(seed, params, &Sketch::default())
+    }
+
+    /// The same map, drawing itself on `sketch` as it is made, and saying what it is doing and how far along the whole
+    /// job of making a world it has got (the map is the first part, up to `MAP_JOB`).
+    pub fn generate_sketched(seed: u64, params: &GenParams, sketch: &Sketch) -> Self {
         let mut rng = Rng(seed);
+        sketch.say("Raising the hills", 0.0);
 
         let mut base: Vec<f32> = (0..COUNT)
             .map(|idx| {
@@ -81,15 +94,24 @@ impl TerrainMap {
                 coastal_height(base_height(p, seed, params), p, seed, params)
             })
             .collect();
+        sketch.land(&base, VERTS);
+        sketch.say("Finding the river's way to the sea", MAP_JOB * 0.02);
         let path = river_path(&base, seed, params, &mut Rng(seed ^ 0x51DE_0001));
         carve_valley(&mut base, &path);
+        sketch.land(&base, VERTS);
+        sketch.say("Rain wears the valleys down", MAP_JOB * 0.04);
         for h in &mut base {
             *h /= EROSION_HEIGHT_UNIT;
         }
-        erode(&mut base, params.erosion_droplets, &mut Rng(seed ^ 0xE20D_E000));
+        // The land is shown as it wears.
+        erode(&mut base, params.erosion_droplets, &mut Rng(seed ^ 0xE20D_E000), &mut |done, heights| {
+            sketch.land(heights, VERTS);
+            sketch.progress(MAP_JOB * (0.04 + 0.8 * done));
+        });
         for h in &mut base {
             *h *= EROSION_HEIGHT_UNIT;
         }
+        sketch.say("Letting the water find its level", MAP_JOB * 0.85);
 
         let mut is_river = vec![false; COUNT];
         let mut level: Vec<f32> = base.iter().map(|h| h - WATER_SURFACE_BELOW_FILL).collect();
@@ -140,8 +162,13 @@ impl TerrainMap {
             pois: Vec::new(),
             roads: std::sync::OnceLock::new(),
         };
+        sketch.map(&map);
+        sketch.say("Choosing where people settled", MAP_JOB * 0.9);
         map.pois = place_pois(&mut rng, &map);
+        sketch.settlements(&map);
+        sketch.say("Levelling ground for the villages", MAP_JOB * 0.95);
         map.flatten_settlements();
+        sketch.map(&map);
         map
     }
 
@@ -465,9 +492,12 @@ const EROSION_HEIGHT_UNIT: f32 = 50.0;
 // Particle-based hydraulic erosion (after Lague, and Mei et al. 2007): water droplets roll
 // downhill, carry sediment up to a capacity set by speed and slope, erode when under
 // capacity and deposit when over it.
-fn erode(heights: &mut [f32], droplets: u32, rng: &mut Rng) {
+fn erode(heights: &mut [f32], droplets: u32, rng: &mut Rng, report: &mut dyn FnMut(f32, &[f32])) {
     let max = (VERTS - 1) as f32;
-    for _ in 0..droplets {
+    for n in 0..droplets {
+        if n % (droplets / ERODE_REPORTS).max(1) == 0 {
+            report(n as f32 / droplets as f32, heights);
+        }
         let mut pos = Vec2::new(rng.range(0.0, max), rng.range(0.0, max));
         let mut dir = Vec2::ZERO;
         let mut speed = 1.0_f32;

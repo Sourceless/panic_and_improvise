@@ -115,6 +115,31 @@ pub fn planned(b: &Building, site: &Site, rng: &mut Rng) -> (Vec<plan::Layout>, 
     }
 }
 
+/// Where the front doors of a building are on the ground (a terrace has one for each house): the middle of each
+/// door, on the outside of the wall. `jitter` is what the settlement adds to the building's position to start its
+/// random numbers, as when it is built, so that these are the doors that are built.
+pub fn front_doors(b: &Building, jitter: Vec2) -> Vec<Vec2> {
+    if matches!(b.kind, BuildingKind::Silo | BuildingKind::Mill | BuildingKind::PetrolStation) {
+        return Vec::new();
+    }
+    let mut rng = Rng::from_position(b.centre + jitter);
+    let style = style_for(b, &mut rng);
+    let volumes = kinds::volumes(b, style, &mut rng);
+    let Some(layout) = volumes.first().map(|v| &v.layout) else { return Vec::new() };
+    let Some(storey) = layout.storeys.first() else { return Vec::new() };
+    // In the building's own frame its front faces -Z.
+    let turn = Quat::from_rotation_y(b.yaw);
+    storey
+        .doors_outside
+        .iter()
+        .filter(|d| d.side == plan::Side::Front)
+        .map(|door| {
+            let local = turn * Vec3::new(door.along, 0.0, layout.inside.z0 - layout.style.wall_thickness * 0.5);
+            b.centre + Vec2::new(local.x, local.z)
+        })
+        .collect()
+}
+
 /// A building with a plan and a pitched roof.
 fn gabled(b: &Building, site: &Site, rng: &mut Rng) -> (Vec<plan::Layout>, Model) {
     let style = style_for(b, rng);

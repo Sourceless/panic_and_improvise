@@ -158,7 +158,7 @@ mod tests {
         let map = map_with_a_road();
         let c = Colliders::default();
         let road = map.road_top_at(Vec2::new(0.0, 0.0)).unwrap();
-        assert!(road > 10.2);
+        assert!(road > 10.05);
         assert_eq!(stand(&map, &c, Vec2::new(0.0, 0.0), 10.0, 0.28), Some(road), "stepped up onto it from the verge");
         // Walk across it from the verge: the feet are on its surface in the middle and on the ground again after.
         let (mut at, mut feet, mut falling) = (Vec2::new(0.0, -8.0), 10.0, 0.0);

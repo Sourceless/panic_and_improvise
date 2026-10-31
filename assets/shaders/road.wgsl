@@ -15,6 +15,8 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var surface_tex: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var surface_sampler: sampler;
 
+// Paving slabs: how long each is along a pavement, metres.
+const SLAB_LENGTH: f32 = 0.9;
 const MARK_LENGTH: f32 = 3.0;
 const MARK_PERIOD: f32 = 9.0;
 const LINE_HALF_WIDTH: f32 = 0.05;
@@ -86,9 +88,22 @@ fn fragment(
     // 0 well inside the road, 1 at its very edge.
     let edge = smoothstep(hw - 0.6, hw, lane);
 
+    // Slabs: joints down the middle and across every `SLAB_LENGTH`, and each slab a little different.
+    let joints = cover(across, 0.012);
+    let slab = vec2<f32>(floor(across / max(hw, 0.3) + 1.0), floor(along / SLAB_LENGTH));
+    let slab_tone = hash21(slab + vec2<f32>(7.0, 3.0));
+    let cross_joint = cover(abs(fract(along / SLAB_LENGTH + 0.5) - 0.5) * SLAB_LENGTH, 0.012);
+
     var col: vec3<f32>;
     var roughness = 0.92;
-    if track > 0.25 && track < 0.75 {
+    if track > 0.05 && track < 0.2 {
+        // Pavement: pale concrete flags with dark joints, each slab its own tone, worn at the kerb side and stained.
+        col = surface * vec3<f32>(0.62, 0.61, 0.58) * (0.86 + 0.28 * slab_tone) * (0.88 + 0.24 * patches);
+        col *= 1.0 - 0.45 * max(joints, cross_joint);
+        let moss = smoothstep(0.6, 0.85, fbm2(wp / 2.2)) * 0.5;
+        col = mix(col, vec3<f32>(0.28, 0.34, 0.2) * (0.7 + 0.6 * grain), moss * edge);
+        roughness = 0.95;
+    } else if track > 0.25 && track < 0.75 {
         // A footpath: packed earth worn bare down the middle, with grass and weeds creeping in from
         // both sides.
         col = surface * vec3<f32>(0.78, 0.68, 0.52) * 0.85 * (0.85 + 0.3 * patches);

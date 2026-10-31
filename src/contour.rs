@@ -36,6 +36,7 @@ impl Smoothing {
     pub const WATER: Smoothing = Smoothing { iterations: 24, max_displacement: CELL * 0.6, wobble: CELL * 0.1 };
 }
 
+#[derive(Clone, Copy, Debug)]
 pub struct Seg {
     pub a: Vec2,
     pub b: Vec2,

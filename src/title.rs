@@ -32,6 +32,9 @@ use bevy::prelude::*;
 use bevy_egui::{egui, EguiContext, EguiContexts, PrimaryEguiContext};
 
 use crate::map::TerrainMap;
+use crate::roads::RoadKind;
+use crate::sketch::{self, Drawing, Sketch};
+use crate::world::{plan_world, Plans, PlansMade};
 use crate::net::DEFAULT_PORT;
 use crate::net_client::{Connection, KeepAlive, NetClient};
 use crate::net_host::{with_port, Host};
@@ -43,12 +46,8 @@ const PATIENCE: Duration = Duration::from_secs(8);
 /// How many frames the loading screen is drawn, saying what comes next, before the world is begun.
 const FRAMES_TO_SETTLE: u32 = 4;
 
-/// How long, seconds, making the map is expected to take; the bar creeps toward its share of the way over about
-/// this long, and never reaches it before the map is made.
-const MAP_SECONDS: f32 = 6.0;
-
-/// How much of the bar the map is, and what is left for the building of the world.
-const MAP_SHARE: f32 = 0.45;
+/// How much of the bar is full when the map and the plans are made, and what is left for the building of the world.
+const MADE_SHARE: f32 = 0.85;
 
 /// Where in the title, or past it, the program is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +83,20 @@ pub enum Request {
     Quit,
 }
 
+/// What the thread that makes the world comes back with: the map, and what is planned on it (if anything is).
+pub struct Made {
+    pub map: TerrainMap,
+    pub plans: Option<Plans>,
+}
+
+/// Makes the map for `seed` and plans the world on it, drawing on the sketch as it goes.
+fn make_world(seed: u64, sketch: &Sketch) -> Made {
+    let params = GenParams::default();
+    let map = TerrainMap::generate_sketched(seed, &params, sketch);
+    let plans = Some(plan_world(&map, &params, sketch));
+    Made { map, plans }
+}
+
 /// What kind of game is being made ready.
 enum Plan {
     Single,
@@ -116,10 +129,14 @@ pub struct Title {
     /// Recordings, newest first, for the replays screen.
     pub recordings: Vec<PathBuf>,
     /// How the map is made: the real thing, unless a test says otherwise.
-    pub generate: fn(u64) -> TerrainMap,
+    pub generate: fn(u64, &Sketch) -> Made,
+    /// What the thread making the world has drawn so far, and the last of it the screen has seen.
+    sketch: Sketch,
+    seen: Option<Drawing>,
+    picture: Option<(u32, egui::TextureHandle)>,
     plan: Option<Plan>,
     seed: u64,
-    making: Option<JoinHandle<TerrainMap>>,
+    making: Option<JoinHandle<Made>>,
     asking: Option<(Mutex<Receiver<Result<Connection, String>>>, Arc<AtomicBool>)>,
     alive: Option<KeepAlive>,
     stage: Stage,
@@ -142,7 +159,10 @@ impl Default for Title {
             progress: 0.0,
             request: None,
             recordings: Vec::new(),
-            generate: |seed| TerrainMap::generate(seed, &GenParams::default()),
+            generate: make_world,
+            sketch: Sketch::default(),
+            seen: None,
+            picture: None,
             plan: None,
             seed: 0,
             making: None,
@@ -190,21 +210,33 @@ impl Title {
         self.alive = None;
     }
 
+    /// Takes what the thread making the world has drawn since last looked, and what it says it is doing.
+    fn refresh_sketch(&mut self) {
+        if let Some(drawing) = self.sketch.since(self.seen.as_ref().map_or(u32::MAX, |d| d.version)) {
+            self.progress = drawing.share.min(MADE_SHARE - 0.01);
+            self.detail = drawing.line.clone();
+            self.seen = Some(drawing);
+        }
+    }
+
     fn begin_loading(&mut self, plan: Plan, seed: u64) {
         self.seed = seed;
         self.phase = Phase::Loading;
         self.stage = Stage::Map;
         self.since = Instant::now();
         self.progress = 0.0;
-        self.detail = "Shaping the land".to_string();
+        self.detail = "Raising the hills".to_string();
         self.message.clear();
+        self.sketch = Sketch::default();
+        self.seen = None;
+        self.picture = None;
         // A joined game is kept alive while the world is made: the host would not wait.
         if let Plan::Join(connection) = &plan {
             self.alive = Some(connection.keep_alive());
         }
         self.plan = Some(plan);
-        let make = self.generate;
-        self.making = Some(std::thread::spawn(move || make(seed)));
+        let (make, sketch) = (self.generate, self.sketch.clone());
+        self.making = Some(std::thread::spawn(move || make(seed, &sketch)));
     }
 }
 
@@ -263,16 +295,20 @@ fn drive(world: &mut World) {
                 let elapsed = title.since.elapsed().as_secs_f32();
                 match title.stage {
                     Stage::Map => {
-                        // It creeps toward its share, slower as it goes, and is there when the map is.
-                        title.progress = MAP_SHARE * (1.0 - (-elapsed / MAP_SECONDS).exp()) * 0.95;
+                        // As far as the thread says it has got, and what it is doing.
+                        title.refresh_sketch();
                         if title.making.as_ref().is_some_and(|m| m.is_finished()) {
                             let made = title.making.take().map(|m| m.join());
                             match made {
-                                Some(Ok(map)) => {
+                                Some(Ok(Made { map, plans })) => {
+                                    title.refresh_sketch();
                                     info!("map seed {} made in {:.1} s", map.seed, elapsed);
                                     world.insert_resource(map);
+                                    if let Some(plans) = plans {
+                                        world.insert_resource(PlansMade(Some(plans)));
+                                    }
                                     title.stage = Stage::Building(0);
-                                    title.progress = MAP_SHARE;
+                                    title.progress = MADE_SHARE;
                                     title.detail = "Building the world".to_string();
                                     title.since = Instant::now();
                                 }
@@ -282,7 +318,7 @@ fn drive(world: &mut World) {
                     }
                     Stage::Building(frames) => {
                         title.stage = Stage::Building(frames + 1);
-                        title.progress = MAP_SHARE + 0.4 * (frames as f32 / FRAMES_TO_SETTLE as f32);
+                        title.progress = MADE_SHARE + 0.1 * (frames as f32 / FRAMES_TO_SETTLE as f32);
                         if frames >= FRAMES_TO_SETTLE {
                             begin_world(world, &mut title);
                         }
@@ -409,6 +445,11 @@ pub fn show_title(ctx: &egui::Context, title: &mut Title, t: f32) -> Option<Requ
     egui::Area::new(egui::Id::new("title")).order(egui::Order::Background).fixed_pos(rect.min).constrain(false).show(ctx, |ui| {
         ui.set_clip_rect(rect);
         paint_backdrop(ui.painter(), rect, t);
+        if title.phase == Phase::Loading {
+            loading_screen(ui, rect, title, t);
+            ui.painter().text(egui::pos2(rect.left() + 16.0, rect.bottom() - 14.0), egui::Align2::LEFT_BOTTOM, crate::version_label(), egui::FontId::proportional(14.0), DIM);
+            return;
+        }
         // The column of what is chosen, a little above the middle.
         let width = 360.0_f32.min(rect.width() - 32.0);
         let column = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + rect.height() * 0.5), egui::vec2(width, rect.height() * 0.8));
@@ -433,8 +474,7 @@ pub fn show_title(ctx: &egui::Context, title: &mut Title, t: f32) -> Option<Requ
                             request = Some(Request::Cancel);
                         }
                     }
-                    Phase::Loading => loading_screen(ui, title, t),
-                    Phase::Playing => {}
+                    Phase::Loading | Phase::Playing => {}
                 }
                 if !title.message.is_empty() && title.phase == Phase::Title {
                     ui.add_space(14.0);
@@ -527,17 +567,86 @@ fn replays_screen(ui: &mut egui::Ui, title: &mut Title, request: &mut Option<Req
     }
 }
 
-fn loading_screen(ui: &mut egui::Ui, title: &Title, t: f32) {
-    ui.label(egui::RichText::new("Loading").size(20.0).color(TEXT));
-    ui.add_space(14.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 14.0), egui::Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, 7.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 170));
-    let filled = egui::Rect::from_min_max(rect.min, egui::pos2(rect.left() + rect.width() * title.fraction(), rect.bottom()));
-    painter.rect_filled(filled.shrink(2.0), 5.0, ACCENT);
-    ui.add_space(14.0);
-    let dots = ".".repeat(1 + (t * 2.0) as usize % 3);
-    ui.label(egui::RichText::new(format!("{}{dots}", title.detail)).size(16.0).color(DIM));
+/// The loading screen: the world being drawn as it is made, from above, with what is being done and how far it has got.
+fn loading_screen(ui: &mut egui::Ui, rect: egui::Rect, title: &mut Title, t: f32) {
+    let side = (rect.height() * 0.6).min(rect.width() - 48.0).max(120.0);
+    let height = 56.0 + 14.0 + side + 16.0 + 14.0 + 14.0 + 22.0;
+    let column = egui::Rect::from_center_size(rect.center(), egui::vec2(side, height));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(column), |ui| {
+        ui.vertical_centered(|ui| {
+            ui.label(egui::RichText::new("PANIC AND IMPROVISE").size(36.0).strong().color(TEXT));
+            ui.add_space(14.0);
+            let (frame, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+            paint_sketch(ui, frame, title);
+            ui.add_space(16.0);
+            let (bar, _) = ui.allocate_exact_size(egui::vec2(side, 14.0), egui::Sense::hover());
+            let painter = ui.painter();
+            painter.rect_filled(bar, 7.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 170));
+            let filled = egui::Rect::from_min_max(bar.min, egui::pos2(bar.left() + bar.width() * title.fraction(), bar.bottom()));
+            painter.rect_filled(filled.shrink(2.0), 5.0, ACCENT);
+            ui.add_space(14.0);
+            let dots = ".".repeat(1 + (t * 2.0) as usize % 3);
+            ui.label(egui::RichText::new(format!("{}{dots}", title.detail)).size(17.0).color(DIM));
+        });
+    });
+}
+
+/// The map as far as it has been drawn, in `frame`: the land, then what is put on it.
+fn paint_sketch(ui: &egui::Ui, frame: egui::Rect, title: &mut Title) {
+    let painter = ui.painter_at(frame);
+    painter.rect_filled(frame, 4.0, egui::Color32::from_rgb(12, 14, 17));
+    if let Some(drawing) = &title.seen {
+        if drawing.has_land() {
+            // The land is made into a picture when it changes, not each frame.
+            if title.picture.as_ref().is_none_or(|(version, _)| *version != drawing.version) {
+                let pixels = drawing.picture().into_iter().map(|[r, g, b]| egui::Color32::from_rgb(r, g, b)).collect();
+                let image = egui::ColorImage::new([sketch::SIDE, sketch::SIDE], pixels);
+                match &mut title.picture {
+                    Some((version, texture)) => {
+                        texture.set(image, egui::TextureOptions::LINEAR);
+                        *version = drawing.version;
+                    }
+                    None => title.picture = Some((drawing.version, ui.ctx().load_texture("sketch", image, egui::TextureOptions::LINEAR))),
+                }
+            }
+            if let Some((_, texture)) = &title.picture {
+                painter.image(texture.id(), frame, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+            }
+        }
+        let at = |p: Vec2| {
+            let q = sketch::to_picture(p, frame.width());
+            egui::pos2(frame.left() + q.x, frame.top() + q.y)
+        };
+        // Where people settled, until there are buildings to show it.
+        if drawing.buildings.is_empty() {
+            let scale = frame.width() / crate::map::MAP_SIZE;
+            for &(position, radius) in &drawing.settlements {
+                painter.circle_stroke(at(position), (radius * scale).max(3.0), egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(214, 150, 60, 220)));
+            }
+        }
+        for (kind, points) in &drawing.roads {
+            let (width, colour) = match kind {
+                RoadKind::Major => (2.0, egui::Color32::from_rgb(246, 238, 214)),
+                RoadKind::Minor => (1.3, egui::Color32::from_rgb(222, 200, 150)),
+                RoadKind::Lane => (1.0, egui::Color32::from_rgb(232, 218, 180)),
+                RoadKind::Path => (0.7, egui::Color32::from_rgba_unmultiplied(196, 170, 120, 170)),
+                RoadKind::Pavement | RoadKind::Walkway => (0.5, egui::Color32::from_rgba_unmultiplied(200, 200, 196, 140)),
+            };
+            painter.add(egui::Shape::line(points.iter().map(|&p| at(p)).collect(), egui::Stroke::new(width, colour)));
+        }
+        let house = egui::Color32::from_rgb(232, 120, 78);
+        for &(centre, half, yaw, round) in &drawing.buildings {
+            let size = half * 2.0 * frame.width() / crate::map::MAP_SIZE;
+            if size.x.max(size.y) < 2.5 {
+                painter.rect_filled(egui::Rect::from_center_size(at(centre), egui::vec2(2.4, 2.4)), 0.0, house);
+            } else if round {
+                painter.circle_filled(at(centre), size.x * 0.5, house);
+            } else {
+                painter.add(egui::Shape::convex_polygon(sketch::corners(centre, half, yaw).iter().map(|&p| at(p)).collect(), house, egui::Stroke::NONE));
+            }
+        }
+    }
+    painter.rect_stroke(frame, 4.0, egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(232, 226, 214, 70)), egui::StrokeKind::Inside);
 }
 
 /// The backdrop: a dusk sky going from cold to warm over a row of terraced roofs, and a few stars of embers.
@@ -591,7 +700,7 @@ mod tests {
     fn app() -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
-            .insert_resource(Title { generate: |_| TerrainMap::flat(0.0), ..default() })
+            .insert_resource(Title { generate: |_, _| Made { map: TerrainMap::flat(0.0), plans: None }, ..default() })
             .init_resource::<Begun>()
             .init_resource::<Frames>()
             .add_systems(Startup, |mut begun: ResMut<Begun>| begun.0 += 1)
@@ -627,6 +736,60 @@ mod tests {
         let found: Vec<Entity> = primary.iter(app.world()).collect();
         assert_eq!(found.len(), 1, "exactly one camera has the context");
         assert!(app.world().get::<Camera3d>(found[0]).is_some(), "and it is the game's");
+    }
+
+    /// Prints when each step of making the world is announced: `cargo test --lib how_long_each_step -- --ignored --nocapture`
+    #[test]
+    #[ignore = "prints timings"]
+    fn how_long_each_step_of_making_the_world_takes() {
+        let sketch = Sketch::default();
+        let started = Instant::now();
+        let handle = { let sketch = sketch.clone(); std::thread::spawn(move || make_world(crate::MAP_SEED, &sketch)) };
+        let mut last = String::new();
+        let mut seen = u32::MAX;
+        while !handle.is_finished() {
+            if let Some(d) = sketch.since(seen) {
+                seen = d.version;
+                if d.line != last {
+                    eprintln!("{:6.2} s  share {:.2}  {}", started.elapsed().as_secs_f32(), d.share, d.line);
+                    last = d.line;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        eprintln!("{:6.2} s  done", started.elapsed().as_secs_f32());
+    }
+
+    /// Writes what the loading screen would show, once the world is made, as a PPM image to `SKETCH_OUT`:
+    /// `SKETCH_OUT=/tmp/sketch.ppm cargo test --lib what_the_loading_screen_shows -- --ignored`
+    #[test]
+    #[ignore = "writes an image"]
+    fn what_the_loading_screen_shows_once_the_world_is_made() {
+        let Ok(out) = std::env::var("SKETCH_OUT") else { return };
+        let sketch = Sketch::default();
+        make_world(crate::MAP_SEED, &sketch);
+        let drawing = sketch.since(u32::MAX).unwrap();
+        let scale = 5;
+        let side = sketch::SIDE * scale;
+        let small = drawing.picture();
+        let mut pixels: Vec<[u8; 3]> = (0..side * side).map(|i| small[(i / side / scale) * sketch::SIDE + (i % side / scale)]).collect();
+        let to = |p: Vec2| { let q = sketch::to_picture(p, side as f32); (q.x as i32, q.y as i32) };
+        let mut dot = |(x, z): (i32, i32), colour: [u8; 3]| if x >= 0 && z >= 0 && (x as usize) < side && (z as usize) < side { pixels[z as usize * side + x as usize] = colour };
+        for (kind, points) in &drawing.roads {
+            let colour = if *kind == RoadKind::Major { [246, 238, 214] } else { [222, 200, 150] };
+            for w in points.windows(2) {
+                let (a, b) = (to(w[0]), to(w[1]));
+                let n = (a.0 - b.0).abs().max((a.1 - b.1).abs()).max(1);
+                for k in 0..=n { dot((a.0 + (b.0 - a.0) * k / n, a.1 + (b.1 - a.1) * k / n), colour); }
+            }
+        }
+        for &(centre, half, yaw, _) in &drawing.buildings {
+            for c in sketch::corners(centre, half, yaw) { dot(to(c), [232, 120, 78]); }
+        }
+        let mut data = format!("P6 {side} {side} 255\n").into_bytes();
+        data.extend(pixels.iter().flatten());
+        std::fs::write(out, data).unwrap();
+        eprintln!("{} roads, {} buildings, {} settlements", drawing.roads.len(), drawing.buildings.len(), drawing.settlements.len());
     }
 
     #[test]

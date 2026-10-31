@@ -121,8 +121,11 @@ fn spawn_world(
     mut road_materials: ResMut<Assets<crate::road_material::RoadMaterial>>,
     mut waters: ResMut<Assets<crate::water_material::WaterMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    mut plans: Option<ResMut<crate::world::PlansMade>>,
 ) {
-    crate::world::build_world(
+    // The title planned it on another thread, if there was a title.
+    let plans = plans.as_mut().and_then(|p| p.0.take()).unwrap_or_else(|| crate::world::plan_world(&map, &params, &crate::sketch::Sketch::default()));
+    crate::world::build_world_from(
         &mut commands,
         &mut meshes,
         &mut standard,
@@ -134,6 +137,7 @@ fn spawn_world(
         &textures,
         &map,
         &params,
+        plans,
     );
 }
 

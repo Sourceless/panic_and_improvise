@@ -10,7 +10,31 @@ use crate::params::GenParams;
 use crate::road_material::{RoadExtension, RoadMaterial};
 use crate::terrain::TerrainTextures;
 
-const ROAD_LIFT: f32 = 0.25;
+const ROAD_LIFT: f32 = 0.1;
+/// No two points of a road are further apart than this, so that the road follows the ground closely and does not
+/// have to stand clear of it by much to keep it from coming up through.
+const MAX_POINT_GAP: f32 = 1.0;
+/// How many rings a junction's patch is made of, from its middle out, and the most metres between points round its edge.
+const PATCH_RINGS: u32 = 3;
+const PATCH_STEP: f32 = 2.5;
+/// A junction's patch lies this much above the roads that meet there, so that it is what is seen where they overlap.
+const PATCH_RAISE: f32 = 0.012;
+/// The patch of a junction reaches no further than this many road half widths (and a few metres) along a road,
+/// where the roads meeting leave a long thin wedge between them.
+const PATCH_REACH: f32 = 3.0;
+/// The corner between two roads that meet is rounded with a curve this many times the narrower road's half width
+/// in radius, and no less or more than this many metres.
+const FILLET_PER_WIDTH: f32 = 1.6;
+const FILLET_MIN: f32 = 1.0;
+const FILLET_MAX: f32 = 6.0;
+/// How far along each road, metres, its direction at a junction is taken from.
+const ARM_SPAN: f32 = 3.0;
+/// The roads at a junction that are this near to straight on from one another (degrees) need no patch.
+const STRAIGHT_ON: f32 = 5.0;
+/// How far from a road vertex, along the road and across it, the ground is looked at for its highest: a crease
+/// between two vertices does not come up through the road.
+const REACH_ALONG: f32 = 0.5;
+const REACH_ACROSS: f32 = 0.3;
 /// How many points a road's mesh has across its width.
 const ACROSS: usize = 9;
 /// How far below its edge a road reaches: the face down its side.
@@ -21,6 +45,10 @@ const MAJOR_HALF_WIDTH: f32 = 4.0;
 const MINOR_HALF_WIDTH: f32 = 2.2;
 pub const LANE_HALF_WIDTH: f32 = 2.4;
 pub const PATH_HALF_WIDTH: f32 = 0.7;
+pub const PAVEMENT_HALF_WIDTH: f32 = 0.9;
+pub const WALKWAY_HALF_WIDTH: f32 = 0.5;
+/// How far a pavement stands above the road beside it: the kerb.
+const KERB: f32 = 0.1;
 /// The marked lines stop this far short of the end of a stretch of road that finishes at a
 /// junction: a centre line doesn't run through a junction, and nor does an edge line cross the
 /// mouth of a side road.
@@ -60,6 +88,10 @@ pub enum RoadKind {
     Lane,
     /// A footpath: packed earth, a person wide.
     Path,
+    /// A pavement beside a street in a settlement: flagstones, with a kerb up from the road.
+    Pavement,
+    /// A paved path from a building's door out to the pavement.
+    Walkway,
 }
 
 #[derive(Resource)]
@@ -317,7 +349,7 @@ fn step_cost(map: &TerrainMap, cells: &[Option<RoadKind>], avoid: &[Option<RoadK
     let climb = (map.vertex_height(tx, tz) - map.vertex_height(fx, fz)).abs() / CELL;
     let (slope_penalty, water_cost) = match kind {
         RoadKind::Major => (MAJOR_SLOPE_PENALTY, MAJOR_WATER_COST),
-        RoadKind::Minor | RoadKind::Lane => (MINOR_SLOPE_PENALTY, MINOR_WATER_COST),
+        RoadKind::Minor | RoadKind::Lane | RoadKind::Pavement | RoadKind::Walkway => (MINOR_SLOPE_PENALTY, MINOR_WATER_COST),
         // A walker puts up with more slope than a car, and will wade a stream sooner than go round.
         RoadKind::Path => (PATH_SLOPE_PENALTY, PATH_WATER_COST),
     };
@@ -361,6 +393,8 @@ pub fn half_width(kind: RoadKind) -> f32 {
         RoadKind::Minor => MINOR_HALF_WIDTH,
         RoadKind::Lane => LANE_HALF_WIDTH,
         RoadKind::Path => PATH_HALF_WIDTH,
+        RoadKind::Pavement => PAVEMENT_HALF_WIDTH,
+        RoadKind::Walkway => WALKWAY_HALF_WIDTH,
     }
 }
 
@@ -410,6 +444,26 @@ pub fn road_ribbons(map: &TerrainMap, roads: &RoadNetwork) -> Vec<RoadRibbon> {
     ribbons
 }
 
+/// `ribbon` with points added along any stretch longer than `MAX_POINT_GAP`, evenly, and the width interpolated.
+/// For making the road's mesh: nothing that plans along a road needs the points so close.
+fn refined(ribbon: RoadRibbon) -> RoadRibbon {
+    let mut points = Vec::with_capacity(ribbon.points.len());
+    let mut half_widths = Vec::with_capacity(ribbon.points.len());
+    for i in 0..ribbon.points.len() {
+        points.push(ribbon.points[i]);
+        half_widths.push(ribbon.half_widths[i]);
+        if let Some(&next) = ribbon.points.get(i + 1) {
+            let pieces = (ribbon.points[i].distance(next) / MAX_POINT_GAP).ceil().max(1.0) as usize;
+            for k in 1..pieces {
+                let t = k as f32 / pieces as f32;
+                points.push(ribbon.points[i].lerp(next, t));
+                half_widths.push(ribbon.half_widths[i] + (ribbon.half_widths[i + 1] - ribbon.half_widths[i]) * t);
+            }
+        }
+    }
+    RoadRibbon { points, half_widths, ..ribbon }
+}
+
 /// The vertex colour of a road vertex, which carries what the road shader needs besides position:
 /// r is 1 where lane markings are painted and 0 where they aren't (near junctions), g the road's
 /// half width at the vertex in tens of metres, b is the surface (0 tarmac, 0.5 footpath, 1 farm track), and a is
@@ -418,10 +472,11 @@ pub fn road_vertex_data(kind: RoadKind, painted: bool, edge_line: bool, half_wid
     [
         if kind == RoadKind::Major && painted { 1.0 } else { 0.0 },
         half_width / 10.0,
-        // What the surface is: 0 tarmac, 0.5 a footpath, 1 a farm track.
+        // What the surface is: 0 tarmac, 0.1 paving, 0.5 a footpath, 1 a farm track.
         match kind {
             RoadKind::Minor => 1.0,
             RoadKind::Path => 0.5,
+            RoadKind::Pavement | RoadKind::Walkway => 0.1,
             _ => 0.0,
         },
         if edge_line { 1.0 } else { 0.0 },
@@ -445,6 +500,203 @@ fn junction_mouths(ribbons: &[RoadRibbon]) -> Vec<(Vec2, f32)> {
     mouths
 }
 
+/// The surface that fills the space where roads meet at an angle. Roads end flat at the junction, so on the
+/// outside of a bend there is a gap between them, and where two meet at a shallow angle the corner of one
+/// sticks out past the edge of the other. The patch is cut to the edges of the roads that meet: it takes in the
+/// crotch between neighbouring roads, and rounds off the outside of a bend.
+struct Patch {
+    kind: RoadKind,
+    centre: Vec2,
+    half_width: f32,
+    /// Counter-clockwise round the centre.
+    outline: Vec<Vec2>,
+    /// Whether the edge from each point of the outline to the next is open to be seen, so that it has a face
+    /// down it (the others lie along the edge of a road, which has its own).
+    wall: Vec<bool>,
+}
+
+/// One road leaving a junction.
+struct Arm {
+    kind: RoadKind,
+    /// The way it leaves, a unit vector, and the angle of that.
+    out: Vec2,
+    angle: f32,
+    half_width: f32,
+}
+
+fn left(v: Vec2) -> Vec2 {
+    Vec2::new(-v.y, v.x)
+}
+
+fn cross(a: Vec2, b: Vec2) -> f32 {
+    a.x * b.y - a.y * b.x
+}
+
+/// Where the left edge of `a` meets the right edge of `b`, which is the next arm round: how far along each (negative
+/// if it is behind the junction).
+fn crotch(a: &Arm, b: &Arm) -> Option<(f32, f32)> {
+    let v = -left(b.out) * b.half_width - left(a.out) * a.half_width;
+    let det = cross(a.out, b.out);
+    if det.abs() < 1e-3 {
+        return None;
+    }
+    // Behind the junction (negative), where a wide road meets a narrow one at a wide angle: the edges still cross.
+    Some((cross(v, b.out) / det, -cross(a.out, v) / det))
+}
+
+fn junction_patches(ribbons: &[RoadRibbon]) -> Vec<Patch> {
+    // Every end of a road that finishes at a junction, grouped by where it is.
+    let mut groups: HashMap<(i32, i32), (Vec2, Vec<Arm>)> = HashMap::new();
+    for ribbon in ribbons {
+        let n = ribbon.points.len();
+        if n < 2 {
+            continue;
+        }
+        let ends = [(ribbon.start_junction, 0usize, true), (ribbon.end_junction, n - 1, false)];
+        for (junction, end, forwards) in ends {
+            if !junction {
+                continue;
+            }
+            let at = ribbon.points[end];
+            let along: Vec<usize> = if forwards { (1..n).collect() } else { (0..n - 1).rev().collect() };
+            let Some(&towards) = along.iter().find(|&&i| ribbon.points[i].distance(at) >= ARM_SPAN).or(along.last()) else { continue };
+            let out = (ribbon.points[towards] - at).normalize_or_zero();
+            if out == Vec2::ZERO {
+                continue;
+            }
+            let arm = Arm { kind: ribbon.kind, out, angle: out.y.atan2(out.x), half_width: ribbon.half_widths[end] };
+            let key = ((at.x * 2.0).round() as i32, (at.y * 2.0).round() as i32);
+            groups.entry(key).or_insert_with(|| (at, Vec::new())).1.push(arm);
+        }
+    }
+    let mut patches = Vec::new();
+    let mut keys: Vec<(i32, i32)> = groups.keys().copied().collect();
+    keys.sort_unstable();
+    for key in keys {
+        let (centre, mut arms) = groups.remove(&key).unwrap();
+        if arms.len() < 2 {
+            continue;
+        }
+        arms.sort_by(|a, b| a.angle.total_cmp(&b.angle));
+        if let Some(patch) = patch_for(centre, &arms) {
+            patches.push(patch);
+        }
+    }
+    patches
+}
+
+fn patch_for(centre: Vec2, arms: &[Arm]) -> Option<Patch> {
+    let n = arms.len();
+    // The angle from each arm round to the next, counter-clockwise.
+    let gaps: Vec<f32> = (0..n).map(|i| (arms[(i + 1) % n].angle - arms[i].angle).rem_euclid(std::f32::consts::TAU)).collect();
+    let straight = STRAIGHT_ON.to_radians();
+    if n == 2 && (gaps[0] - std::f32::consts::PI).abs() < straight {
+        return None;
+    }
+    // Between each arm and the next: either they cross, and the patch reaches to where their edges do, or they
+    // are far enough apart that the outside of the bend between them has to be filled.
+    let reach = |a: &Arm| a.half_width * PATCH_REACH + 3.0;
+    let mut meets: Vec<Option<(f32, f32)>> = Vec::new();
+    for i in 0..n {
+        let (a, b) = (&arms[i], &arms[(i + 1) % n]);
+        let crossing = gaps[i] < std::f32::consts::PI - straight && gaps[i] > 0.02;
+        meets.push(if crossing { crotch(a, b) } else { None });
+    }
+    // The corner between neighbouring roads that cross is rounded: how far each edge runs on past the crotch to where
+    // the curve touches it, and the radius of the curve.
+    let mut fillets: Vec<Option<(f32, f32)>> = vec![None; n];
+    for i in 0..n {
+        if let Some((t, s)) = meets[i].filter(|&(t, s)| t > 0.0 && s > 0.0) {
+            let j = (i + 1) % n;
+            let half = gaps[i] * 0.5;
+            let radius = (FILLET_PER_WIDTH * arms[i].half_width.min(arms[j].half_width)).clamp(FILLET_MIN, FILLET_MAX);
+            let run = (radius / half.tan()).min(reach(&arms[i]) - t).min(reach(&arms[j]) - s);
+            if run >= 0.3 {
+                fillets[i] = Some((run, run * half.tan()));
+            }
+        }
+    }
+    // How far along each arm the patch goes: to the crotch on either side of it, and past it to the curve.
+    let mut along = vec![0.0f32; n];
+    for i in 0..n {
+        if let Some((t, s)) = meets[i] {
+            let run = fillets[i].map_or(0.0, |f| f.0);
+            along[i] = along[i].max((t.max(0.0) + run).min(reach(&arms[i])));
+            let j = (i + 1) % n;
+            along[j] = along[j].max((s.max(0.0) + run).min(reach(&arms[j])));
+        }
+    }
+    let edge = |i: usize, d: f32, side: f32| centre + arms[i].out * d + left(arms[i].out) * (side * arms[i].half_width);
+    let mut points: Vec<(Vec2, bool)> = Vec::new();
+    for i in 0..n {
+        let j = (i + 1) % n;
+        // Out along the right edge of the arm, across its end, and back along its left edge.
+        points.push((edge(i, along[i], -1.0), false));
+        points.push((edge(i, along[i], 1.0), false));
+        match meets[i] {
+            // The crotch between this arm and the next, rounded if there is room.
+            Some((t, s)) if t <= reach(&arms[i]) && s <= reach(&arms[j]) => match fillets[i] {
+                Some((run, radius)) => {
+                    let x = edge(i, t, 1.0);
+                    let (to_i, to_j) = (x + arms[i].out * run, x + arms[j].out * run);
+                    let middle = (arms[i].out + arms[j].out).normalize_or_zero();
+                    let centre_of_curve = x + middle * (radius / (gaps[i] * 0.5).sin());
+                    let (a, b) = ((to_i - centre_of_curve).to_angle(), (to_j - centre_of_curve).to_angle());
+                    let turn = (b - a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+                    points.push((to_i, true));
+                    let steps = 6;
+                    for k in 1..steps {
+                        points.push((centre_of_curve + Vec2::from_angle(a + turn * k as f32 / steps as f32) * radius, true));
+                    }
+                    points.push((to_j, false));
+                }
+                // Behind the junction on one of the roads: the corner of its end, and the crossing on the other.
+                None => {
+                    points.push((edge(i, t.max(0.0), 1.0), false));
+                    points.push((edge(j, s.max(0.0), -1.0), false));
+                }
+            },
+            // The edges do not meet within reach: the wedge between them is closed off across, open to be seen.
+            Some(_) => {
+                if let Some(last) = points.last_mut() {
+                    last.1 = true;
+                }
+            }
+            // The outside of a bend: round, from the corner of this arm's end to the corner of the next's.
+            None if gaps[i] > std::f32::consts::PI + straight => {
+                points.push((edge(i, 0.0, 1.0), true));
+                let from = arms[i].angle + std::f32::consts::FRAC_PI_2;
+                let to = arms[j].angle - std::f32::consts::FRAC_PI_2;
+                let to = if to <= from { to + std::f32::consts::TAU } else { to };
+                let steps = 6;
+                for k in 1..steps {
+                    let f = k as f32 / steps as f32;
+                    let radius = arms[i].half_width + (arms[j].half_width - arms[i].half_width) * f;
+                    points.push((centre + Vec2::from_angle(from + (to - from) * f) * radius, true));
+                }
+                points.push((edge(j, 0.0, -1.0), false));
+            }
+            None => {}
+        }
+    }
+    let (outline, wall): (Vec<Vec2>, Vec<bool>) = points.into_iter().unzip();
+    // The widest of the roads sets the surface; the one that lies highest is the one that shows.
+    let top = arms.iter().min_by(|a, b| (kind_rank(a.kind)).cmp(&kind_rank(b.kind)))?;
+    Some(Patch { kind: top.kind, centre, half_width: arms.iter().map(|a| a.half_width).fold(0.0, f32::max), outline, wall })
+}
+
+/// Which of two roads is on top, where they cross: lower is higher.
+fn kind_rank(kind: RoadKind) -> u8 {
+    match kind {
+        RoadKind::Major => 0,
+        RoadKind::Lane => 1,
+        RoadKind::Minor => 2,
+        RoadKind::Path => 3,
+        RoadKind::Pavement => 4,
+        RoadKind::Walkway => 5,
+    }
+}
+
 // A ribbon of the given kind, with vertex heights from the smooth bilinear terrain rather than
 // the grid vertex, raised above any water for bridges. UV 0 tiles the surface texture in world
 // metres; UV 1 is (metres across from the centre line, metres along the road), for the lane
@@ -458,12 +710,15 @@ pub fn lift(kind: RoadKind) -> f32 {
             RoadKind::Lane => MINOR_SINK * 0.5,
             RoadKind::Minor => MINOR_SINK,
             RoadKind::Path => MINOR_SINK * 1.5,
+            // A pavement is up a kerb from the road; a walkway a hair under it, so that the pavement wins where they meet.
+            RoadKind::Pavement => -KERB,
+            RoadKind::Walkway => -KERB + MINOR_SINK * 0.5,
         }
 }
 
 pub fn road_mesh(map: &TerrainMap, ribbons: &[RoadRibbon], kind: RoadKind) -> Mesh {
     let tile = match kind {
-        RoadKind::Major | RoadKind::Lane => ASPHALT_TILE,
+        RoadKind::Major | RoadKind::Lane | RoadKind::Pavement | RoadKind::Walkway => ASPHALT_TILE,
         RoadKind::Minor => TRACK_TILE,
         RoadKind::Path => PATH_TILE,
     };
@@ -497,7 +752,7 @@ pub fn road_mesh(map: &TerrainMap, ribbons: &[RoadRibbon], kind: RoadKind) -> Me
                 let cell = nearest_cell(map, q);
                 // The highest of the mesh at this point and a little way along and across it, so that a crease
                 // in the ground between two of the road's points doesn't come up through it.
-                let around = [Vec2::ZERO, tangent * 1.2, -tangent * 1.2, perp * 0.7, -perp * 0.7];
+                let around = [Vec2::ZERO, tangent * REACH_ALONG, -tangent * REACH_ALONG, perp * REACH_ACROSS, -perp * REACH_ACROSS];
                 let mesh_height = around.iter().map(|d| map.surface_height_at(q + *d)).fold(f32::MIN, f32::max);
                 let ground = mesh_height.max(map.water_level(cell % n, cell / n).unwrap_or(f32::MIN));
                 positions.push([q.x, ground + lift, q.y]);
@@ -518,6 +773,7 @@ pub fn road_mesh(map: &TerrainMap, ribbons: &[RoadRibbon], kind: RoadKind) -> Me
     }
     // The road has thickness: a face down each edge, into the ground, so that it doesn't seem to float
     // over it where the ground falls away.
+    let cap_bases = bases.clone();
     for (base, ribbon_index) in bases {
         let ribbon = &ribbons[ribbon_index];
         let across = ACROSS as u32;
@@ -545,6 +801,123 @@ pub fn road_mesh(map: &TerrainMap, ribbons: &[RoadRibbon], kind: RoadKind) -> Me
                 } else {
                     indices.extend_from_slice(&[first, first + 2, first + 1, first, first + 3, first + 2]);
                 }
+            }
+        }
+    }
+    // And a face across each end where the road stops short (not at a junction, where another road covers it), or
+    // the road is open underneath there and can be seen through.
+    for &(base, ribbon_index) in &cap_bases {
+        let ribbon = &ribbons[ribbon_index];
+        let across = ACROSS as u32;
+        let last = ribbon.points.len() - 1;
+        if last == 0 {
+            continue;
+        }
+        let length: f32 = ribbon.points.windows(2).map(|w| w[0].distance(w[1])).sum();
+        let ends = [(0usize, ribbon.start_junction, ribbon.points[0] - ribbon.points[1], 0.0), (last, ribbon.end_junction, ribbon.points[last] - ribbon.points[last - 1], length)];
+        for (row, junction, away, along_at) in ends {
+            if junction {
+                continue;
+            }
+            let outward = Vec3::new(away.x, 0.0, away.y).normalize_or_zero();
+            let hw = ribbon.half_widths[row];
+            for column in 0..across - 1 {
+                let (t0, t1) = ((base + row as u32 * across + column) as usize, (base + row as u32 * across + column + 1) as usize);
+                let (p0, p1) = (Vec3::from_array(positions[t0]), Vec3::from_array(positions[t1]));
+                let (b0, b1) = (p0 - Vec3::Y * ROAD_THICKNESS, p1 - Vec3::Y * ROAD_THICKNESS);
+                let first = positions.len() as u32;
+                for q in [p0, p1, b1, b0] {
+                    positions.push(q.to_array());
+                    normals.push(outward.to_array());
+                    uv0.push([(q.x + q.z) / tile, q.y / tile]);
+                    uv1.push([0.0, along_at]);
+                    colours.push(road_vertex_data(kind, false, false, hw));
+                }
+                let face = (p1 - p0).cross(b0 - p0);
+                if face.dot(outward) > 0.0 {
+                    indices.extend_from_slice(&[first, first + 1, first + 2, first, first + 2, first + 3]);
+                } else {
+                    indices.extend_from_slice(&[first, first + 2, first + 1, first, first + 3, first + 2]);
+                }
+            }
+        }
+    }
+    // Where roads meet at an angle, a patch over the space between them (see `Patch`).
+    for patch in junction_patches(ribbons).iter().filter(|p| p.kind == kind) {
+        // The outline, with a point at least every few metres, so that the patch follows the ground.
+        let mut outline: Vec<(Vec2, bool)> = Vec::new();
+        for k in 0..patch.outline.len() {
+            let (a, b) = (patch.outline[k], patch.outline[(k + 1) % patch.outline.len()]);
+            let pieces = (a.distance(b) / PATCH_STEP).ceil().max(1.0) as usize;
+            for piece in 0..pieces {
+                outline.push((a.lerp(b, piece as f32 / pieces as f32), patch.wall[k]));
+            }
+        }
+        let height = |q: Vec2| {
+            let around = [Vec2::ZERO, Vec2::X * REACH_ALONG, Vec2::NEG_X * REACH_ALONG, Vec2::Y * REACH_ALONG, Vec2::NEG_Y * REACH_ALONG];
+            let mesh_height = around.iter().map(|d| map.surface_height_at(q + *d)).fold(f32::MIN, f32::max);
+            let cell = nearest_cell(map, q);
+            mesh_height.max(map.water_level(cell % n, cell / n).unwrap_or(f32::MIN)) + lift + PATCH_RAISE
+        };
+        let m = outline.len() as u32;
+        let first = positions.len() as u32;
+        let mut vertex = |q: Vec2, positions: &mut Vec<[f32; 3]>| {
+            positions.push([q.x, height(q), q.y]);
+            normals.push(map.normal_at(q).to_array());
+            uv0.push([q.x / tile, q.y / tile]);
+            // No lane, no edge and no paint: it is all plain road.
+            uv1.push([0.0, 0.0]);
+            colours.push(road_vertex_data(kind, false, false, patch.half_width));
+        };
+        vertex(patch.centre, &mut positions);
+        for ring in 1..=PATCH_RINGS {
+            for &(p, _) in &outline {
+                vertex(patch.centre + (p - patch.centre) * (ring as f32 / PATCH_RINGS as f32), &mut positions);
+            }
+        }
+        let at = |ring: u32, k: u32| first + 1 + (ring - 1) * m + k % m;
+        let mut triangles: Vec<[u32; 3]> = Vec::new();
+        for k in 0..m {
+            triangles.push([first, at(1, k), at(1, k + 1)]);
+            for ring in 1..PATCH_RINGS {
+                triangles.push([at(ring, k), at(ring + 1, k), at(ring + 1, k + 1)]);
+                triangles.push([at(ring, k), at(ring + 1, k + 1), at(ring, k + 1)]);
+            }
+        }
+        // Each wound to face up.
+        for [a, b, c] in triangles {
+            let v = |i: u32| Vec3::from_array(positions[i as usize]);
+            if (v(b) - v(a)).cross(v(c) - v(a)).y >= 0.0 {
+                indices.extend_from_slice(&[a, b, c]);
+            } else {
+                indices.extend_from_slice(&[a, c, b]);
+            }
+        }
+        // A face down each edge that is open to be seen.
+        for k in 0..m {
+            if !outline[k as usize].1 {
+                continue;
+            }
+            let (p0, p1) = (Vec3::from_array(positions[at(PATCH_RINGS, k) as usize]), Vec3::from_array(positions[at(PATCH_RINGS, k + 1) as usize]));
+            let run = Vec3::new(p1.x - p0.x, 0.0, p1.z - p0.z).normalize_or_zero();
+            let mut outward = Vec3::new(-run.z, 0.0, run.x);
+            if outward.dot((p0 + p1) * 0.5 - Vec3::new(patch.centre.x, 0.0, patch.centre.y)) < 0.0 {
+                outward = -outward;
+            }
+            let (b0, b1) = (p0 - Vec3::Y * ROAD_THICKNESS, p1 - Vec3::Y * ROAD_THICKNESS);
+            let face_first = positions.len() as u32;
+            for q in [p0, p1, b1, b0] {
+                positions.push(q.to_array());
+                normals.push(outward.to_array());
+                uv0.push([(q.x + q.z) / tile, q.y / tile]);
+                uv1.push([0.0, 0.0]);
+                colours.push(road_vertex_data(kind, false, false, patch.half_width));
+            }
+            let face = (p1 - p0).cross(b0 - p0);
+            if face.dot(outward) > 0.0 {
+                indices.extend_from_slice(&[face_first, face_first + 1, face_first + 2, face_first, face_first + 2, face_first + 3]);
+            } else {
+                indices.extend_from_slice(&[face_first, face_first + 2, face_first + 1, face_first, face_first + 3, face_first + 2]);
             }
         }
     }
@@ -618,7 +991,7 @@ impl RoadClearance {
         let kind = self.kind_at(p)?;
         // As the mesh is made: the highest of the ground here and a little way around, and the water if there is
         // any, so that a crease in the ground doesn't come up through the road.
-        let around = [Vec2::ZERO, Vec2::X * 1.2, Vec2::NEG_X * 1.2, Vec2::Y * 0.7, Vec2::NEG_Y * 0.7];
+        let around = [Vec2::ZERO, Vec2::X * REACH_ALONG, Vec2::NEG_X * REACH_ALONG, Vec2::Y * REACH_ACROSS, Vec2::NEG_Y * REACH_ACROSS];
         let ground = around.iter().map(|d| map.surface_height_at(p + *d)).fold(f32::MIN, f32::max);
         let n = map.grid_size();
         let cell = nearest_cell(map, p);
@@ -638,7 +1011,7 @@ impl RoadClearance {
                 (clearance < 0.0).then_some((clearance, e.kind))
             })
             // A path across a road is under it; the road wins. Otherwise the deepest in.
-            .min_by(|a, b| (a.1 == RoadKind::Path).cmp(&(b.1 == RoadKind::Path)).then(a.0.total_cmp(&b.0)))
+            .min_by(|a, b| matches!(a.1, RoadKind::Path | RoadKind::Walkway).cmp(&matches!(b.1, RoadKind::Path | RoadKind::Walkway)).then(a.0.total_cmp(&b.0)))
             .map(|(_, kind)| kind)
     }
 
@@ -778,7 +1151,7 @@ pub fn spawn_roads(
     map: &TerrainMap,
     roads: &RoadNetwork,
 ) {
-    let ribbons = road_ribbons(map, roads);
+    let ribbons: Vec<RoadRibbon> = road_ribbons(map, roads).into_iter().map(refined).collect();
     let mut material = |surface: &Handle<Image>, roughness: f32| {
         road_materials.add(RoadMaterial {
             base: StandardMaterial { base_color: Color::WHITE, perceptual_roughness: roughness, reflectance: 0.25, ..default() },
@@ -787,7 +1160,7 @@ pub fn spawn_roads(
     };
     let major = material(&textures.asphalt, 0.92);
     let minor = material(&textures.track, 1.0);
-    for (kind, material) in [(RoadKind::Major, major.clone()), (RoadKind::Lane, major), (RoadKind::Minor, minor.clone()), (RoadKind::Path, minor)] {
+    for (kind, material) in [(RoadKind::Major, major.clone()), (RoadKind::Lane, major.clone()), (RoadKind::Pavement, major.clone()), (RoadKind::Walkway, major), (RoadKind::Minor, minor.clone()), (RoadKind::Path, minor)] {
         commands.spawn((
             crate::terrain::TerrainRoot,
             bevy::light::NotShadowCaster,
@@ -814,12 +1187,25 @@ mod tests {
     }
 
     #[test]
+    fn a_road_that_stops_short_is_closed_off_at_its_end_but_one_that_meets_another_is_not() {
+        let map = TerrainMap::flat(10.0);
+        let triangles = |road: RoadRibbon| match road_mesh(&map, &[road], RoadKind::Path).indices() {
+            Some(Indices::U32(i)) => i.len() / 3,
+            _ => panic!("no indices"),
+        };
+        let (dead, one_end, joined) = (triangles(straight(RoadKind::Path, 20.0, false, false)), triangles(straight(RoadKind::Path, 20.0, true, false)), triangles(straight(RoadKind::Path, 20.0, true, true)));
+        // A face across an end is a strip of ACROSS - 1 quads, two triangles each.
+        let cap = (ACROSS - 1) * 2;
+        assert_eq!((dead - one_end, one_end - joined), (cap, cap));
+    }
+
+    #[test]
     fn a_road_has_a_surface_above_the_ground_to_stand_on_and_the_ground_beside_it_is_not_that() {
         let map = TerrainMap::flat(10.0);
         let clearance = RoadClearance::new(&[straight(RoadKind::Major, 100.0, false, false)]);
         let top = clearance.top_at(&map, Vec2::new(5.0, 1.0)).unwrap();
         assert!((top - (10.0 + lift(RoadKind::Major))).abs() < 1e-3, "{top}");
-        assert!(top > 10.2, "it is raised, as it is drawn");
+        assert!(top > 10.05, "it is raised, as it is drawn");
         assert_eq!(clearance.top_at(&map, Vec2::new(5.0, 9.0)), None, "the verge is the ground");
         let track = RoadClearance::new(&[straight(RoadKind::Minor, 100.0, false, false)]);
         assert!(track.top_at(&map, Vec2::new(5.0, 0.0)).unwrap() < top, "a farm track lies a hair under a main road");
@@ -985,10 +1371,11 @@ mod tests {
         let params = GenParams::default();
         let map = TerrainMap::generate(crate::MAP_SEED, &params);
         let roads = RoadNetwork::generate(&map, &params);
-        let ribbons = road_ribbons(&map, &roads);
+        let ribbons: Vec<RoadRibbon> = road_ribbons(&map, &roads).into_iter().map(refined).collect();
         let mut worst = f32::MIN;
         let mut samples = 0;
         let (mut above, mut shown) = (0, 0);
+        let mut clearances: Vec<f32> = Vec::new();
         for kind in [RoadKind::Major, RoadKind::Minor] {
             let mesh = road_mesh(&map, &ribbons, kind);
             let bevy::mesh::VertexAttributeValues::Float32x3(positions) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") else { panic!() };
@@ -1007,6 +1394,7 @@ mod tests {
                             let top = lerp(a[c], b[c], t).lerp(lerp(a[c + 1], b[c + 1], t), u);
                             let ground = map.surface_height_at(Vec2::new(top.x, top.z));
                             worst = worst.max(ground - top.y);
+                            clearances.push(top.y - ground);
                             samples += 1;
                             if ground > top.y {
                                 above += 1;
@@ -1020,8 +1408,147 @@ mod tests {
                 }
             }
         }
+        // How far the road stands off the ground: low enough that it does not look like a causeway.
+        clearances.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let q = |f: f32| clearances[((clearances.len() - 1) as f32 * f) as usize];
+        eprintln!("clearance: min {:.3} p50 {:.3} p90 {:.3} p99 {:.3} max {:.3}", q(0.0), q(0.5), q(0.9), q(0.99), q(1.0));
+        assert!(q(0.5) < 0.15 && q(0.9) < 0.25 && q(1.0) < 0.8, "the road stands too high off the ground");
         eprintln!("{samples} samples; {above} have ground over the road, by {worst:.3} m at worst");
         assert!(worst < -0.03, "ground reaches {worst} m above the road somewhere");
+    }
+
+    /// Prints places where roads meet at an angle, with where to stand to look at them: `FPS_AT`, `FPS_YAW`.
+    #[test]
+    #[ignore = "prints places to look at"]
+    fn where_to_look_at_junctions() {
+        let params = GenParams::default();
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
+        let roads = RoadNetwork::generate(&map, &params);
+        let ribbons = road_ribbons(&map, &roads);
+        // Every ribbon end that is a junction, with the way the road leaves it.
+        let mut ends: Vec<(Vec2, Vec2, RoadKind)> = Vec::new();
+        for r in &ribbons {
+            let n = r.points.len();
+            if n < 3 {
+                continue;
+            }
+            if r.start_junction {
+                ends.push((r.points[0], (r.points[3.min(n - 1)] - r.points[0]).normalize_or_zero(), r.kind));
+            }
+            if r.end_junction {
+                ends.push((r.points[n - 1], (r.points[n - 1 - 3.min(n - 1)] - r.points[n - 1]).normalize_or_zero(), r.kind));
+            }
+        }
+        let mut shown = 0;
+        for (i, &(at, _, _)) in ends.iter().enumerate() {
+            let here: Vec<&(Vec2, Vec2, RoadKind)> = ends.iter().filter(|e| e.0.distance(at) < 0.5).collect();
+            if here.len() < 3 || ends[..i].iter().any(|e| e.0.distance(at) < 0.5) {
+                continue;
+            }
+            if map.pois.iter().any(|p| p.position.distance(at) < p.radius * 1.5) || map.water_surface_at(at).is_some() {
+                continue;
+            }
+            let kinds: Vec<RoadKind> = here.iter().map(|e| e.2).collect();
+            let angles: Vec<i32> = here.iter().map(|e| e.1.y.atan2(e.1.x).to_degrees() as i32).collect();
+            // Stand 14 m back from the junction along the first road, looking at it.
+            let stand = at + here[0].1 * 14.0;
+            let look = -here[0].1;
+            eprintln!("{kinds:?} at {angles:?}: FPS_AT={:.0},{:.0} FPS_YAW={:.2}", stand.x, stand.y, (-look.x).atan2(-look.y));
+            shown += 1;
+            if shown >= 8 {
+                break;
+            }
+        }
+    }
+
+    /// Prints the junction patch near `JUNCTION_AT=x,z`, and the roads that end there.
+    #[test]
+    #[ignore = "prints a junction"]
+    fn what_the_junction_looks_like() {
+        let Ok(at) = std::env::var("JUNCTION_AT") else { return };
+        let at: Vec<f32> = at.split(',').map(|v| v.parse().unwrap()).collect();
+        let at = Vec2::new(at[0], at[1]);
+        let params = GenParams::default();
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
+        let roads = RoadNetwork::generate(&map, &params);
+        let ribbons = road_ribbons(&map, &roads);
+        for r in &ribbons {
+            let n = r.points.len();
+            for (junction, end) in [(r.start_junction, 0), (r.end_junction, n - 1)] {
+                if r.points[end].distance(at) < 25.0 {
+                    let towards = if end == 0 { r.points[1.min(n - 1)] } else { r.points[n.saturating_sub(2)] };
+                    eprintln!("{:?} end {end}/{n} junction {junction} at {:?} hw {:.1} dir {:.0} deg", r.kind, r.points[end], r.half_widths[end], (towards - r.points[end]).to_angle().to_degrees());
+                }
+            }
+        }
+        for patch in junction_patches(&ribbons).iter().filter(|p| p.centre.distance(at) < 25.0) {
+            eprintln!("patch {:?} at {:?}: {} points", patch.kind, patch.centre, patch.outline.len());
+            for (p, w) in patch.outline.iter().zip(&patch.wall) {
+                eprintln!("   {:6.1} {:6.1} wall {w}  ({:.1} m from centre)", p.x - patch.centre.x, p.y - patch.centre.y, p.distance(patch.centre));
+            }
+        }
+    }
+
+    /// Draws the road meshes seen from above, near `JUNCTION_AT=x,z`, to a PPM at `JUNCTION_OUT`.
+    #[test]
+    #[ignore = "writes an image"]
+    fn the_junction_from_above() {
+        let (Ok(at), Ok(out)) = (std::env::var("JUNCTION_AT"), std::env::var("JUNCTION_OUT")) else { return };
+        let at: Vec<f32> = at.split(',').map(|v| v.parse().unwrap()).collect();
+        let at = Vec2::new(at[0], at[1]);
+        let params = GenParams::default();
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
+        let roads = RoadNetwork::generate(&map, &params);
+        let ribbons: Vec<RoadRibbon> = road_ribbons(&map, &roads).into_iter().map(refined).collect();
+        let (size, scale) = (600usize, 10.0f32);
+        let mut pixels = vec![[20u8, 60, 20]; size * size];
+        let to = |x: f32, z: f32| (((x - at.x) * scale + size as f32 / 2.0) as i32, ((z - at.y) * scale + size as f32 / 2.0) as i32);
+        for (kind, colour) in [(RoadKind::Major, [120u8, 120, 130]), (RoadKind::Lane, [150, 150, 160]), (RoadKind::Minor, [190, 150, 90]), (RoadKind::Path, [170, 130, 80])] {
+            let mesh = road_mesh(&map, &ribbons, kind);
+            let bevy::mesh::VertexAttributeValues::Float32x3(p) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap() else { panic!() };
+            let Some(Indices::U32(idx)) = mesh.indices() else { panic!() };
+            for t in idx.chunks(3) {
+                let v: Vec<Vec3> = t.iter().map(|&i| Vec3::from_array(p[i as usize])).collect();
+                // Only faces that look up.
+                if (v[1] - v[0]).cross(v[2] - v[0]).y <= 0.0 {
+                    continue;
+                }
+                let pts: Vec<(i32, i32)> = v.iter().map(|q| to(q.x, q.z)).collect();
+                let (lo, hi) = ((pts.iter().map(|q| q.0).min().unwrap()).max(0), (pts.iter().map(|q| q.0).max().unwrap()).min(size as i32 - 1));
+                let (zlo, zhi) = ((pts.iter().map(|q| q.1).min().unwrap()).max(0), (pts.iter().map(|q| q.1).max().unwrap()).min(size as i32 - 1));
+                for z in zlo..=zhi {
+                    for x in lo..=hi {
+                        let (a, b, c) = (pts[0], pts[1], pts[2]);
+                        let area = ((b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)) as f32;
+                        if area == 0.0 { continue; }
+                        let w0 = (((b.0 - x) * (c.1 - z) - (b.1 - z) * (c.0 - x)) as f32) / area;
+                        let w1 = (((c.0 - x) * (a.1 - z) - (c.1 - z) * (a.0 - x)) as f32) / area;
+                        let w2 = 1.0 - w0 - w1;
+                        if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
+                            // Shaded by height, so overlaps show.
+                            let shade = ((v[0].y + v[1].y + v[2].y) / 3.0 * 40.0).rem_euclid(30.0) as u8;
+                            pixels[z as usize * size + x as usize] = colour.map(|c| c.saturating_add(shade));
+                        }
+                    }
+                }
+            }
+        }
+        for patch in junction_patches(&ribbons) {
+            for k in 0..patch.outline.len() {
+                let (a, b) = (patch.outline[k], patch.outline[(k + 1) % patch.outline.len()]);
+                let (pa, pb) = (to(a.x, a.y), to(b.x, b.y));
+                let n = (pa.0 - pb.0).abs().max((pa.1 - pb.1).abs()).max(1);
+                for f in 0..=n {
+                    let (x, z) = (pa.0 + (pb.0 - pa.0) * f / n, pa.1 + (pb.1 - pa.1) * f / n);
+                    if x >= 0 && z >= 0 && (x as usize) < size && (z as usize) < size {
+                        pixels[z as usize * size + x as usize] = if patch.wall[k] { [255, 0, 0] } else { [255, 255, 0] };
+                    }
+                }
+            }
+        }
+        let mut data = format!("P6 {size} {size} 255\n").into_bytes();
+        data.extend(pixels.iter().flatten());
+        std::fs::write(out, data).unwrap();
     }
 
     /// Prints places on country roads to stand and look along them (for FPS_AT and FPS_YAW).
@@ -1046,6 +1573,82 @@ mod tests {
                 break;
             }
         }
+    }
+
+    /// A road of `kind` leaving the origin along `direction`, as one that starts at a junction.
+    fn leaving(kind: RoadKind, direction: Vec2) -> RoadRibbon {
+        let points: Vec<Vec2> = (0..=12).map(|i| direction.normalize() * i as f32 * 2.5).collect();
+        RoadRibbon { kind, half_widths: vec![half_width(kind); points.len()], points, start_junction: true, end_junction: false }
+    }
+
+    /// How far `p` is from the surface of a road made by `leaving`, as the mesh has it: flat ended at the origin.
+    fn off(road: &RoadRibbon, p: Vec2) -> f32 {
+        let (d, hw) = (road.points[1].normalize(), road.half_widths[0]);
+        let length = road.points.last().unwrap().length();
+        let (along, across) = (p.dot(d), cross(d, p).abs());
+        Vec2::new((-along).max(along - length).max(0.0), (across - hw).max(0.0)).length()
+    }
+
+    fn inside(polygon: &[Vec2], p: Vec2) -> bool {
+        let mut crossings = 0;
+        for k in 0..polygon.len() {
+            let (a, b) = (polygon[k], polygon[(k + 1) % polygon.len()]);
+            if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x) {
+                crossings += 1;
+            }
+        }
+        crossings % 2 == 1
+    }
+
+    #[test]
+    fn the_gap_on_the_outside_of_a_bend_is_covered_by_the_junction_and_a_straight_join_needs_nothing() {
+        let (west, north) = (leaving(RoadKind::Major, Vec2::NEG_X), leaving(RoadKind::Major, Vec2::Y));
+        let patches = junction_patches(&[west.clone(), north.clone()]);
+        assert_eq!(patches.len(), 1);
+        // A point outside the corner, where neither road reaches.
+        let gap = Vec2::new(2.5, -2.5);
+        assert!(off(&west, gap) > 0.5 && off(&north, gap) > 0.5, "neither road covers it");
+        assert!(inside(&patches[0].outline, gap), "the patch does");
+        // Two roads that run straight on into one another leave no gap.
+        let straight = junction_patches(&[leaving(RoadKind::Major, Vec2::NEG_X), leaving(RoadKind::Major, Vec2::X)]);
+        assert!(straight.is_empty());
+        // And a road alone at its end has nothing to meet.
+        assert!(junction_patches(&[leaving(RoadKind::Major, Vec2::X)]).is_empty());
+    }
+
+    #[test]
+    fn where_a_road_forks_into_two_at_a_shallow_angle_the_patch_does_not_reach_past_their_edges() {
+        // A stem that forks into two roads 40 degrees apart: the corner of each branch's flat end would stick out
+        // past the other's edge.
+        let stem = leaving(RoadKind::Major, Vec2::NEG_X);
+        let (a, b) = (leaving(RoadKind::Major, Vec2::from_angle(20f32.to_radians())), leaving(RoadKind::Major, Vec2::from_angle(-20f32.to_radians())));
+        let patches = junction_patches(&[stem.clone(), a.clone(), b.clone()]);
+        assert_eq!(patches.len(), 1);
+        // Everything it covers is on a road, give or take the little the rounded corner between the branches takes.
+        let outline = &patches[0].outline;
+        for k in 0..outline.len() {
+            let (p, q) = (outline[k], outline[(k + 1) % outline.len()]);
+            for f in [0.0, 0.5] {
+                let at = p.lerp(q, f);
+                let away = off(&stem, at).min(off(&a, at)).min(off(&b, at));
+                assert!(away < 1.0, "{at} is {away} m off the roads");
+            }
+        }
+    }
+
+    #[test]
+    fn a_junction_patch_is_a_surface_just_above_the_roads_with_a_face_down_its_open_edges() {
+        let map = TerrainMap::flat(10.0);
+        let ribbons = [leaving(RoadKind::Major, Vec2::NEG_X), leaving(RoadKind::Major, Vec2::Y)];
+        let with = road_mesh(&map, &ribbons, RoadKind::Major);
+        let bevy::mesh::VertexAttributeValues::Float32x3(p) = with.attribute(Mesh::ATTRIBUTE_POSITION).expect("positions") else { panic!() };
+        let top = 10.0 + ROAD_LIFT + PATCH_RAISE;
+        assert!(p.iter().any(|v| v[0] > 1.0 && v[2] < -1.0 && (v[1] - top).abs() < 1e-3), "a patch vertex out in the gap");
+        // Its faces all look up, or out.
+        let Some(Indices::U32(indices)) = with.indices().map(|i| match i { Indices::U32(v) => Indices::U32(v.clone()), Indices::U16(v) => Indices::U32(v.iter().map(|&x| x as u32).collect()) }) else { panic!() };
+        assert!(indices.len() % 3 == 0 && indices.iter().all(|&i| (i as usize) < p.len()));
+        let walls = p.iter().filter(|v| (v[1] - (top - ROAD_THICKNESS)).abs() < 1e-3 && v[0] > 0.5 && v[2] < -0.5).count();
+        assert!(walls > 0, "the rounded corner has a face down it");
     }
 
     #[test]

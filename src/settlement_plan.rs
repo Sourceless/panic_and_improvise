@@ -120,6 +120,9 @@ impl SettlementPlan {
 
 /// Buildings stay inside this fraction of the settlement's radius.
 const BUILD_LIMIT: f32 = 0.95;
+/// A building is set back at least this far from the edge of the street it faces, metres: room for a pavement and
+/// a little front garden.
+const MIN_SETBACK: f32 = 2.8;
 /// A building keeps this far from the edge of a road, and from another building, metres.
 const ROAD_GAP: f32 = 1.0;
 const BUILDING_GAP: f32 = 1.2;
@@ -188,8 +191,8 @@ impl Tier {
     /// How far back from the street houses stand (low, high).
     fn setbacks(self) -> (f32, f32) {
         match self {
-            Tier::Town => (1.5, 3.5),
-            _ => (2.0, 5.0),
+            Tier::Town => (MIN_SETBACK, 4.5),
+            _ => (MIN_SETBACK, 5.5),
         }
     }
 }
@@ -597,6 +600,7 @@ fn grow_lane(rng: &mut Rng, map: &TerrainMap, centre: Vec2, radius: f32, start: 
 fn building_on_frontage(kind: BuildingKind, street_point: Vec2, tangent: Vec2, half_width: f32, side: f32, setback: f32, width: f32, depth: f32, wall_height: f32) -> Building {
     let normal = left_of(tangent) * side;
     let front = -normal;
+    let setback = setback.max(MIN_SETBACK);
     Building {
         kind,
         centre: street_point + normal * (half_width + setback + depth * 0.5),

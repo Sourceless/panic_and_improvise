@@ -33,7 +33,7 @@ pub fn spawn_fill(
     plan: &SettlementPlan,
     colliders: &mut Colliders,
 ) {
-    let hedge_points = spawn_field_tiling(commands, meshes, materials, field_materials, textures, map, zones, roads, params, colliders);
+    let hedge_points = spawn_field_tiling(commands, meshes, materials, field_materials, textures, map, zones, roads, params, plan, colliders);
     if !crate::world::skip("trees") {
         // No tree grows through a house, a barn or a shed.
         let built = plan.layouts.iter().flat_map(|l| &l.buildings).chain(&plan.sheds).map(|b| (b.centre, b.shape()));
@@ -69,6 +69,7 @@ fn spawn_field_tiling(
     zones: &ZoneMap,
     roads: &RoadNetwork,
     params: &GenParams,
+    plan: &SettlementPlan,
     colliders: &mut Colliders,
 ) -> Vec<Vec2> {
     let n = map.grid_size();
@@ -130,6 +131,9 @@ fn spawn_field_tiling(
     // Out in the country a road has a hedge, a wall or a fence down each side of it.
     let roadside = roadside_barriers(map, &ribbons, &wall_segs);
     wall_segs.extend(clear_of_roads(&roadside, &clearance));
+    // And they stop short of a house, a barn or a shed, rather than running through it.
+    let buildings = crate::vegetation::Keepout::new(plan.layouts.iter().flat_map(|l| &l.buildings).chain(&plan.sheds).map(|b| (b.centre, b.shape())));
+    let wall_segs = clear_of_buildings(&wall_segs, &buildings);
     if !crate::world::skip("boundaries") {
         spawn_field_boundaries(commands, meshes, materials, textures, map, &wall_segs, colliders);
     }
@@ -215,6 +219,43 @@ pub fn clear_of_roads(segs: &[Seg], clearance: &RoadClearance) -> Vec<Seg> {
         }
     }
     kept
+}
+
+/// How far a wall or a hedge stays from a building: a hedge is about two metres through, and it should not
+/// lean on a wall.
+pub const WALL_BUILDING_MARGIN: f32 = 1.5;
+
+/// The parts of `segs` that are clear of every building by `WALL_BUILDING_MARGIN`.
+pub fn clear_of_buildings(segs: &[Seg], buildings: &crate::vegetation::Keepout) -> Vec<Seg> {
+    const STEP: f32 = 0.5;
+    let mut kept = Vec::with_capacity(segs.len());
+    for seg in segs {
+        let length = seg.a.distance(seg.b);
+        let steps = ((length / STEP).ceil() as usize).max(1);
+        let open = |i: usize| !buildings.near_a_building(seg.a.lerp(seg.b, i as f32 / steps as f32), WALL_BUILDING_MARGIN);
+        let mut start: Option<usize> = None;
+        for i in 0..=steps {
+            match (open(i), start) {
+                (true, None) => start = Some(i),
+                (false, Some(from)) => {
+                    start = None;
+                    push_run(&mut kept, seg, from, i - 1, steps);
+                }
+                _ => {}
+            }
+        }
+        if let Some(from) = start {
+            push_run(&mut kept, seg, from, steps, steps);
+        }
+    }
+    kept
+}
+
+fn push_run(kept: &mut Vec<Seg>, seg: &Seg, from: usize, to: usize, steps: usize) {
+    let (a, b) = (seg.a.lerp(seg.b, from as f32 / steps as f32), seg.a.lerp(seg.b, to as f32 / steps as f32));
+    if a.distance(b) >= MIN_WALL_PIECE {
+        kept.push(Seg { a, b, pair: seg.pair });
+    }
 }
 
 fn scatter_seeds(map: &TerrainMap, is_farmland: &[bool], params: &GenParams) -> Vec<usize> {
@@ -1184,6 +1225,56 @@ mod tests {
         for p in hedge_tree_points(&kept) {
             assert!(clearance.clearance(p) > WALL_ROAD_MARGIN - 0.1);
         }
+    }
+
+    #[test]
+    fn a_wall_that_would_run_through_a_building_stops_short_of_it_on_both_sides() {
+        use crate::collision::Shape;
+        let house = Shape::Circle { centre: Vec2::new(50.0, 0.0), radius: 5.0 };
+        let buildings = crate::vegetation::Keepout::new([(Vec2::new(50.0, 0.0), house)]);
+        let through = Seg { a: Vec2::new(0.0, 0.0), b: Vec2::new(100.0, 0.0), pair: (1, 2) };
+        let clear = Seg { a: Vec2::new(0.0, 40.0), b: Vec2::new(100.0, 40.0), pair: (1, 3) };
+        let kept = clear_of_buildings(&[through, clear], &buildings);
+        let on_the_line: Vec<&Seg> = kept.iter().filter(|s| s.pair == (1, 2)).collect();
+        assert_eq!(on_the_line.len(), 2, "one piece each side of the house");
+        for s in &on_the_line {
+            for p in [s.a, s.b] {
+                assert!(p.distance(Vec2::new(50.0, 0.0)) >= 5.0 + WALL_BUILDING_MARGIN - 0.6, "{p}");
+            }
+        }
+        assert!(on_the_line.iter().all(|s| (s.a.x - 50.0).abs() > 5.0 && (s.b.x - 50.0).abs() > 5.0));
+        let far: Vec<&Seg> = kept.iter().filter(|s| s.pair == (1, 3)).collect();
+        assert_eq!((far.len(), far[0].a, far[0].b), (1, clear.a, clear.b), "a wall far from it is untouched");
+    }
+
+    #[test]
+    fn no_wall_or_hedge_is_left_standing_in_a_building_on_a_real_map() {
+        use crate::roads::{road_ribbons, RoadNetwork};
+        let (map, zones, params) = generate();
+        let is_farmland = farmland(&map, &zones);
+        let seeds = scatter_seeds(&map, &is_farmland, &params);
+        let owner = smooth_owners(&map, &is_farmland, claim_regions(&map, &is_farmland, &seeds, &params), SMOOTH_PASSES);
+        let owner = split_disconnected_regions(&map, &is_farmland, &owner);
+        let labels: Vec<u32> = owner.iter().map(|o| o.unwrap_or(OPEN)).collect();
+        let segs = Contour::build(map.grid_size(), &labels, map.seed, None, Smoothing::FIELD).segs;
+        let roads = RoadNetwork::generate(&map, &params);
+        let ribbons = road_ribbons(&map, &roads);
+        let mut all = segs.clone();
+        all.extend(roadside_barriers(&map, &ribbons, &segs));
+        let plan = SettlementPlan::generate(&map, &roads);
+        let buildings = crate::vegetation::Keepout::new(plan.layouts.iter().flat_map(|l| &l.buildings).chain(&plan.sheds).map(|b| (b.centre, b.shape())));
+        let inside = |segs: &[Seg]| {
+            segs.iter()
+                .flat_map(|s| {
+                    let steps = s.a.distance(s.b).ceil().max(1.0) as usize;
+                    (0..=steps).map(move |i| s.a.lerp(s.b, i as f32 / steps as f32))
+                })
+                .filter(|&p| buildings.near_a_building(p, 0.0))
+                .count()
+        };
+        let kept = clear_of_buildings(&all, &buildings);
+        assert_eq!(inside(&kept), 0, "a wall stands in a building ({} points before)", inside(&all));
+        assert!(kept.len() > all.len() / 2, "and most walls are still there: {} of {}", kept.len(), all.len());
     }
 
     /// How many solids a lookup has to look at on a real map's trees and field boundaries, for the

@@ -910,6 +910,12 @@ impl Keepout {
         ((p.x / Self::BUCKET).floor() as i32, (p.y / Self::BUCKET).floor() as i32)
     }
 
+    /// Whether `p` is within `margin` of the wall of something built (or in it).
+    pub fn near_a_building(&self, p: Vec2, margin: f32) -> bool {
+        let (kx, kz) = Self::key(p);
+        (-1..=1).any(|dz| (-1..=1).any(|dx| self.buckets.get(&(kx + dx, kz + dz)).is_some_and(|shapes| shapes.iter().any(|s| s.separation(p).0 < margin))))
+    }
+
     /// Whether a tree at `p` would stand in or against something built. (Nothing is bigger than a
     /// bucket, so the neighbouring buckets are all there is to look in.)
     pub fn blocks(&self, p: Vec2) -> bool {

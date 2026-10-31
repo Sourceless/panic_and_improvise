@@ -220,6 +220,8 @@ const REROUTE_EVERY: f32 = 0.6;
 
 /// How near, metres, a point of a route has to be to count as reached (and not further than a floor away).
 const REACHED: f32 = 0.4;
+/// Close enough to a point to have reached it whatever comes next.
+const REACHED_CLOSE: f32 = 0.25;
 const REACHED_HEIGHT: f32 = 0.15;
 
 /// A body going after something that moves: it heads straight for it where it can, and where something is in
@@ -262,7 +264,18 @@ impl Pursuit {
                 self.replan_in = REROUTE_EVERY * (0.7 + 0.6 * rand());
             }
         }
-        while self.route.first().is_some_and(|&p| xz(at).distance(xz(p)) < REACHED && (at.y - p.y).abs() < REACHED_HEIGHT) {
+        // A point that is nearly reached is done with only if the next can be gone to straight from here: a turn
+        // is not to be cut short when the way round the corner is a step or a stair that has to be come at from
+        // the right place.
+        while let Some(&p) = self.route.first() {
+            let distance = xz(at).distance(xz(p));
+            if distance >= REACHED || (at.y - p.y).abs() >= REACHED_HEIGHT {
+                break;
+            }
+            let straight_on = distance < REACHED_CLOSE || self.route.get(1).is_none_or(|&next| clear_between(at, next, &mut stand));
+            if !straight_on {
+                break;
+            }
             self.route.remove(0);
         }
         xz(self.route.first().copied().unwrap_or(goal))

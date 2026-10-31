@@ -587,6 +587,86 @@ mod tests {
         assert_ne!(bot.mode, Mode::Down);
     }
 
+    /// Prints the plan of the building at `BUILDING_AT=x,z`.
+    #[test]
+    #[ignore = "prints a plan"]
+    fn what_the_building_is_like() {
+        use crate::building::planned;
+        let Ok(at) = std::env::var("BUILDING_AT") else { return };
+        let at: Vec<f32> = at.split(',').map(|v| v.parse().unwrap()).collect();
+        let at = Vec2::new(at[0], at[1]);
+        let params = crate::params::GenParams::default();
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
+        let roads = crate::roads::RoadNetwork::generate(&map, &params);
+        let settlements = crate::settlement_plan::SettlementPlan::generate(&map, &roads);
+        for b in settlements.layouts.iter().flat_map(|l| &l.buildings).filter(|b| b.centre.distance(at) < 1.0) {
+            let ground = crate::settlement::ground_under(&map, b);
+            let mut rng = crate::settlement_plan::Rng::from_position(b.centre);
+            let (layouts, _) = planned(b, &ground.site, &mut rng);
+            eprintln!("{:?} {}x{} wall {}", b.kind, b.width, b.depth, b.wall_height);
+            for (v, layout) in layouts.iter().enumerate() {
+                eprintln!(" volume {v}: inside {:?}", layout.inside);
+                for (s, storey) in layout.storeys.iter().enumerate() {
+                    eprintln!("  storey {s} height {} roots {:?} doors {:?}", storey.height, storey.roots, storey.doors_outside.iter().map(|d| (d.side, d.along)).collect::<Vec<_>>());
+                    for (i, r) in storey.rooms.iter().enumerate() {
+                        eprintln!("   room {i} {:?} {:?}", r.kind, r.rect);
+                    }
+                    for st in &storey.stairs_up {
+                        eprintln!("   stair {:?} {:?}", st.rect, st.climbs);
+                    }
+                    eprintln!("   voids {:?}", storey.voids);
+                }
+            }
+        }
+    }
+
+    /// Walks a bot up the stair of the building at `BUILDING_AT=x,z`, printing where it goes.
+    #[test]
+    #[ignore = "prints a walk"]
+    fn how_the_bot_walks_through_the_building() {
+        use crate::building::{plan::Layout, planned};
+        let Ok(at) = std::env::var("BUILDING_AT") else { return };
+        let at: Vec<f32> = at.split(',').map(|v| v.parse().unwrap()).collect();
+        let at = Vec2::new(at[0], at[1]);
+        let params = crate::params::GenParams::default();
+        let flat = TerrainMap::flat(0.0);
+        let map = TerrainMap::generate(crate::MAP_SEED, &params);
+        let roads = crate::roads::RoadNetwork::generate(&map, &params);
+        let settlements = crate::settlement_plan::SettlementPlan::generate(&map, &roads);
+        for b in settlements.layouts.iter().flat_map(|l| &l.buildings).filter(|b| b.centre.distance(at) < 1.0) {
+            let ground = crate::settlement::ground_under(&map, b);
+            let mut rng = crate::settlement_plan::Rng::from_position(b.centre);
+            let (layouts, model) = planned(b, &ground.site, &mut rng);
+            let layout: &Layout = &layouts[0];
+            let mut colliders = Colliders::default();
+            for solid in model.solids(Vec3::ZERO, 0.0) {
+                colliders.add(solid);
+            }
+            let door = layout.storeys[0].doors_outside.iter().find(|d| d.side == crate::building::plan::Side::Front).unwrap();
+            let upstairs = layout.storeys[1].rooms.iter().max_by(|a, b| a.rect.area().total_cmp(&b.rect.area())).unwrap().rect.centre();
+            let floor = layout.floor_of(1);
+            let start = Vec2::new(door.along, layout.inside.z0 - 2.0);
+            let mut pursuit = Pursuit::default();
+            let (mut at, mut feet, mut falling) = (start, 0.0f32, 0.0f32);
+            let goal = Vec3::new(upstairs.x, floor, upstairs.y);
+            let route = crate::navigation::find_route(Vec3::new(2.06, 0.0, 2.56), goal, crate::navigation::SEARCH_LIMIT, |p, f| stand(&flat, &colliders, p, f, ROUTE_BODY));
+            eprintln!("route from the stuck place: arrives {} {:?}", route.arrives, route.points.iter().map(|p| (p.x, p.y, p.z)).map(|(x, y, z)| ((x * 100.0).round() / 100.0, (y * 100.0).round() / 100.0, (z * 100.0).round() / 100.0)).take(8).collect::<Vec<_>>());
+            for x in [1.0f32, 1.3, 1.5, 1.7, 2.06, 2.5, 3.0] {
+                let row: Vec<String> = [0.0f32, 0.2, 0.4].iter().map(|&f| format!("f{f}:{:?}", stand(&flat, &colliders, Vec2::new(x, 3.36), f, ROUTE_BODY).map(|h| (h * 100.0).round() / 100.0))).collect();
+                eprintln!("stand at x {x}: {}", row.join("  "));
+            }
+            for step in 0..(60.0 / 0.05) as usize {
+                let mut routes_left = 1;
+                let aim = pursuit.aim(Vec3::new(at.x, feet, at.y), goal, 0.05, &mut routes_left, || 0.5, |p, f| stand(&flat, &colliders, p, f, ROUTE_BODY));
+                let velocity = (aim - at).normalize_or_zero() * WALK;
+                (at, feet) = walk(&flat, &colliders, at, feet, &mut falling, velocity, 0.05, BODY);
+                if step % 40 == 0 {
+                    eprintln!("t {:5.1}  at ({:6.2}, {:6.2}) feet {:.2}  aim ({:6.2}, {:6.2})", step as f32 * 0.05, at.x, at.y, feet, aim.x, aim.y);
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_bot_goes_up_the_stair_of_any_building_with_a_floor_above_to_the_player_on_it() {
         use crate::building::{plan::Layout, planned};

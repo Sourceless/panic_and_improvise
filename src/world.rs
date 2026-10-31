@@ -12,9 +12,50 @@ use crate::params::GenParams;
 use crate::road_material::RoadMaterial;
 use crate::roads::{spawn_roads, RoadNetwork};
 use crate::settlement_plan::SettlementPlan;
+use crate::sketch::Sketch;
 use crate::terrain::{spawn_terrain, TerrainMaterial, TerrainTextures};
 use crate::water_material::WaterMaterial;
 use crate::zones::ZoneMap;
+
+/// What a world is planned from, before any of it is built: the land use, the roads, and the settlements along them.
+/// Making it takes a while and needs no renderer, so it can be done on another thread.
+pub struct Plans {
+    pub zones: ZoneMap,
+    pub roads: RoadNetwork,
+    pub plan: SettlementPlan,
+}
+
+/// Waits in the world, for the startup systems to find, when the plans were made ahead of them.
+#[derive(Resource)]
+pub struct PlansMade(pub Option<Plans>);
+
+/// Where in the whole job of making a world the planning begins and ends, for the loading bar.
+const PLANS_FROM: f32 = crate::map::MAP_JOB;
+const PLANS_TO: f32 = 0.85;
+
+/// Plans the world for `map`: its land use, its roads, and the villages along them. `sketch` is drawn on as it goes,
+/// and says what is being done.
+pub fn plan_world(map: &TerrainMap, params: &GenParams, sketch: &Sketch) -> Plans {
+    let span = PLANS_TO - PLANS_FROM;
+    sketch.say("Marking out fields and woods", PLANS_FROM);
+    let zones = ZoneMap::generate(map, params);
+    sketch.zones(&zones);
+    sketch.say("Laying the roads", PLANS_FROM + span * 0.05);
+    let mut roads = RoadNetwork::generate(map, params);
+    sketch.roads(&crate::roads::road_ribbons(map, &roads));
+    sketch.say("Planning the villages", PLANS_FROM + span * 0.9);
+    // Each settlement is planned along the roads that reach it, and brings its own lanes.
+    let mut plan = SettlementPlan::generate(map, &roads);
+    plan.sheds = crate::fill::shed_buildings(map, &zones);
+    roads.add_ribbons(plan.lanes());
+    let ribbons = crate::roads::road_ribbons(map, &roads);
+    sketch.roads(&ribbons);
+    // Pavements beside the streets of the settlements, and a path from each door to them.
+    roads.add_ribbons(crate::paving::lay(map, &plan, &ribbons));
+    sketch.buildings(plan.layouts.iter().flat_map(|l| l.buildings.iter()).chain(plan.sheds.iter()));
+    sketch.say("Building the world", PLANS_TO);
+    Plans { zones, roads, plan }
+}
 
 /// Generates the zone map and road network for `map`, spawns all world entities, and inserts
 /// the zone map and road network as resources.
@@ -31,12 +72,26 @@ pub fn build_world(
     map: &TerrainMap,
     params: &GenParams,
 ) {
-    let zones = ZoneMap::generate(map, params);
-    let mut roads = RoadNetwork::generate(map, params);
-    // Each settlement is planned along the roads that reach it, and brings its own lanes.
-    let mut plan = SettlementPlan::generate(map, &roads);
-    plan.sheds = crate::fill::shed_buildings(map, &zones);
-    roads.add_ribbons(plan.lanes());
+    let plans = plan_world(map, params, &Sketch::default());
+    build_world_from(commands, meshes, standard, terrain, fields, road_materials, waters, images, textures, map, params, plans);
+}
+
+/// As [`build_world`], for a world that has been planned already.
+pub fn build_world_from(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    standard: &mut Assets<StandardMaterial>,
+    terrain: &mut Assets<TerrainMaterial>,
+    fields: &mut Assets<FieldMaterial>,
+    road_materials: &mut Assets<RoadMaterial>,
+    waters: &mut Assets<WaterMaterial>,
+    images: &mut Assets<Image>,
+    textures: &TerrainTextures,
+    map: &TerrainMap,
+    params: &GenParams,
+    plans: Plans,
+) {
+    let Plans { zones, roads, plan } = plans;
     // Everything solid that the generators place is collected here for the player to bump into.
     let mut colliders = Colliders::default();
     spawn_terrain(commands, meshes, standard, terrain, textures, map, &zones, waters, images, &plan, &mut colliders);
